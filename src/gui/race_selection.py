@@ -10,6 +10,7 @@ import os
 import subprocess
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from src.f1_data import get_race_weekends_by_year, get_race_weekends_by_place, get_all_unique_race_names, load_session
 from src.gui.settings_dialog import SettingsDialog
 from src.lib.season import get_season
@@ -253,13 +254,36 @@ class RaceSelectionWindow(QMainWindow):
             if w:
                 w.setParent(None)
 
-        # add buttons for each session (launch playback in separate process)
+        # determine which sessions have already occurred (data available)
+        now = datetime.now(timezone.utc)
+        session_dates = ev.get("session_dates", {})
+
+        available_sessions = []
         for s in sessions:
-            btn = QPushButton(s)
-            btn.clicked.connect(
-                lambda _, sname=s, e=ev: self._on_session_button_clicked(e, sname)
-            )
-            self.session_list_layout.addWidget(btn)
+            session_date_str = session_dates.get(s)
+            if session_date_str:
+                try:
+                    session_dt = datetime.fromisoformat(session_date_str)
+                    if session_dt <= now:
+                        available_sessions.append(s)
+                except Exception:
+                    available_sessions.append(s)
+            else:
+                # no date info means historical data — assume available
+                available_sessions.append(s)
+
+        if not available_sessions:
+            label = QLabel("Sessions not available")
+            label.setAlignment(Qt.AlignCenter)
+            self.session_list_layout.addWidget(label)
+        else:
+            for s in sessions:
+                if s in available_sessions:
+                    btn = QPushButton(s)
+                    btn.clicked.connect(
+                        lambda _, sname=s, e=ev: self._on_session_button_clicked(e, sname)
+                    )
+                    self.session_list_layout.addWidget(btn)
 
     def _on_session_button_clicked(self, ev, session_label):
         """Launch main.py in a separate process to run the selected session.

@@ -958,6 +958,14 @@ def get_race_weekends_by_year(year):
     for _, event in schedule.iterrows():
         if event.is_testing():
             continue
+
+        session_dates = {}
+        for i in range(1, 6):
+            session_name = event.get(f"Session{i}")
+            session_date = event.get(f"Session{i}Date")
+            if session_name and pd.notna(session_date):
+                session_dates[str(session_name)] = session_date.isoformat()
+
         weekends.append(
             {
                 "round_number": event["RoundNumber"],
@@ -965,6 +973,7 @@ def get_race_weekends_by_year(year):
                 "date": str(event["EventDate"].date()),
                 "country": event["Country"],
                 "type": event["EventFormat"],
+                "session_dates": session_dates,
             }
         )
     return weekends
