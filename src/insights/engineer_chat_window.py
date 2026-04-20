@@ -279,6 +279,9 @@ class EngineerChatWindow(PitWallWindow):
         self._latest_context = {}
         self._session_info = {}
         self._leaderboard = ""
+        self._tyre_history: dict[str, dict] = {}   # code -> {tyre, lap}
+        self._pitted_drivers: dict[str, int] = {}  # code -> lap number of most recent pit
+        self._current_tyres: dict[str, str] = {}   # code -> compound name
         super().__init__()
         self.setWindowTitle("BoxBox — Race Engineer")
         self.setGeometry(100, 100, 520, 720)
@@ -440,15 +443,35 @@ class EngineerChatWindow(PitWallWindow):
         if data.get("session_info"):
             self._session_info = data["session_info"]
 
-        # Build ranked leaderboard from live driver positions
+        # Tyre compound lookup (matches src/lib/tyres.py)
+        _COMPOUND = {0: "Soft", 1: "Medium", 2: "Hard", 3: "Inter", 4: "Wet"}
+
+        # Build ranked leaderboard, track tyre history, detect pit stops
         drivers = frame.get("drivers", {})
         if drivers:
             ranked = sorted(
                 drivers.items(),
                 key=lambda item: int(item[1].get("position") or 99),
             )
+
+            for code, d in drivers.items():
+                raw_tyre = d.get("tyre")
+                compound = _COMPOUND.get(int(raw_tyre), "Unknown") if raw_tyre is not None else "Unknown"
+                lap = int(d.get("lap") or 0)
+
+                self._current_tyres[code] = compound
+
+                prev = self._tyre_history.get(code)
+                if prev is None:
+                    # First frame — initialise without treating as a pit stop
+                    self._tyre_history[code] = {"tyre": raw_tyre, "lap": lap}
+                elif prev["tyre"] != raw_tyre and raw_tyre is not None:
+                    # Tyre compound changed — driver pitted
+                    self._pitted_drivers[code] = lap
+                    self._tyre_history[code] = {"tyre": raw_tyre, "lap": lap}
+
             self._leaderboard = " | ".join(
-                f"P{int(d.get('position', i + 1))}: {code}"
+                f"P{int(d.get('position', i + 1))}: {code} ({self._current_tyres.get(code, '?')}, lap {int(d.get('lap') or 0)})"
                 for i, (code, d) in enumerate(ranked)
             )
 
@@ -475,14 +498,18 @@ class EngineerChatWindow(PitWallWindow):
         ctx = dict(self._latest_context)
         session_info = dict(self._session_info)
         leaderboard = self._leaderboard
+        current_tyres = dict(self._current_tyres)
+        pitted_drivers = dict(self._pitted_drivers)
         thread = threading.Thread(
             target=self._call_groq,
-            args=(question, ctx, session_info, leaderboard, signals),
+            args=(question, ctx, session_info, leaderboard, current_tyres, pitted_drivers, signals),
             daemon=True,
         )
         thread.start()
 
-    def _build_telemetry_context(self, ctx, session_info, leaderboard, grid: str) -> str:
+    def _build_telemetry_context(
+        self, ctx, session_info, leaderboard, current_tyres, pitted_drivers, grid: str
+    ) -> str:
         if ctx.get("frame_index") is None:
             return "No live telemetry connected yet."
         lines = []
@@ -507,11 +534,22 @@ class EngineerChatWindow(PitWallWindow):
             )
         if leaderboard:
             lines.append(f"Live leaderboard: {leaderboard}")
+        if current_tyres:
+            tyre_str = " | ".join(f"{code}: {compound}" for code, compound in sorted(current_tyres.items()))
+            lines.append(f"Current tyres: {tyre_str}")
+        if pitted_drivers:
+            pit_str = " | ".join(
+                f"{code} pitted on lap {lap}"
+                for code, lap in sorted(pitted_drivers.items(), key=lambda x: x[1])
+            )
+            lines.append(f"Pit stops so far: {pit_str}")
+        else:
+            lines.append("Pit stops so far: No pit stops yet")
         if grid:
             lines.append(grid)
         return "\n".join(lines)
 
-    def _call_groq(self, question, ctx, session_info, leaderboard, signals):
+    def _call_groq(self, question, ctx, session_info, leaderboard, current_tyres, pitted_drivers, signals):
         api_key = os.environ.get("GROQ_API_KEY", "")
         if not api_key:
             signals.error.emit("GROQ_API_KEY environment variable is not set.")
@@ -520,7 +558,7 @@ class EngineerChatWindow(PitWallWindow):
             # Fetch live grid from OpenF1 (cached, runs in this background thread)
             grid = _fetch_openf1_drivers()
 
-            telemetry_ctx = self._build_telemetry_context(ctx, session_info, leaderboard, grid)
+            telemetry_ctx = self._build_telemetry_context(ctx, session_info, leaderboard, current_tyres, pitted_drivers, grid)
 
             question_lower = question.lower()
             is_technical = any(kw in question_lower for kw in TECHNICAL_KEYWORDS)
