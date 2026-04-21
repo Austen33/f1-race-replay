@@ -6,7 +6,6 @@ import urllib.request
 import json
 
 from groq import Groq
-from cerebras.cloud.sdk import Cerebras
 from tavily import TavilyClient
 from PySide6.QtCore import Qt, Signal, QObject, QTimer
 from PySide6.QtGui import QFont, QColor, QPainter, QPainterPath
@@ -840,6 +839,7 @@ class EngineerChatWindow(PitWallWindow):
             # ── Step 2: Cerebras fallback ─────────────────────────────────────
             if cerebras_key:
                 try:
+                    from cerebras.cloud.sdk import Cerebras  # optional dependency
                     cb_client = Cerebras(api_key=cerebras_key)
                     response  = cb_client.chat.completions.create(
                         model=_CEREBRAS_MODEL,
