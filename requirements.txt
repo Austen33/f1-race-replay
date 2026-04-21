@@ -9,5 +9,6 @@ pyqtgraph
 questionary
 rich
 groq
+cerebras-cloud-sdk
 python-dotenv
 tavily-python

@@ -6,6 +6,7 @@ import urllib.request
 import json
 
 from groq import Groq
+from cerebras.cloud.sdk import Cerebras
 from tavily import TavilyClient
 from PySide6.QtCore import Qt, Signal, QObject, QTimer
 from PySide6.QtGui import QFont, QColor, QPainter, QPainterPath
@@ -155,7 +156,15 @@ def _tavily_search(question: str, max_results: int = 8) -> str:
         return ""
 
 
-MODEL = "llama-3.3-70b-versatile"
+# ── Provider / model chain ────────────────────────────────────────────────────
+# Tried in order on each request. On Groq 429, we fall to Cerebras, then to
+# the smaller Groq model. The caller never sees a rate-limit error.
+
+_GROQ_PRIMARY   = "llama-3.3-70b-versatile"
+_CEREBRAS_MODEL = "llama-3.3-70b"
+_GROQ_FALLBACK  = "llama-3.1-8b-instant"
+
+MODEL = _GROQ_PRIMARY  # legacy alias kept for any external references
 
 # ── Base rules appended to every persona prompt ───────────────────────────────
 _BASE_RULES = """
@@ -772,25 +781,33 @@ class EngineerChatWindow(PitWallWindow):
         return "\n".join(lines)
 
     def _call_groq(self, question: str, race_context: str, signals):
-        api_key = os.environ.get("GROQ_API_KEY", "")
-        if not api_key:
+        """
+        Send a question through the provider fallback chain:
+          1. Groq  llama-3.3-70b-versatile  (primary)
+          2. Cerebras  llama-3.3-70b         (on Groq 429)
+          3. Groq  llama-3.1-8b-instant      (if Cerebras also fails)
+             — reply prefixed with "[Reduced Quality Mode]"
+        """
+        groq_key      = os.environ.get("GROQ_API_KEY", "")
+        cerebras_key  = os.environ.get("CEREBRAS_API_KEY", "")
+
+        if not groq_key:
             signals.error.emit("GROQ_API_KEY environment variable is not set.")
             return
+
         try:
-            question_lower = question.lower()
-            is_technical   = any(kw in question_lower for kw in TECHNICAL_KEYWORDS)
+            question_lower    = question.lower()
+            is_technical      = any(kw in question_lower for kw in TECHNICAL_KEYWORDS)
             needs_live_search = any(kw in question_lower for kw in LIVE_KEYWORDS)
 
             extra_ctx = ""
             if is_technical:
-                topic = _extract_technical_topic(question)
-                wiki  = _wikipedia_summary(f"Formula One {topic}") or _wikipedia_summary(topic)
+                topic     = _extract_technical_topic(question)
+                wiki      = _wikipedia_summary(f"Formula One {topic}") or _wikipedia_summary(topic)
                 extra_ctx = wiki or _tavily_search(question)
             elif needs_live_search:
                 extra_ctx = _tavily_search(question)
 
-            # Build the user message: race state block first, then optional
-            # external context, then the question itself.
             parts = [race_context]
             if extra_ctx:
                 parts.append(extra_ctx)
@@ -800,18 +817,52 @@ class EngineerChatWindow(PitWallWindow):
                     "draw on your training knowledge. If you are not certain, say so."
                 )
             parts.append(f"Engineer question: {question}")
-            prompt = "\n\n".join(parts)
-
+            prompt   = "\n\n".join(parts)
             messages = self._build_messages(prompt)
-            client   = Groq(api_key=api_key)
+
+            # ── Step 1: Groq primary ──────────────────────────────────────────
+            try:
+                client   = Groq(api_key=groq_key)
+                response = client.chat.completions.create(
+                    model=_GROQ_PRIMARY,
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=1024,
+                )
+                signals.finished.emit(response.choices[0].message.content.strip())
+                return
+            except Exception as groq_err:
+                # Only fall through on rate-limit (429); re-raise anything else
+                err_str = str(groq_err).lower()
+                if "429" not in err_str and "rate" not in err_str and "rate_limit" not in err_str:
+                    raise
+
+            # ── Step 2: Cerebras fallback ─────────────────────────────────────
+            if cerebras_key:
+                try:
+                    cb_client = Cerebras(api_key=cerebras_key)
+                    response  = cb_client.chat.completions.create(
+                        model=_CEREBRAS_MODEL,
+                        messages=messages,
+                        temperature=0.7,
+                        max_tokens=1024,
+                    )
+                    signals.finished.emit(response.choices[0].message.content.strip())
+                    return
+                except Exception:
+                    pass  # fall through to reduced-quality Groq
+
+            # ── Step 3: Groq reduced-quality fallback ─────────────────────────
+            client   = Groq(api_key=groq_key)
             response = client.chat.completions.create(
-                model=MODEL,
+                model=_GROQ_FALLBACK,
                 messages=messages,
                 temperature=0.7,
                 max_tokens=1024,
             )
             reply = response.choices[0].message.content.strip()
-            signals.finished.emit(reply)
+            signals.finished.emit(f"[Reduced Quality Mode]\n{reply}")
+
         except Exception as exc:
             signals.error.emit(str(exc))
 
