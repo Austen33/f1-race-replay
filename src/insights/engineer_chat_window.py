@@ -165,6 +165,38 @@ _GROQ_FALLBACK  = "llama-3.1-8b-instant"
 
 MODEL = _GROQ_PRIMARY  # legacy alias kept for any external references
 
+# ── 2026 driver reference table ───────────────────────────────────────────────
+DRIVER_NAMES_2026 = {
+    "ANT": {"name": "Kimi Antonelli",    "age": 19},
+    "HAM": {"name": "Lewis Hamilton",    "age": 41},
+    "RUS": {"name": "George Russell",    "age": 28},
+    "LEC": {"name": "Charles Leclerc",   "age": 28},
+    "SAI": {"name": "Carlos Sainz",      "age": 31},
+    "VER": {"name": "Max Verstappen",    "age": 28},
+    "NOR": {"name": "Lando Norris",      "age": 25},
+    "PIA": {"name": "Oscar Piastri",     "age": 25},
+    "ALO": {"name": "Fernando Alonso",   "age": 44},
+    "STR": {"name": "Lance Stroll",      "age": 27},
+    "GAS": {"name": "Pierre Gasly",      "age": 29},
+    "OCO": {"name": "Esteban Ocon",      "age": 29},
+    "ALB": {"name": "Alexander Albon",   "age": 30},
+    "TSU": {"name": "Yuki Tsunoda",      "age": 25},
+    "LAW": {"name": "Liam Lawson",       "age": 23},
+    "HUL": {"name": "Nico Hulkenberg",   "age": 38},
+    "BEA": {"name": "Oliver Bearman",    "age": 20},
+    "HAD": {"name": "Isack Hadjar",      "age": 20},
+    "BOR": {"name": "Gabriel Bortoleto", "age": 20},
+    "COL": {"name": "Franco Colapinto",  "age": 21},
+    "LIN": {"name": "Jack Doohan",       "age": 22},
+}
+
+def _driver_ref_block() -> str:
+    """Format DRIVER_NAMES_2026 as a compact table for prompt injection."""
+    lines = ["2026 DRIVER REFERENCE (name and age — use only these values):"]
+    for code, d in DRIVER_NAMES_2026.items():
+        lines.append(f"  {code}: {d['name']}, age {d['age']}")
+    return "\n".join(lines)
+
 # ── Base rules appended to every persona prompt ───────────────────────────────
 _BASE_RULES = (
     " RULE 0: If the question is about strategy, pit stops, tyres, or gaps —"
@@ -176,6 +208,8 @@ _BASE_RULES = (
     " \"dive into\", \"certainly\", \"delve\"); be factual; if uncertain say so;"
     " use live leaderboard data for positions — never invent them;"
     " season is 2026, MOM replaces DRS."
+    " Never state a driver's age unless it appears in the driver reference table."
+    " Never guess ages."
 )
 
 # ── Persona definitions ───────────────────────────────────────────────────────
@@ -868,7 +902,7 @@ class EngineerChatWindow(PitWallWindow):
         Construct a token-budgeted messages list.
         Budget: system ≤300 + context ≤800 + question ≤300 = 1,400 (100 buffer to 1,500).
         """
-        system_content = PERSONAS[self._persona]["prompt"] + _BASE_RULES
+        system_content = PERSONAS[self._persona]["prompt"] + _BASE_RULES + "\n\n" + _driver_ref_block()
 
         # Truncate question if oversized
         max_q_chars = 300 * 4
