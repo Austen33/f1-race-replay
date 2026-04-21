@@ -166,47 +166,26 @@ _GROQ_FALLBACK  = "llama-3.1-8b-instant"
 MODEL = _GROQ_PRIMARY  # legacy alias kept for any external references
 
 # ── Base rules appended to every persona prompt ───────────────────────────────
-_BASE_RULES = """
-Rules that apply regardless of persona:
-- Write in plain, natural English. No textbook tone, no news article style.
-- Never use em dashes as punctuation.
-- Never use phrases like "it is worth noting", "dive into", "certainly", "delve", "it is important to note", "fascinatingly", "it's worth mentioning", "needless to say".
-- Always be factual. If something is uncertain, say so clearly.
-- Keep responses concise but complete. Do not pad answers with filler sentences.
-- If live telemetry context is provided, use it to give specific, data-driven answers.
-- The current F1 season is 2026. Use the season reference data provided as ground truth. Do not reference drivers not on the 2026 grid unless specifically asked.
-- ONLY use driver positions and names from the live leaderboard provided in the context. Never invent or assume positions from your training data. If asked who is last, find the highest position number in the leaderboard and state that driver."""
+_BASE_RULES = (
+    " Rules: plain English only; no em dashes; no filler phrases (\"worth noting\","
+    " \"dive into\", \"certainly\", \"delve\"); be factual; if uncertain say so;"
+    " use live leaderboard data for positions — never invent them;"
+    " season is 2026, MOM replaces DRS."
+)
 
 # ── Persona definitions ───────────────────────────────────────────────────────
 PERSONAS: dict[str, dict] = {
     "Race Engineer": {
         "label": "Race Engineer",
-        "prompt": (
-            "You are a Formula 1 race engineer embedded in a live race replay tool. "
-            "Your communication style is direct, data-led, and technical. "
-            "Prioritise actionable information. Mirror how a real pit wall engineer speaks to a driver: "
-            "concise and precise. Avoid unnecessary narrative — get to the point immediately."
-        ),
+        "prompt": "You are an F1 race engineer in a live replay tool. Be direct, technical, concise.",
     },
     "Analyst": {
         "label": "Analyst",
-        "prompt": (
-            "You are an F1 strategic analyst embedded in a live race replay tool. "
-            "Provide deeper explanations, reference historical context where relevant, "
-            "and explain the reasoning behind strategic calls. Help the user understand "
-            "the why behind race events, not just the what. You may use a slightly longer form "
-            "when the topic warrants it, but remain precise and avoid filler."
-        ),
+        "prompt": "You are an F1 strategic analyst in a live replay tool. Explain strategy reasoning clearly.",
     },
     "Commentator": {
         "label": "Commentator",
-        "prompt": (
-            "You are an F1 race commentator embedded in a live race replay tool. "
-            "Be engaging and descriptive. Narrate the race as it unfolds, making it "
-            "compelling for a viewer who wants atmosphere and storytelling alongside facts. "
-            "You are still factually grounded — never invent events or outcomes — "
-            "but your tone is lively and accessible rather than technical."
-        ),
+        "prompt": "You are an F1 commentator in a live replay tool. Be engaging and factual.",
     },
 }
 
@@ -761,17 +740,40 @@ class EngineerChatWindow(PitWallWindow):
             elif needs_live_search:
                 extra_ctx = _tavily_search(question)
 
-            parts = [race_context]
-            if extra_ctx:
-                parts.append(extra_ctx)
-                parts.append(
-                    "Prioritise the provided race state and context over training knowledge "
-                    "for current season information. For historical or technical questions, "
-                    "draw on your training knowledge. If you are not certain, say so."
-                )
-            parts.append(f"Engineer question: {question}")
-            prompt   = "\n\n".join(parts)
-            messages = self._build_messages(prompt)
+            def _make_messages(ctx: str, q: str) -> list[dict]:
+                """Build messages, assert token budget, fall back to P1-P3 if needed."""
+                parts = [ctx]
+                if extra_ctx:
+                    parts.append(extra_ctx)
+                parts.append(f"Engineer question: {q}")
+                prompt = "\n\n".join(parts)
+
+                msgs = self._build_messages(prompt, race_context=ctx, question=q)
+
+                sys_tok = len(msgs[0]["content"]) // 4
+                ctx_tok = len(ctx) // 4
+                q_tok   = len(q) // 4
+                total   = sys_tok + ctx_tok + q_tok
+
+                if total >= 1500:
+                    # Hard budget exceeded — shrink to P1-P3 only and rebuild
+                    ctx3 = self.build_race_context(max_drivers=3)
+                    parts3 = [ctx3]
+                    if extra_ctx:
+                        parts3.append(extra_ctx)
+                    parts3.append(f"Engineer question: {q}")
+                    msgs = self._build_messages(
+                        "\n\n".join(parts3), race_context=ctx3, question=q
+                    )
+                return msgs
+
+            # Truncate question to 300-token budget
+            max_q_chars = 300 * 4
+            q = question[:max_q_chars]
+
+            # Default context: top 5 drivers
+            ctx5     = self.build_race_context(max_drivers=5)
+            messages = _make_messages(ctx5, q)
 
             # ── Step 1: Groq primary ──────────────────────────────────────────
             try:
@@ -780,7 +782,7 @@ class EngineerChatWindow(PitWallWindow):
                     model=_GROQ_PRIMARY,
                     messages=messages,
                     temperature=0.7,
-                    max_tokens=1024,
+                    max_tokens=512,
                 )
                 signals.finished.emit(response.choices[0].message.content.strip())
                 return
@@ -799,7 +801,7 @@ class EngineerChatWindow(PitWallWindow):
                         model=_CEREBRAS_MODEL,
                         messages=messages,
                         temperature=0.7,
-                        max_tokens=1024,
+                        max_tokens=512,
                     )
                     signals.finished.emit(response.choices[0].message.content.strip())
                     return
@@ -807,18 +809,11 @@ class EngineerChatWindow(PitWallWindow):
                     pass  # fall through to reduced-quality Groq
 
             # ── Step 3: Groq reduced-quality fallback ─────────────────────────
-            # Rebuild with top-10-only context to stay under 8b token limits
-            compact_ctx = self.build_race_context(max_drivers=10)
-            compact_parts = [compact_ctx]
-            if extra_ctx:
-                compact_parts.append(extra_ctx)
-            compact_parts.append(f"Engineer question: {question}")
-            compact_messages = self._build_messages("\n\n".join(compact_parts))
-
+            fallback_messages = _make_messages(self.build_race_context(max_drivers=3), q)
             client   = Groq(api_key=groq_key)
             response = client.chat.completions.create(
                 model=_GROQ_FALLBACK,
-                messages=compact_messages,
+                messages=fallback_messages,
                 temperature=0.7,
                 max_tokens=512,
             )
@@ -862,21 +857,29 @@ class EngineerChatWindow(PitWallWindow):
             "Reference it as DRS, not MOM."
         )
 
-    def _build_messages(self, prompt: str) -> list[dict]:
-        """Construct the messages list for the Groq API using the active persona."""
-        persona_prompt = PERSONAS[self._persona]["prompt"]
-        system_content = (
-            persona_prompt
-            + _BASE_RULES
-            + self._mom_rule()
-            + "\n\n"
-            + self._season_context
-        )
-        messages = [
+    def _build_messages(self, prompt: str, race_context: str = "", question: str = "") -> list[dict]:
+        """
+        Construct a token-budgeted messages list.
+        Budget: system ≤300 + context ≤800 + question ≤300 = 1,400 (100 buffer to 1,500).
+        """
+        system_content = PERSONAS[self._persona]["prompt"] + _BASE_RULES
+
+        # Truncate question if oversized
+        max_q_chars = 300 * 4
+        if len(question) > max_q_chars:
+            question = question[:max_q_chars]
+
+        # Debug token log
+        sys_tok  = len(system_content) // 4
+        ctx_tok  = len(race_context) // 4
+        q_tok    = len(question) // 4
+        total    = sys_tok + ctx_tok + q_tok
+        print(f"[EngineerChat] Tokens — system: {sys_tok}, context: {ctx_tok}, question: {q_tok}, total: {total}")
+
+        return [
             {"role": "system", "content": system_content},
             {"role": "user",   "content": prompt},
         ]
-        return _trim_messages(messages)
 
     def _re_enable_input(self):
         self._input.setEnabled(True)
