@@ -167,9 +167,11 @@ MODEL = _GROQ_PRIMARY  # legacy alias kept for any external references
 
 # ── Base rules appended to every persona prompt ───────────────────────────────
 _BASE_RULES = (
-    " RULE 0 — MANDATORY: Your FIRST sentence must be one of these exact formats:"
-    " 'Box this lap.' | 'Stay out — pit on lap [X].' | 'Undercut now — box this lap.' | 'Cover [DRIVER] — box this lap.'"
-    " No other opening is acceptable. If you open with anything else, your answer is wrong."
+    " RULE 0: If the question is about strategy, pit stops, tyres, or gaps —"
+    " your FIRST sentence must be one of: 'Box this lap.' | 'Stay out — pit on lap [X].'"
+    " | 'Undercut now — box this lap.' | 'Cover [DRIVER] — box this lap.'"
+    " If the question is factual or informational (who is P6, what tyre, is it raining) —"
+    " answer the fact directly in one sentence, no pit call needed."
     " Rules: plain English only; no em dashes; no filler phrases (\"worth noting\","
     " \"dive into\", \"certainly\", \"delve\"); be factual; if uncertain say so;"
     " use live leaderboard data for positions — never invent them;"
@@ -709,9 +711,6 @@ class EngineerChatWindow(PitWallWindow):
 
         context = "\n".join([header] + rows + [pit_line, "=== END ==="])
 
-        # Safety net: if still over 800 estimated tokens, trim to top 10
-        if len(context) // 4 > 800:
-            context = self.build_race_context(max_drivers=10)
 
         return context
 
@@ -758,15 +757,15 @@ class EngineerChatWindow(PitWallWindow):
                 q_tok   = len(q) // 4
                 total   = sys_tok + ctx_tok + q_tok
 
-                if total >= 1500:
-                    # Hard budget exceeded — shrink to P1-P3 only and rebuild
-                    ctx3 = self.build_race_context(max_drivers=3)
-                    parts3 = [ctx3]
+                if total >= 4000:
+                    # Hard budget exceeded — shrink to P1-P10 and rebuild
+                    ctx10 = self.build_race_context(max_drivers=10)
+                    parts10 = [ctx10]
                     if extra_ctx:
-                        parts3.append(extra_ctx)
-                    parts3.append(f"Engineer question: {q}")
+                        parts10.append(extra_ctx)
+                    parts10.append(f"Engineer question: {q}")
                     msgs = self._build_messages(
-                        "\n\n".join(parts3), race_context=ctx3, question=q
+                        "\n\n".join(parts10), race_context=ctx10, question=q
                     )
                 return msgs
 
@@ -774,9 +773,9 @@ class EngineerChatWindow(PitWallWindow):
             max_q_chars = 300 * 4
             q = question[:max_q_chars]
 
-            # Default context: top 5 drivers
-            ctx5     = self.build_race_context(max_drivers=5)
-            messages = _make_messages(ctx5, q)
+            # Full leaderboard context: all drivers (22 × ~10 tok = ~220 tok)
+            ctx_full = self.build_race_context(max_drivers=22)
+            messages = _make_messages(ctx_full, q)
 
             # ── Step 1: Groq primary ──────────────────────────────────────────
             try:
@@ -812,7 +811,7 @@ class EngineerChatWindow(PitWallWindow):
                     pass  # fall through to reduced-quality Groq
 
             # ── Step 3: Groq reduced-quality fallback ─────────────────────────
-            fallback_messages = _make_messages(self.build_race_context(max_drivers=3), q)
+            fallback_messages = _make_messages(self.build_race_context(max_drivers=22), q)
             client   = Groq(api_key=groq_key)
             response = client.chat.completions.create(
                 model=_GROQ_FALLBACK,
