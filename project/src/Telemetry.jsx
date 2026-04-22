@@ -71,8 +71,6 @@ function DriverCard({ code, data, accent = "#FF1E00", secondary = false }) {
       <div style={{ padding: "0 12px 10px" }}>
         <Bar label="THR" value={data.throttle} color="#1EFF6A"/>
         <Bar label="BRK" value={data.brake}   color="#FF1E00"/>
-        <Bar label={data.ers_available === false ? "ERS · N/A" : "ERS"} value={data.ers} color="#00D9FF" dim={data.ers_available === false}/>
-        <Bar label={data.fuel_available === false ? "FUEL · N/A" : "FUEL"} value={data.fuel} color="#FFD700" max={100} dim={data.fuel_available === false}/>
       </div>
 
       <div style={{

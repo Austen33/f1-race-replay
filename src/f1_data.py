@@ -28,7 +28,7 @@ def enable_cache():
     fastf1.Cache.enable_cache(cache_path)
 
 
-FPS = 25
+FPS = 60
 DT = 1 / FPS
 
 

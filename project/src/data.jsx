@@ -177,9 +177,9 @@ function computeStandings(t, lap, totalLaps) {
 // --- telemetryFor: extract driver telemetry from live frame ---
 function telemetryFor(driverCode, t) {
   const f = window.__LIVE_FRAME;
-  if (!f?.standings) return { speed: 0, throttle: 0, brake: 0, gear: 1, rpm: 0, drs: false, ers: 0, fuel: 0, ers_available: false, fuel_available: false };
+  if (!f?.standings) return { speed: 0, throttle: 0, brake: 0, gear: 1, rpm: 0, drs: false };
   const s = f.standings.find((x) => x.code === driverCode);
-  if (!s) return { speed: 0, throttle: 0, brake: 0, gear: 1, rpm: 0, drs: false, ers: 0, fuel: 0, ers_available: false, fuel_available: false };
+  if (!s) return { speed: 0, throttle: 0, brake: 0, gear: 1, rpm: 0, drs: false };
   return {
     speed: Math.round(s.speed_kph || 0),
     throttle: Math.round(s.throttle_pct || 0),
@@ -187,10 +187,6 @@ function telemetryFor(driverCode, t) {
     gear: s.gear || 1,
     rpm: Math.round(s.rpm || 0),
     drs: s.in_drs || false,
-    ers: 0,
-    fuel: 0,
-    ers_available: false,
-    fuel_available: false,
   };
 }
 

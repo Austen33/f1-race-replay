@@ -2162,7 +2162,7 @@ def extract_race_events(frames: List[dict], track_statuses: List[dict], total_la
         end_time = status.get("end_time")
         
         # Convert time to frame (assuming 25 FPS)
-        fps = 25
+        fps = 60
         start_frame = int(start_time * fps)
         end_frame = int(end_time * fps) if end_time else start_frame + 250  # Default 10 seconds
         
