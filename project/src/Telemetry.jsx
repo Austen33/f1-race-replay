@@ -184,8 +184,8 @@ function CompareTraces({ pinned, secondary, lap, channel = "speed", setChannel, 
   const all = traces.flat();
   const minRaw = all.length > 0 ? Math.min(...all.map((p) => p.value)) : 0;
   const maxRaw = all.length > 0 ? Math.max(...all.map((p) => p.value)) : 100;
-  const min = minRaw * 0.95;
-  const max = maxRaw * 1.02;
+  const min = all.length > 0 ? minRaw * 0.95 : minRaw;
+  const max = all.length > 0 ? maxRaw * 1.02 : maxRaw;
   const span = Math.max(1e-6, max - min);
   const colors = ["#FF1E00", "#00D9FF"];
 
