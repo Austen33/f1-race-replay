@@ -131,7 +131,11 @@ function App() {
   // Compute race state from live frame
   const standings = React.useMemo(() => computeStandings(t, lap, totalLaps), [frame]);
   const bestLapCode = standings.length > 0
-    ? standings.reduce((a, b) => ((a.lastLap ?? Infinity) < (b.lastLap ?? Infinity) ? a : b)).driver.code
+    ? standings.reduce((a, b) => {
+      const av = a.bestLap > 0 ? a.bestLap : Infinity;
+      const bv = b.bestLap > 0 ? b.bestLap : Infinity;
+      return av <= bv ? a : b;
+    }).driver.code
     : null;
 
   // Playhead within lap: use pinned driver's true fraction from backend,

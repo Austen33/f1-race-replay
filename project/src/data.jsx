@@ -192,6 +192,18 @@ function _installSnapshot(snap) {
   }
 }
 
+function _normalizedFraction(s, fallback = 0) {
+  const fracRaw = Number(s?.fraction);
+  if (Number.isFinite(fracRaw)) {
+    return ((fracRaw % 1) + 1) % 1;
+  }
+  const relRaw = Number(s?.rel_dist);
+  if (Number.isFinite(relRaw) && relRaw >= 0 && relRaw <= 1.01) {
+    return Math.min(1, relRaw);
+  }
+  return fallback;
+}
+
 // --- computeStandings: transform live frame standings to component format ---
 function computeStandings(t, lap, totalLaps) {
   const f = window.__LIVE_FRAME;
@@ -199,10 +211,10 @@ function computeStandings(t, lap, totalLaps) {
   const n = CIRCUIT.length;
   return f.standings.map((s) => {
     const d = DRIVERS.find((x) => x.code === s.code) || { code: s.code, num: 0, name: s.code, team: "Unknown", country: "" };
-    const perLap = s.fraction != null
-      ? s.fraction % 1
-      : (s.rel_dist != null && s.rel_dist >= 0 && s.rel_dist <= 1.01 ? s.rel_dist : 0);
-    const trackIdx = Math.round(perLap * (n - 1)) % n;
+    const perLap = _normalizedFraction(s, 0);
+    const trackIdx = n > 1
+      ? Math.min(n - 1, Math.max(0, Math.round(perLap * (n - 1))))
+      : 0;
     return {
       pos: s.pos,
       driver: d,
@@ -225,7 +237,7 @@ function computeStandings(t, lap, totalLaps) {
       pit: s.in_pit || false,
       inDRS: s.in_drs || false,
       speedKph: s.speed_kph ?? 0,
-      fraction: s.fraction ?? 0,
+      fraction: perLap,
     };
   }).sort((a, b) => a.pos - b.pos);
 }
@@ -253,17 +265,19 @@ function _accumulateFrame(frame) {
   if (!frame?.standings) return;
   for (const s of frame.standings) {
     const code = s.code;
-    const lap = s.lap;
-    const frac = s.fraction != null ? s.fraction % 1 : (s.rel_dist != null && s.rel_dist >= 0 && s.rel_dist <= 1.01 ? s.rel_dist : 0);
-    if (frac == null || frac < 0) continue;
+    const lap = Number(s.lap);
+    if (!Number.isFinite(lap)) continue;
+
+    const frac = _normalizedFraction(s, null);
+    if (frac == null) continue;
 
     if (!window.__LAP_TELEMETRY[code]) window.__LAP_TELEMETRY[code] = {};
     if (!window.__LAP_TELEMETRY[code][lap]) window.__LAP_TELEMETRY[code][lap] = [];
 
     const bucket = window.__LAP_TELEMETRY[code][lap];
-    // Skip if fraction hasn't advanced (avoid duplicates)
+    // Keep a sample whenever fraction advances by at least ~0.1% of a lap.
     const last = bucket[bucket.length - 1];
-    if (last && Math.abs(frac - last.fraction) < 0.0005) continue;
+    if (last && Math.abs(frac - last.fraction) < 0.001) continue;
 
     bucket.push({
       fraction: frac,
