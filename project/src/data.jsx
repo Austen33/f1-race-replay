@@ -280,24 +280,33 @@ function lapTrace(driverCode, lap, channel = "speed") {
   const lapData = window.__LAP_TELEMETRY?.[driverCode]?.[lap];
   if (!lapData || lapData.length < 2) return [];
 
-  // Sort by fraction and resample to 200 evenly-spaced points
+  // Sort by fraction and resample only within observed telemetry coverage.
+  // This prevents visual extrapolation into the future (right of playhead).
   const sorted = [...lapData].sort((a, b) => a.fraction - b.fraction);
+  const firstFrac = Math.max(0, sorted[0].fraction);
+  const lastFrac = Math.min(1, sorted[sorted.length - 1].fraction);
+  if (!(lastFrac > firstFrac)) return [];
+
   const N = 200;
   const out = [];
+  let j = 0;
+
   for (let i = 0; i < N; i++) {
-    const targetFrac = i / (N - 1);
-    // Binary-style bracket search
-    let lo = 0, hi = sorted.length - 1;
-    for (let j = 0; j < sorted.length - 1; j++) {
-      if (sorted[j].fraction <= targetFrac && sorted[j + 1].fraction >= targetFrac) {
-        lo = j; hi = j + 1; break;
-      }
+    const targetFrac = firstFrac + (i / (N - 1)) * (lastFrac - firstFrac);
+
+    while (j < sorted.length - 2 && sorted[j + 1].fraction < targetFrac) {
+      j += 1;
     }
-    const sLo = sorted[lo], sHi = sorted[hi];
+
+    const sLo = sorted[j];
+    const sHi = sorted[Math.min(j + 1, sorted.length - 1)];
     const span = sHi.fraction - sLo.fraction;
     const t = span > 0 ? (targetFrac - sLo.fraction) / span : 0;
-    out.push(sLo[channel] + t * (sHi[channel] - sLo[channel]));
+    const value = sLo[channel] + t * (sHi[channel] - sLo[channel]);
+
+    out.push({ fraction: targetFrac, value });
   }
+
   return out;
 }
 

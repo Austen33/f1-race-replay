@@ -182,15 +182,19 @@ function CompareTraces({ pinned, secondary, lap, channel = "speed", setChannel, 
   const W = 480, H = 140, PAD_L = 30, PAD_B = 18, PAD_T = 10, PAD_R = 8;
   const iw = W - PAD_L - PAD_R, ih = H - PAD_T - PAD_B;
   const all = traces.flat();
-  const min = all.length > 0 ? Math.min(...all) * 0.95 : 0;
-  const max = all.length > 0 ? Math.max(...all) * 1.02 : 100;
+  const minRaw = all.length > 0 ? Math.min(...all.map((p) => p.value)) : 0;
+  const maxRaw = all.length > 0 ? Math.max(...all.map((p) => p.value)) : 100;
+  const min = all.length > 0 ? minRaw * 0.95 : minRaw;
+  const max = all.length > 0 ? maxRaw * 1.02 : maxRaw;
+  const span = Math.max(1e-6, max - min);
   const colors = ["#FF1E00", "#00D9FF"];
 
   const pathFor = (t) => {
+    if (!t || t.length === 0) return "";
     let d = "";
     for (let i = 0; i < t.length; i++) {
-      const x = PAD_L + (i / (t.length - 1)) * iw;
-      const y = PAD_T + ih - ((t[i] - min) / (max - min)) * ih;
+      const x = PAD_L + t[i].fraction * iw;
+      const y = PAD_T + ih - ((t[i].value - min) / span) * ih;
       d += (i === 0 ? "M" : "L") + ` ${x.toFixed(1)} ${y.toFixed(1)} `;
     }
     return d;
