@@ -33,8 +33,44 @@ function computeDerived(circuit) {
 }
 
 function pathFromPts(pts, OX, OY, closed = true) {
-  let d = `M ${pts[0].x + OX} ${pts[0].y + OY}`;
-  for (let i = 1; i < pts.length; i++) d += ` L ${pts[i].x + OX} ${pts[i].y + OY}`;
+  const n = pts.length;
+  if (n < 2) return "";
+  if (n === 2) return `M ${pts[0].x+OX} ${pts[0].y+OY} L ${pts[1].x+OX} ${pts[1].y+OY}`;
+
+  const alpha = 0.5; // centripetal — avoids self-intersection on tight hairpins
+
+  function getPoint(i) {
+    if (closed) return pts[((i % n) + n) % n];
+    if (i < 0)  return { x: 2*pts[0].x - pts[1].x, y: 2*pts[0].y - pts[1].y };
+    if (i >= n)  return { x: 2*pts[n-1].x - pts[n-2].x, y: 2*pts[n-1].y - pts[n-2].y };
+    return pts[i];
+  }
+
+  function knotDist(a, b) {
+    return Math.pow(Math.max(Math.hypot(b.x - a.x, b.y - a.y), 1e-12), alpha);
+  }
+
+  let d = `M ${pts[0].x+OX} ${pts[0].y+OY}`;
+  const segCount = closed ? n : n - 1;
+
+  for (let i = 0; i < segCount; i++) {
+    const p0 = getPoint(i - 1);
+    const p1 = getPoint(i);
+    const p2 = getPoint(i + 1);
+    const p3 = getPoint(i + 2);
+
+    const d1 = knotDist(p0, p1);
+    const d2 = knotDist(p1, p2);
+    const d3 = knotDist(p2, p3);
+
+    const b1x = p1.x + (p2.x - p0.x) * d2 / (3 * (d1 + d2));
+    const b1y = p1.y + (p2.y - p0.y) * d2 / (3 * (d1 + d2));
+    const b2x = p2.x - (p3.x - p1.x) * d2 / (3 * (d2 + d3));
+    const b2y = p2.y - (p3.y - p1.y) * d2 / (3 * (d2 + d3));
+
+    d += ` C ${b1x+OX} ${b1y+OY} ${b2x+OX} ${b2y+OY} ${p2.x+OX} ${p2.y+OY}`;
+  }
+
   if (closed) d += " Z";
   return d;
 }
@@ -96,6 +132,25 @@ function IsoTrack({
     [geoKey]
   );
 
+  // Guard against initial render before geometry fetch resolves (CIRCUIT may be a single-point placeholder).
+  if (CIRCUIT.length < 2) {
+    return <div style={{ position: "absolute", inset: 0 }} />;
+  }
+
+  // Zoom is split between SVG viewBox (for crisp vector re-rasterization) and
+  // CSS scale (for framing/visible area). Product equals the full zoom. We bias
+  // toward CSS scale (pow 2/3) so framing matches original behavior and the
+  // track does not clip at the viewport edges; viewBox takes pow 1/3 for some
+  // vector sharpness benefit without over-narrowing the visible area.
+  const z = Math.max(0.1, zoom);
+  const zVB = Math.pow(z, 1 / 3);
+  const zCSS = Math.pow(z, 2 / 3);
+  const vbW = VB_W / zVB;
+  const vbH = VB_H / zVB;
+  const vbX = VB_W / 2 - vbW / 2;
+  const vbY = VB_H / 2 - vbH / 2;
+  const viewBox = `${vbX} ${vbY} ${vbW} ${vbH}`;
+
   const trackPath = pathFromPts(CIRCUIT, OX, OY, true);
 
   // Offset path for track shoulders (cheap outline)
@@ -129,16 +184,22 @@ function IsoTrack({
         pointerEvents: "none",
       }} />
 
-      {/* Track itself — 3D rotated */}
+      {/* Track itself — 3D rotated. Zoom is split between CSS scale (for framing/extent
+          of view) and SVG viewBox narrowing (for sharp re-rasterization of vectors).
+          The product is the same as the old pure-CSS zoom*2.0, but half the magnification
+          comes from re-rasterized vectors rather than upsampled bitmap. */}
       <div style={{
         position: "relative",
         width: "82%", height: "82%",
-        transform: `rotateX(${rotateX}deg) rotateZ(${rotateZ}deg) scale(${zoom * 2.0})`,
+        transform: `rotateX(${rotateX}deg) rotateZ(${rotateZ}deg) scale(${zCSS * 2.0})`,
         transformStyle: "preserve-3d",
         transition: "transform 240ms cubic-bezier(.2,.7,.2,1)",
       }}>
         {/* Track shadow (flat plate) */}
-        <svg viewBox={`0 0 ${VB_W} ${VB_H}`} style={{
+        <svg viewBox={viewBox}
+          preserveAspectRatio="xMidYMid meet"
+          shapeRendering="geometricPrecision" textRendering="geometricPrecision"
+          style={{
           position: "absolute", inset: 0,
           width: "100%", height: "100%",
           transform: "translateZ(-8px)",
@@ -149,7 +210,10 @@ function IsoTrack({
         </svg>
 
         {/* Base plate (deeper than track) */}
-        <svg viewBox={`0 0 ${VB_W} ${VB_H}`} style={{
+        <svg viewBox={viewBox}
+          preserveAspectRatio="xMidYMid meet"
+          shapeRendering="geometricPrecision" textRendering="geometricPrecision"
+          style={{
           position: "absolute", inset: 0,
           width: "100%", height: "100%",
         }}>
@@ -162,6 +226,12 @@ function IsoTrack({
               <stop offset="0%" stopColor="#FF1E00" stopOpacity="0.25"/>
               <stop offset="100%" stopColor="#FF1E00" stopOpacity="0"/>
             </radialGradient>
+            <pattern id="checker" width="8" height="8" patternUnits="userSpaceOnUse">
+              <rect width="4" height="4" fill="#FFFFFF"/>
+              <rect x="4" width="4" height="4" fill="#0B0B11"/>
+              <rect y="4" width="4" height="4" fill="#0B0B11"/>
+              <rect x="4" y="4" width="4" height="4" fill="#FFFFFF"/>
+            </pattern>
           </defs>
 
           {/* Glow under track */}
@@ -328,7 +398,7 @@ function IsoTrack({
       </div>
 
       {/* Corner labels (flat, on top of 3D plate, don't tilt) */}
-      <CornerLabels rotateX={rotateX} rotateZ={rotateZ} zoom={zoom} circuit={CIRCUIT} S={S} OX={OX} OY={OY} VB_W={VB_W} VB_H={VB_H} />
+      <CornerLabels rotateX={rotateX} rotateZ={rotateZ} zoom={zoom} viewBox={viewBox} circuit={CIRCUIT} S={S} OX={OX} OY={OY} VB_W={VB_W} VB_H={VB_H} />
     </div>
   );
 }
@@ -337,31 +407,48 @@ function StartFinish({ pt, next, S, OX, OY }) {
   const dx = next.x - pt.x, dy = next.y - pt.y;
   const mag = Math.hypot(dx, dy) || 1;
   const nx = -dy / mag, ny = dx / mag;
+  const dirX = dx / mag, dirY = dy / mag;
   const cx = pt.x + OX, cy = pt.y + OY;
-  const cells = 6;
-  const w = 22 * S;
-  const rects = [];
-  for (let i = 0; i < cells; i++) {
-    const off = (i - cells / 2) * (w / cells);
-    const x = cx + nx * off;
-    const y = cy + ny * off;
-    rects.push(
-      <rect key={i} x={x - 2*S} y={y - 6*S} width={4*S} height={12*S}
-        fill={i % 2 === 0 ? "#FFFFFF" : "#0B0B11"}
-        transform={`rotate(${Math.atan2(ny, nx) * 180 / Math.PI}, ${x}, ${y})`}
-      />
-    );
-  }
+  const angle = Math.atan2(ny, nx) * 180 / Math.PI;
+
+  // Direction arrow: tip 15*S ahead, base 9*S ahead, half-width 4*S
+  const tipX = cx + dirX * 15 * S, tipY = cy + dirY * 15 * S;
+  const baseL = `${cx + dirX*9*S + nx*4*S},${cy + dirY*9*S + ny*4*S}`;
+  const baseR = `${cx + dirX*9*S - nx*4*S},${cy + dirY*9*S - ny*4*S}`;
+
   return (
-    <g>
-      {rects}
-      <text x={cx + nx * 26 * S} y={cy + ny * 26 * S}
-        fontFamily="JetBrains Mono, monospace"
-        fontSize={8*S}
-        fontWeight="700"
+    <g shapeRendering="geometricPrecision">
+      {/* Checkered band across the track */}
+      <rect
+        x={cx - 16*S} y={cy - 4*S}
+        width={32*S} height={8*S}
+        fill="url(#checker)"
+        transform={`rotate(${angle}, ${cx}, ${cy})`}
+      />
+      {/* Red GRID line with glow */}
+      <line
+        x1={cx + nx*16*S} y1={cy + ny*16*S}
+        x2={cx - nx*16*S} y2={cy - ny*16*S}
+        stroke="#FF1E00" strokeWidth={3*S}
+        style={{ filter: "drop-shadow(0 0 4px #FF1E00)" }}
+      />
+      {/* Direction arrow */}
+      <polygon
+        points={`${tipX},${tipY} ${baseL} ${baseR}`}
         fill="#FF1E00"
-        textAnchor="middle"
-      >S/F</text>
+      />
+      {/* S/F label with background */}
+      <g transform={`translate(${cx + nx*26*S}, ${cy + ny*26*S})`}>
+        <rect x={-12*S} y={-7*S} width={24*S} height={14*S} rx={2*S}
+          fill="rgba(11,11,17,0.85)" stroke="#FF1E00" strokeWidth={0.8*S}/>
+        <text
+          textAnchor="middle" y={3.5*S}
+          fontFamily="JetBrains Mono, monospace"
+          fontSize={Math.max(8, 8*S)}
+          fontWeight="700"
+          fill="#FF1E00"
+        >S/F</text>
+      </g>
     </g>
   );
 }
@@ -379,8 +466,7 @@ function PitLane({ circuit, S, OX, OY }) {
     // perpendicular inward
     return { x: p.x + (-dy / m) * -20 * S, y: p.y + (dx / m) * -20 * S };
   });
-  let d = `M ${offset[0].x + OX} ${offset[0].y + OY}`;
-  for (let i = 1; i < offset.length; i++) d += ` L ${offset[i].x + OX} ${offset[i].y + OY}`;
+  const d = pathFromPts(offset, OX, OY, false);
   return (
     <g>
       <path d={d} fill="none" stroke="#15151E" strokeWidth={10*S} strokeLinecap="round"/>
@@ -408,7 +494,7 @@ function SafetyCarGlyph({ sc, circuit, S, OX, OY }) {
   );
 }
 
-function CornerLabels({ rotateX, rotateZ, zoom, circuit, S, OX, OY, VB_W, VB_H }) {
+function CornerLabels({ rotateX, rotateZ, zoom, viewBox, circuit, S, OX, OY, VB_W, VB_H }) {
   // Place corner numbers at tight-radius points along circuit
   const corners = [];
   const n = circuit.length;
@@ -436,27 +522,84 @@ function CornerLabels({ rotateX, rotateZ, zoom, circuit, S, OX, OY, VB_W, VB_H }
   }
   picked.sort((a, b) => a.idx - b.idx);
 
+  // 2D projection: rotateZ then flatten y by cos(rotateX)
+  const cosX = Math.cos(rotateX * Math.PI / 180);
+  const cosZ = Math.cos(rotateZ * Math.PI / 180);
+  const sinZ = Math.sin(rotateZ * Math.PI / 180);
+  function project(x, y) {
+    const vx = (x - VB_W / 2) * cosZ - (y - VB_H / 2) * sinZ;
+    const vy = ((x - VB_W / 2) * sinZ + (y - VB_H / 2) * cosZ) * cosX;
+    return { x: VB_W / 2 + vx, y: VB_H / 2 + vy };
+  }
+
   return (
     <div style={{
       position: "absolute", inset: 0,
       pointerEvents: "none",
-      transform: `rotateX(${rotateX}deg) rotateZ(${rotateZ}deg) scale(${zoom * 2.0})`,
-      transformStyle: "preserve-3d",
+      transform: `scale(${Math.pow(Math.max(0.1, zoom), 2 / 3) * 2.0})`,
       display: "flex", alignItems: "center", justifyContent: "center",
     }}>
-      <svg viewBox={`0 0 ${VB_W} ${VB_H}`} style={{ width: "82%", height: "82%" }}>
-        {picked.map((c, n) => {
+      <svg viewBox={viewBox}
+        preserveAspectRatio="xMidYMid meet"
+        shapeRendering="geometricPrecision" textRendering="geometricPrecision"
+        style={{ width: "82%", height: "82%" }}>
+        <defs>
+          <filter id="cornerShadow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur in="SourceAlpha" stdDeviation="1.5"/>
+            <feOffset dx="0" dy="1"/>
+            <feComponentTransfer><feFuncA type="linear" slope="0.4"/></feComponentTransfer>
+            <feMerge>
+              <feMergeNode/>
+              <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+          </filter>
+        </defs>
+        {picked.map((c, i) => {
           const p = circuit[c.idx];
           const pn = circuit[(c.idx + 1) % circuit.length];
           const dx = pn.x - p.x, dy = pn.y - p.y;
           const mag = Math.hypot(dx, dy) || 1;
           const nx = -dy / mag, ny = dx / mag;
-          const cx = p.x + OX + nx * 28 * S;
-          const cy = p.y + OY + ny * 28 * S;
+          // Apex and label positions in viewBox space
+          const apexVX = p.x + OX, apexVY = p.y + OY;
+          const labelVX = p.x + OX + nx * 28 * S, labelVY = p.y + OY + ny * 28 * S;
+          // Project through the 3D transform
+          const projApex = project(apexVX, apexVY);
+          const projLabel = project(labelVX, labelVY);
+          const R = Math.max(10, 7 * S);
+          const FS = Math.max(10, 6.5 * S);
+          // Connector line from circle edge toward apex
+          const connDx = projApex.x - projLabel.x;
+          const connDy = projApex.y - projLabel.y;
+          const connMag = Math.hypot(connDx, connDy) || 1;
+          const connStartX = projLabel.x + (connDx / connMag) * R;
+          const connStartY = projLabel.y + (connDy / connMag) * R;
           return (
-            <g key={c.idx} transform={`translate(${cx}, ${cy})`}>
-              <circle r={7*S} fill="#0B0B11" stroke="#FF1E00" strokeWidth={0.8*S} opacity="0.9"/>
-              <text y={2.5*S} textAnchor="middle" fontFamily="JetBrains Mono, monospace" fontSize={6.5*S} fontWeight="700" fill="#FF1E00">T{n + 1}</text>
+            <g key={c.idx}>
+              {/* Connector line from circle edge to apex */}
+              <line x1={connStartX} y1={connStartY} x2={projApex.x} y2={projApex.y}
+                stroke="#FF1E00" strokeWidth={1} opacity="0.5" vectorEffect="non-scaling-stroke"/>
+              <g filter="url(#cornerShadow)">
+                {/* Outer white halo */}
+                <circle cx={projLabel.x} cy={projLabel.y} r={R + 3}
+                  fill="none" stroke="#FFFFFF" strokeOpacity="0.3" strokeWidth={2}
+                  vectorEffect="non-scaling-stroke"/>
+                {/* Filled core */}
+                <circle cx={projLabel.x} cy={projLabel.y} r={R}
+                  fill="#0B0B11" stroke="#FF1E00" strokeWidth={1.2}
+                  vectorEffect="non-scaling-stroke"/>
+                {/* Turn number */}
+                <text x={projLabel.x} y={projLabel.y + FS * 0.35}
+                  textAnchor="middle"
+                  fontFamily="JetBrains Mono, monospace"
+                  fontSize={FS}
+                  fontWeight="800"
+                  fill="#FF1E00"
+                  paintOrder="stroke"
+                  stroke="#0B0B11"
+                  strokeWidth={0.5}
+                >T{i + 1}</text>
+              </g>
             </g>
           );
         })}
