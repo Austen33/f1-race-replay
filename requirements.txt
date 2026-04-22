@@ -12,3 +12,7 @@ groq
 cerebras-cloud-sdk
 python-dotenv
 tavily-python
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.6
+websockets>=12

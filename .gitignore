@@ -1,9 +1,11 @@
 
 .env
 venv/
+.venv/
 
 output_animation.mp4
 .fastf1-cache
+cache/
 still_frame.png
 
 .mypy_cache/
@@ -13,3 +15,7 @@ computed_data/
 
 .DS_Store
 .idea
+
+*.pyc
+*.avif
+*.mp4

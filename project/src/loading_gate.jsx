@@ -1,0 +1,40 @@
+function LoadingGate({ children }) {
+  const { loading } = window.LIVE.useLive();
+  const [poll, setPoll] = React.useState(null);
+
+  // Poll /api/session/status as belt-and-braces for the WS loading pings.
+  React.useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const s = await window.APEX_CLIENT.get("/api/session/status");
+        if (alive) setPoll(s);
+      } catch {}
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const status = loading?.status || poll?.status || "loading";
+  const progress = Math.max(loading?.progress || 0, poll?.progress || 0);
+  if (status === "ready") return children;
+  return (
+    <>
+      {children}
+      <div style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)",
+        color: "#fff", display: "flex", alignItems: "center",
+        justifyContent: "center", flexDirection: "column", zIndex: 9999,
+        fontFamily: "monospace",
+      }}>
+        <div style={{ fontSize: 14, letterSpacing: 3, marginBottom: 12 }}>LOADING SESSION</div>
+        <div style={{ width: 320, height: 4, background: "#333" }}>
+          <div style={{ width: `${progress}%`, height: "100%", background: "#FF1E00", transition: "width 0.3s" }} />
+        </div>
+        <div style={{ marginTop: 10, fontSize: 11, opacity: 0.7 }}>{poll?.message || loading?.message || "..."}</div>
+      </div>
+    </>
+  );
+}
+window.LOADING_GATE = LoadingGate;
