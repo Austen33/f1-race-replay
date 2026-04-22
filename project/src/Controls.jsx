@@ -309,7 +309,7 @@ function TransportBtn({ children, onClick, title, primary }) {
 }
 
 // Camera controls
-function CameraControls({ rotateX, setRotateX, rotateZ, setRotateZ, zoom, setZoom, showDRS, setShowDRS, showLabels, setShowLabels, showProgress, setShowProgress, viewMode, setViewMode }) {
+function CameraControls({ rotateX, setRotateX, rotateZ, setRotateZ, zoom, setZoom, showDRS, setShowDRS, showLabels, setShowLabels, viewMode, setViewMode }) {
   const isTop = viewMode === "top";
   return (
     <div style={{
@@ -350,7 +350,6 @@ function CameraControls({ rotateX, setRotateX, rotateZ, setRotateZ, zoom, setZoo
       <div style={{ height: 1, background: "rgba(255,255,255,0.05)", margin: "4px 0" }}/>
       <Toggle label="DRS ZONES"    on={showDRS}      onChange={setShowDRS} hotkey="D"/>
       <Toggle label="LABELS"       on={showLabels}   onChange={setShowLabels} hotkey="L"/>
-      <Toggle label="PROGRESS BAR" on={showProgress} onChange={setShowProgress} hotkey="B"/>
     </div>
   );
 }

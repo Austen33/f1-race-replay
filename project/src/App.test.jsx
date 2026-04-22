@@ -22,7 +22,6 @@ function makeMocks() {
     setSpeedRemote: vi.fn(),
     setShowDRS: vi.fn(),
     setShowLabels: vi.fn(),
-    setShowProgress: vi.fn(),
   };
 }
 
@@ -35,7 +34,6 @@ function makeHandler(refs, mocks) {
     mocks.setSpeedRemote,
     mocks.setShowDRS,
     mocks.setShowLabels,
-    mocks.setShowProgress,
   );
 }
 

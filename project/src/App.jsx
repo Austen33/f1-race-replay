@@ -81,7 +81,6 @@ function App() {
   // Toggles
   const [showDRS, setShowDRS] = React.useState(true);
   const [showLabels, setShowLabels] = React.useState(true);
-  const [showProgress, setShowProgress] = React.useState(true);
   const [compareChannel, setCompareChannel] = React.useState("speed");
 
   // Tweaks
@@ -118,7 +117,6 @@ function App() {
       setSpeedRemote,
       setShowDRS,
       setShowLabels,
-      setShowProgress,
       setViewMode,
     );
     window.addEventListener("keydown", onKey);
@@ -264,7 +262,6 @@ function App() {
             zoom={zoom} setZoom={setZoom}
             showDRS={showDRS} setShowDRS={setShowDRS}
             showLabels={showLabels} setShowLabels={setShowLabels}
-            showProgress={showProgress} setShowProgress={setShowProgress}
             viewMode={viewMode} setViewMode={setViewMode}
           />
         </div>
@@ -368,7 +365,6 @@ function App() {
                 zoom={zoom} setZoom={setZoom}
                 showDRS={showDRS} setShowDRS={setShowDRS}
                 showLabels={showLabels} setShowLabels={setShowLabels}
-                showProgress={showProgress} setShowProgress={setShowProgress}
                 viewMode={viewMode} setViewMode={setViewMode}
               />
             </div>
