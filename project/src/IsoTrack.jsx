@@ -1,5 +1,5 @@
 // Isometric 3D track view. SVG rendered in a 3D-transformed container.
-// Supports: rotate, zoom, DRS zones toggle, driver labels toggle,
+// Supports: rotate, zoom, driver labels toggle,
 // safety car deployment animation, clickable cars.
 
 const { TEAMS, DRIVERS, COMPOUNDS } = window.APEX;
@@ -114,7 +114,6 @@ function IsoTrack({
   pinned,
   secondary,
   onPickDriver,
-  showDRS = true,
   showLabels = true,
   rotateX = 62,
   rotateZ = -18,
@@ -130,7 +129,6 @@ function IsoTrack({
   // Memoize geometry derivations against CIRCUIT.length so they recompute when snapshot arrives
   const CIRCUIT = window.APEX.CIRCUIT;
   const SECTORS = window.APEX.SECTORS;
-  const DRS_ZONES = window.APEX.DRS_ZONES;
   const geoKey = CIRCUIT.length;
   const { B, CIRCUIT_EXTENT, S, PAD, VB_W, VB_H, OX, OY, CENTROID } = React.useMemo(
     () => computeDerived(CIRCUIT),
@@ -284,18 +282,6 @@ function IsoTrack({
             );
           })}
 
-          {/* DRS zones (emissive red tint over the track) */}
-          {showDRS && DRS_ZONES.map((z, i) => {
-            const seg = sliceRange(z.start, z.end, CIRCUIT);
-            const d = pathFromPts(seg, OX, OY, false);
-            return (
-              <g key={i}>
-                <path d={d} fill="none" stroke="#FF1E00" strokeWidth={22*S} strokeLinejoin="round" opacity="0.22"/>
-                <path d={d} fill="none" stroke="#FF1E00" strokeWidth={3*S}  strokeLinejoin="round" opacity="0.9" strokeDasharray={`${4*S} ${6*S}`}/>
-              </g>
-            );
-          })}
-
           {/* Sector markers */}
           {SECTORS.map((s, i) => {
             const p = CIRCUIT[s.idx];
@@ -424,12 +410,6 @@ function IsoTrack({
                         >
                           {s.driver.code}
                         </text>
-                      </g>
-                    )}
-                    {s.inDRS && showDRS && (
-                      <g transform={`translate(${-onx * 24}, ${-ony * 24})`}>
-                        <rect x="0" y="-6" width="22" height="10" rx="1" fill="#FF1E00"/>
-                        <text x="11" y="2" textAnchor="middle" fontFamily="JetBrains Mono, monospace" fontSize="7" fontWeight="700" fill="#FFFFFF">DRS</text>
                       </g>
                     )}
                   </g>

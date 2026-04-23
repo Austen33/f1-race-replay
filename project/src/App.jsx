@@ -79,7 +79,6 @@ function App() {
   }, [viewMode]);
 
   // Toggles
-  const [showDRS, setShowDRS] = React.useState(true);
   const [showLabels, setShowLabels] = React.useState(true);
   const [compareChannel, setCompareChannel] = React.useState("speed");
 
@@ -115,7 +114,6 @@ function App() {
       togglePlay,
       seekRemote,
       setSpeedRemote,
-      setShowDRS,
       setShowLabels,
       setViewMode,
     );
@@ -251,6 +249,30 @@ function App() {
         border: "1px solid rgba(255,255,255,0.06)",
         overflow: "hidden",
       }}>
+        {/* Corner HUD (top-left) */}
+        <div style={{
+          position: "absolute", top: 12, left: 12,
+          display: "flex", flexDirection: "column", gap: 2,
+          fontFamily: "JetBrains Mono, monospace",
+          zIndex: 3,
+        }}>
+          <div style={{ fontSize: 9, color: "rgba(180,180,200,0.55)", letterSpacing: "0.2em" }}>
+            CIRCUIT VIEW · {viewMode === "top" ? "TOP" : "ISO"}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ fontSize: 24, fontWeight: 800, color: "#F6F6FA", letterSpacing: "-0.02em" }}>
+              {ev?.circuit_name?.toUpperCase() || "CIRCUIT"}
+            </div>
+            <div style={{ fontSize: 9, color: "#FF1E00", letterSpacing: "0.18em", padding: "2px 5px", border: "1px solid #FF1E00" }}>
+              CW
+            </div>
+          </div>
+          <div style={{ fontSize: 10, color: "rgba(180,180,200,0.55)", letterSpacing: "0.1em" }}>
+            {snapshot?.geometry?.total_length_m ? `${(snapshot.geometry.total_length_m / 1000).toFixed(3)}KM` : ""}
+          </div>
+        </div>
+
+        {/* Top-right HUD */}
         <div style={{
           position: "absolute", top: 12, right: 12,
           display: "flex", flexDirection: "column", gap: 8,
@@ -260,11 +282,24 @@ function App() {
             rotateX={rotateX} setRotateX={setRotateX}
             rotateZ={rotateZ} setRotateZ={setRotateZ}
             zoom={zoom} setZoom={setZoom}
-            showDRS={showDRS} setShowDRS={setShowDRS}
             showLabels={showLabels} setShowLabels={setShowLabels}
             viewMode={viewMode} setViewMode={setViewMode}
           />
         </div>
+
+        {/* Corner ticks */}
+        {["tl","tr","bl","br"].map((p) => (
+          <div key={p} style={{
+            position: "absolute", width: 16, height: 16, zIndex: 3,
+            borderColor: "rgba(255,30,0,0.5)",
+            borderStyle: "solid", borderWidth: 0,
+            ...(p === "tl" ? { top: 4, left: 4,  borderTopWidth: 1, borderLeftWidth: 1 } :
+               p === "tr" ? { top: 4, right: 4, borderTopWidth: 1, borderRightWidth: 1 } :
+               p === "bl" ? { bottom: 4, left: 4, borderBottomWidth: 1, borderLeftWidth: 1 } :
+                            { bottom: 4, right: 4, borderBottomWidth: 1, borderRightWidth: 1 }),
+          }}/>
+        ))}
+
         <IsoTrack
           standings={standings}
           safetyCar={safetyCar}
@@ -274,13 +309,52 @@ function App() {
             if (e && e.shiftKey) onShiftPick(code);
             else onPick(code);
           }}
-          showDRS={showDRS}
           showLabels={showLabels}
           rotateX={rotateX}
           rotateZ={rotateZ}
           zoom={zoom}
           viewMode={viewMode}
         />
+
+        {/* Bottom HUD: selected driver pip + compare toggle */}
+        {pinned && (
+          <div style={{
+            position: "absolute", bottom: 12, left: 12,
+            fontFamily: "JetBrains Mono, monospace",
+            display: "flex", alignItems: "center", gap: 10,
+            padding: "6px 10px",
+            background: "rgba(11,11,17,0.8)",
+            border: "1px solid rgba(255,30,0,0.3)",
+            zIndex: 3,
+          }}>
+            <div style={{ width: 6, height: 6, background: "#FF1E00", boxShadow: "0 0 6px #FF1E00" }}/>
+            <div style={{ fontSize: 10, color: "rgba(180,180,200,0.6)", letterSpacing: "0.14em" }}>PINNED</div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#F6F6FA" }}>{pinned}</div>
+            {secondary && (
+              <React.Fragment>
+                <div style={{ width: 1, height: 12, background: "rgba(255,255,255,0.1)" }}/>
+                <div style={{ width: 6, height: 6, background: "#00D9FF", boxShadow: "0 0 6px #00D9FF" }}/>
+                <div style={{ fontSize: 10, color: "rgba(180,180,200,0.6)", letterSpacing: "0.14em" }}>COMPARE</div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#F6F6FA" }}>{secondary}</div>
+              </React.Fragment>
+            )}
+            <div style={{ fontSize: 9, color: "rgba(180,180,200,0.45)", letterSpacing: "0.1em", paddingLeft: 10 }}>
+              CLICK · PIN ·  SHIFT+CLICK · COMPARE
+            </div>
+          </div>
+        )}
+
+        {/* Bottom HUD: scan indicator */}
+        <div style={{
+          position: "absolute", bottom: 12, right: 12,
+          fontFamily: "JetBrains Mono, monospace",
+          fontSize: 9, color: "rgba(180,180,200,0.55)",
+          letterSpacing: "0.14em", zIndex: 3,
+          display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2,
+        }}>
+          <div>TELEMETRY · 240Hz</div>
+          <div style={{ color: "#1EFF6A" }}>● LIVE · SECTOR {t < 0.33 ? 1 : t < 0.66 ? 2 : 3}</div>
+        </div>
       </div>
     ),
   };
@@ -322,123 +396,7 @@ function App() {
           <window.PanelSlot id="track" title={panelTitle("track")} layout={layout}
             style={{ flex: 1, minHeight: 0, display: "flex" }}
             buttonStyle={{ top: 14, right: 180 }}>
-          <div className="scanline" style={{
-            flex: 1, position: "relative",
-            background: "linear-gradient(180deg, #0E0E16, #05050A)",
-            border: "1px solid rgba(255,255,255,0.06)",
-            overflow: "hidden",
-            minHeight: 0,
-            width: "100%",
-          }}>
-            {/* Corner HUD (top-left) */}
-            <div style={{
-              position: "absolute", top: 12, left: 12,
-              display: "flex", flexDirection: "column", gap: 2,
-              fontFamily: "JetBrains Mono, monospace",
-              zIndex: 3,
-            }}>
-              <div style={{ fontSize: 9, color: "rgba(180,180,200,0.55)", letterSpacing: "0.2em" }}>
-                CIRCUIT VIEW · {viewMode === "top" ? "TOP" : "ISO"}
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <div style={{ fontSize: 24, fontWeight: 800, color: "#F6F6FA", letterSpacing: "-0.02em" }}>
-                  {ev?.circuit_name?.toUpperCase() || "CIRCUIT"}
-                </div>
-                <div style={{ fontSize: 9, color: "#FF1E00", letterSpacing: "0.18em", padding: "2px 5px", border: "1px solid #FF1E00" }}>
-                  CW
-                </div>
-              </div>
-              <div style={{ fontSize: 10, color: "rgba(180,180,200,0.55)", letterSpacing: "0.1em" }}>
-                {snapshot?.geometry?.total_length_m ? `${(snapshot.geometry.total_length_m / 1000).toFixed(3)}KM` : ""}{window.APEX.DRS_ZONES?.length ? ` · ${window.APEX.DRS_ZONES.length} DRS` : ""}
-              </div>
-            </div>
-
-            {/* Top-right HUD */}
-            <div style={{
-              position: "absolute", top: 12, right: 12,
-              display: "flex", flexDirection: "column", gap: 8,
-              zIndex: 3,
-            }}>
-              <CameraControls
-                rotateX={rotateX} setRotateX={setRotateX}
-                rotateZ={rotateZ} setRotateZ={setRotateZ}
-                zoom={zoom} setZoom={setZoom}
-                showDRS={showDRS} setShowDRS={setShowDRS}
-                showLabels={showLabels} setShowLabels={setShowLabels}
-                viewMode={viewMode} setViewMode={setViewMode}
-              />
-            </div>
-
-            {/* Corner ticks */}
-            {["tl","tr","bl","br"].map((p) => (
-              <div key={p} style={{
-                position: "absolute", width: 16, height: 16, zIndex: 3,
-                borderColor: "rgba(255,30,0,0.5)",
-                borderStyle: "solid", borderWidth: 0,
-                ...(p === "tl" ? { top: 4, left: 4,  borderTopWidth: 1, borderLeftWidth: 1 } :
-                   p === "tr" ? { top: 4, right: 4, borderTopWidth: 1, borderRightWidth: 1 } :
-                   p === "bl" ? { bottom: 4, left: 4, borderBottomWidth: 1, borderLeftWidth: 1 } :
-                                { bottom: 4, right: 4, borderBottomWidth: 1, borderRightWidth: 1 }),
-              }}/>
-            ))}
-
-            <IsoTrack
-              standings={standings}
-              safetyCar={safetyCar}
-              pinned={pinned}
-              secondary={secondary}
-              onPickDriver={(code, e) => {
-                if (e && e.shiftKey) onShiftPick(code);
-                else onPick(code);
-              }}
-              showDRS={showDRS}
-              showLabels={showLabels}
-              rotateX={rotateX}
-              rotateZ={rotateZ}
-              zoom={zoom}
-              viewMode={viewMode}
-            />
-
-            {/* Bottom HUD: selected driver pip + compare toggle */}
-            {pinned && (
-              <div style={{
-                position: "absolute", bottom: 12, left: 12,
-                fontFamily: "JetBrains Mono, monospace",
-                display: "flex", alignItems: "center", gap: 10,
-                padding: "6px 10px",
-                background: "rgba(11,11,17,0.8)",
-                border: "1px solid rgba(255,30,0,0.3)",
-                zIndex: 3,
-              }}>
-                <div style={{ width: 6, height: 6, background: "#FF1E00", boxShadow: "0 0 6px #FF1E00" }}/>
-                <div style={{ fontSize: 10, color: "rgba(180,180,200,0.6)", letterSpacing: "0.14em" }}>PINNED</div>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#F6F6FA" }}>{pinned}</div>
-                {secondary && (
-                  <React.Fragment>
-                    <div style={{ width: 1, height: 12, background: "rgba(255,255,255,0.1)" }}/>
-                    <div style={{ width: 6, height: 6, background: "#00D9FF", boxShadow: "0 0 6px #00D9FF" }}/>
-                    <div style={{ fontSize: 10, color: "rgba(180,180,200,0.6)", letterSpacing: "0.14em" }}>COMPARE</div>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#F6F6FA" }}>{secondary}</div>
-                  </React.Fragment>
-                )}
-                <div style={{ fontSize: 9, color: "rgba(180,180,200,0.45)", letterSpacing: "0.1em", paddingLeft: 10 }}>
-                  CLICK · PIN ·  SHIFT+CLICK · COMPARE
-                </div>
-              </div>
-            )}
-
-            {/* Bottom HUD: scan indicator */}
-            <div style={{
-              position: "absolute", bottom: 12, right: 12,
-              fontFamily: "JetBrains Mono, monospace",
-              fontSize: 9, color: "rgba(180,180,200,0.55)",
-              letterSpacing: "0.14em", zIndex: 3,
-              display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2,
-            }}>
-              <div>TELEMETRY · 240Hz</div>
-              <div style={{ color: "#1EFF6A" }}>● LIVE · SECTOR {t < 0.33 ? 1 : t < 0.66 ? 2 : 3}</div>
-            </div>
-          </div>
+            {panelBodies.track}
           </window.PanelSlot>
 
           {/* Bottom strip: strategy + compare + feed */}

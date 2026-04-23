@@ -6,7 +6,7 @@
 
 const SPEED_STEPS = [0.5, 1, 2, 4];
 
-function buildHotkeyHandler(refs, post, togglePlay, seekRemote, setSpeedRemote, setShowDRS, setShowLabels, setViewMode) {
+function buildHotkeyHandler(refs, post, togglePlay, seekRemote, setSpeedRemote, setShowLabels, setViewMode) {
   return (e) => {
     if (e.repeat) return;
     if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
@@ -35,8 +35,6 @@ function buildHotkeyHandler(refs, post, togglePlay, seekRemote, setSpeedRemote, 
       setSpeedRemote(2);
     } else if (e.key === "4") {
       setSpeedRemote(4);
-    } else if (e.key === "d" || e.key === "D") {
-      setShowDRS(v => !v);
     } else if (e.key === "l" || e.key === "L") {
       setShowLabels(v => !v);
     } else if (e.key === "r" || e.key === "R") {
