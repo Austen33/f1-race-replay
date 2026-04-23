@@ -22,6 +22,7 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 // Track dimensions (metres).
 const TRACK_WIDTH = 14;
@@ -32,8 +33,8 @@ const Z_EXAGGERATION = 1.4;
 
 // Car dimensions (metres). Slightly larger than real F1 (~5×2) so the body
 // reads at wider zooms, but still honest enough for the chase cam.
-const CAR_LENGTH = 6.0;
-const CAR_WIDTH = 2.4;
+const CAR_LENGTH = 7.2;
+const CAR_WIDTH = 2.9;
 const CAR_HEIGHT = 0.55;
 const WHEEL_RADIUS = 0.45;
 const WHEEL_WIDTH = 0.42;
@@ -659,113 +660,133 @@ function buildRacingLineMesh(curve, segments) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Car marker — stylised F1 built from primitives. Exposes `userData` hooks
-// so the animate loop can toggle brake/DRS lights and halo state cheaply.
-// Local coord frame: +X is forward, +Y up, +Z right.
+// Car marker — GLB-based F1 model with indicator overlays. Exposes `userData`
+// hooks so the animate loop can toggle brake/DRS lights and halo state cheaply.
+// Local coord frame: +X is forward, +Y up, +Z right (matched to GLB via
+// rotation after cloning).
 // ───────────────────────────────────────────────────────────────────────────
 
-function makeDriverMarker(team) {
+// Shared GLTF loader — one instance for the whole module.
+const gltfLoader = new GLTFLoader();
+
+// Singleton promise: loads the base GLB model once, then clones for each car.
+// The model path is relative to the HTML page (served from dist/assets/).
+const CAR_MODEL_PATH = "assets/f1-car.glb";
+let _baseModelPromise = null;
+
+function loadBaseCarModel() {
+  if (_baseModelPromise) return _baseModelPromise;
+  _baseModelPromise = new Promise((resolve, reject) => {
+    gltfLoader.load(
+      CAR_MODEL_PATH,
+      (gltf) => {
+        const model = gltf.scene;
+        // Disable shadow casting on all meshes — at wide zoom levels the tiny
+        // geometry aliasing in the directional shadow map produces long black
+        // spike artifacts on the ground/runoff.
+        model.traverse((child) => {
+          if (child.isMesh) {
+            child.castShadow = false;
+            child.receiveShadow = false;
+          }
+        });
+        resolve(model);
+      },
+      undefined,
+      (err) => {
+        console.warn("GLB car model failed to load, will use fallback:", err);
+        reject(err);
+      },
+    );
+  });
+  return _baseModelPromise;
+}
+
+// Build a fallback car from primitives (same as the old makeDriverMarker) if
+// the GLB model fails to load.
+function makeFallbackMarker(team) {
   const g = new THREE.Group();
   const color = new THREE.Color(team?.color || "#ff1e00");
-  // Slightly clearcoat-y livery: lower roughness + metalness so the IBL env
-  // map paints a real cockpit/shoulder reflection, faint emissive keeps the
-  // brand colour readable in shadow.
   const bodyMat = new THREE.MeshStandardMaterial({
     color, roughness: 0.32, metalness: 0.45,
     emissive: color, emissiveIntensity: 0.06,
     envMapIntensity: 1.4,
   });
-  // Black aero (wings, halo, endplates) — lacquered carbon look.
   const darkMat = new THREE.MeshStandardMaterial({
     color: 0x080810, roughness: 0.42, metalness: 0.35,
     envMapIntensity: 1.1,
   });
-  // Tyres stay matte rubber.
   const tyreMat = new THREE.MeshStandardMaterial({
     color: 0x101015, roughness: 0.92, metalness: 0.0,
     envMapIntensity: 0.4,
   });
 
-  // Floor + sidepod-ish main body — a low flat slab that tapers slightly at
-  // the nose via two boxes stacked ahead of the cockpit.
   const floor = new THREE.Mesh(
-    new THREE.BoxGeometry(CAR_LENGTH, 0.3, CAR_WIDTH * 0.9),
-    bodyMat,
-  );
-  floor.position.y = 0.25;
-  g.add(floor);
-
+    new THREE.BoxGeometry(CAR_LENGTH, 0.3, CAR_WIDTH * 0.9), bodyMat);
+  floor.position.y = 0.25; g.add(floor);
   const sidepods = new THREE.Mesh(
-    new THREE.BoxGeometry(CAR_LENGTH * 0.55, 0.55, CAR_WIDTH * 0.85),
-    bodyMat,
-  );
-  sidepods.position.set(-CAR_LENGTH * 0.05, 0.55, 0);
-  g.add(sidepods);
-
-  // Nose cone — tapered box reading as the survival cell + nose.
+    new THREE.BoxGeometry(CAR_LENGTH * 0.55, 0.55, CAR_WIDTH * 0.85), bodyMat);
+  sidepods.position.set(-CAR_LENGTH * 0.05, 0.55, 0); g.add(sidepods);
   const nose = new THREE.Mesh(
-    new THREE.BoxGeometry(CAR_LENGTH * 0.45, 0.3, CAR_WIDTH * 0.3),
-    bodyMat,
-  );
-  nose.position.set(CAR_LENGTH * 0.38, 0.4, 0);
-  g.add(nose);
-
-  // Airbox / rollhoop.
+    new THREE.BoxGeometry(CAR_LENGTH * 0.45, 0.3, CAR_WIDTH * 0.3), bodyMat);
+  nose.position.set(CAR_LENGTH * 0.38, 0.4, 0); g.add(nose);
   const airbox = new THREE.Mesh(
-    new THREE.BoxGeometry(CAR_LENGTH * 0.2, 0.55, CAR_WIDTH * 0.3),
-    bodyMat,
-  );
-  airbox.position.set(-CAR_LENGTH * 0.1, 1.0, 0);
-  g.add(airbox);
-
-  // Halo around the cockpit — tiny dark arch.
+    new THREE.BoxGeometry(CAR_LENGTH * 0.2, 0.55, CAR_WIDTH * 0.3), bodyMat);
+  airbox.position.set(-CAR_LENGTH * 0.1, 1.0, 0); g.add(airbox);
   const halo = new THREE.Mesh(
-    new THREE.TorusGeometry(0.35, 0.04, 6, 12, Math.PI),
-    darkMat,
-  );
+    new THREE.TorusGeometry(0.35, 0.04, 6, 12, Math.PI), darkMat);
   halo.position.set(-CAR_LENGTH * 0.02, 0.95, 0);
-  halo.rotation.x = Math.PI * 0.5;
-  halo.rotation.y = Math.PI * 0.5;
-  g.add(halo);
-
-  // Front wing — thin plate ahead of the nose.
+  halo.rotation.x = Math.PI * 0.5; halo.rotation.y = Math.PI * 0.5; g.add(halo);
   const frontWing = new THREE.Mesh(
-    new THREE.BoxGeometry(0.4, 0.08, CAR_WIDTH * 1.1),
-    darkMat,
-  );
-  frontWing.position.set(CAR_LENGTH * 0.55, 0.25, 0);
-  g.add(frontWing);
-
-  // Rear wing — taller, two vertical endplates + top flap.
+    new THREE.BoxGeometry(0.4, 0.08, CAR_WIDTH * 1.1), darkMat);
+  frontWing.position.set(CAR_LENGTH * 0.55, 0.25, 0); g.add(frontWing);
   const rearWingFlap = new THREE.Mesh(
-    new THREE.BoxGeometry(0.5, 0.14, CAR_WIDTH),
-    darkMat,
-  );
-  rearWingFlap.position.set(-CAR_LENGTH * 0.55, 1.0, 0);
-  g.add(rearWingFlap);
+    new THREE.BoxGeometry(0.5, 0.14, CAR_WIDTH), darkMat);
+  rearWingFlap.position.set(-CAR_LENGTH * 0.55, 1.0, 0); g.add(rearWingFlap);
   const rearEndplateL = new THREE.Mesh(
-    new THREE.BoxGeometry(0.6, 0.9, 0.08),
-    darkMat,
-  );
-  rearEndplateL.position.set(-CAR_LENGTH * 0.55, 0.58, -CAR_WIDTH * 0.5);
-  g.add(rearEndplateL);
+    new THREE.BoxGeometry(0.6, 0.9, 0.08), darkMat);
+  rearEndplateL.position.set(-CAR_LENGTH * 0.55, 0.58, -CAR_WIDTH * 0.5); g.add(rearEndplateL);
   const rearEndplateR = rearEndplateL.clone();
-  rearEndplateR.position.z = CAR_WIDTH * 0.5;
-  g.add(rearEndplateR);
+  rearEndplateR.position.z = CAR_WIDTH * 0.5; g.add(rearEndplateR);
 
-  // DRS indicator — a thin strip on the top of the rear wing that lights up
-  // blue when in_drs is true.
+  const wheelPositions = [
+    [CAR_LENGTH * 0.3, -CAR_WIDTH * 0.55], [CAR_LENGTH * 0.3, CAR_WIDTH * 0.55],
+    [-CAR_LENGTH * 0.3, -CAR_WIDTH * 0.55], [-CAR_LENGTH * 0.3, CAR_WIDTH * 0.55],
+  ];
+  const wheelGeom = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, WHEEL_WIDTH, 18);
+  wheelGeom.rotateX(Math.PI / 2);
+  const wheels = [];
+  for (const [wx, wz] of wheelPositions) {
+    const w = new THREE.Mesh(wheelGeom, tyreMat);
+    w.position.set(wx, WHEEL_RADIUS, wz); g.add(w); wheels.push(w);
+  }
+  for (const m of [floor, sidepods, nose, airbox, halo, frontWing,
+                   rearWingFlap, rearEndplateL, rearEndplateR, ...wheels]) {
+    m.castShadow = false; m.receiveShadow = false;
+  }
+  g.userData = {
+    body: [floor, sidepods, nose, airbox, rearWingFlap, rearEndplateL, rearEndplateR, frontWing],
+    bodyMats: [bodyMat, darkMat],
+    wheels,
+    baseColor: color.clone(),
+  };
+  return g;
+}
+
+// Add indicator overlays (ground halo, brake/DRS lamps, compound dot) to a
+// car group. These are functional indicators that sit on top of any car model.
+function addIndicatorOverlays(g, color) {
+  // DRS indicator — a thin strip on the top of the rear that lights up blue.
   const drsMat = new THREE.MeshBasicMaterial({
     color: 0x00d9ff, transparent: true, opacity: 0.0,
   });
   const drsLamp = new THREE.Mesh(
-    new THREE.BoxGeometry(0.12, 0.08, CAR_WIDTH * 0.75),
-    drsMat,
+    new THREE.BoxGeometry(0.12, 0.08, CAR_WIDTH * 0.75), drsMat,
   );
   drsLamp.position.set(-CAR_LENGTH * 0.57, 1.12, 0);
   g.add(drsLamp);
 
-  // Brake lights — twin red squares at the rear under the wing.
+  // Brake lights — twin red squares at the rear.
   const brakeMat = new THREE.MeshBasicMaterial({
     color: 0xff3040, transparent: true, opacity: 0.0,
   });
@@ -777,24 +798,6 @@ function makeDriverMarker(team) {
   brakeR.position.z = CAR_WIDTH * 0.2;
   g.add(brakeR);
 
-  // Four wheels. CylinderGeometry is upright by default — rotate onto its
-  // side then orient the car in the scene via the group's Y rotation.
-  const wheelPositions = [
-    [  CAR_LENGTH * 0.3, -CAR_WIDTH * 0.55],
-    [  CAR_LENGTH * 0.3,  CAR_WIDTH * 0.55],
-    [ -CAR_LENGTH * 0.3, -CAR_WIDTH * 0.55],
-    [ -CAR_LENGTH * 0.3,  CAR_WIDTH * 0.55],
-  ];
-  const wheelGeom = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, WHEEL_WIDTH, 18);
-  wheelGeom.rotateX(Math.PI / 2);
-  const wheels = [];
-  for (const [wx, wz] of wheelPositions) {
-    const w = new THREE.Mesh(wheelGeom, tyreMat);
-    w.position.set(wx, WHEEL_RADIUS, wz);
-    g.add(w);
-    wheels.push(w);
-  }
-
   // Ground halo — always-visible marker, decoupled from car dimensions.
   const haloGeom = new THREE.RingGeometry(HALO_RADIUS * 0.75, HALO_RADIUS, 36);
   haloGeom.rotateX(-Math.PI / 2);
@@ -805,31 +808,145 @@ function makeDriverMarker(team) {
   groundHalo.position.y = 0.02;
   g.add(groundHalo);
 
-  // Tyre compound indicator — a small coloured dot floating above the airbox.
+  // Tyre compound indicator — a small coloured dot floating above the car.
   const compGeom = new THREE.SphereGeometry(0.32, 10, 8);
   const compMat = new THREE.MeshBasicMaterial({ color: 0xffd93a });
   const compound = new THREE.Mesh(compGeom, compMat);
   compound.position.set(-CAR_LENGTH * 0.05, 1.9, 0);
   g.add(compound);
 
-  // Disable car-part shadow casting: at wide zoom levels the tiny wing/wheel
-  // geometry aliasing in the directional shadow map produces long black spike
-  // artifacts on the ground/runoff.
-  for (const m of [floor, sidepods, nose, airbox, halo,
-                   frontWing, rearWingFlap, rearEndplateL, rearEndplateR,
-                   ...wheels]) {
-    m.castShadow = false;
-    m.receiveShadow = false;
-  }
+  g.userData.drsLamp = drsLamp;
+  g.userData.drsMat = drsMat;
+  g.userData.brakeL = brakeL;
+  g.userData.brakeR = brakeR;
+  g.userData.brakeMat = brakeMat;
+  g.userData.groundHalo = groundHalo;
+  g.userData.compound = compound;
+}
 
-  g.userData = {
-    body: [floor, sidepods, nose, airbox, rearWingFlap, rearEndplateL, rearEndplateR, frontWing],
-    bodyMats: [bodyMat, darkMat],
-    wheels, groundHalo, compound,
-    drsLamp, drsMat,
-    brakeL, brakeR, brakeMat,
-    baseColor: color.clone(),
-  };
+// Create a driver marker using the GLB model. Returns a group immediately
+// with a placeholder; the GLB model is attached asynchronously once loaded.
+// The userData contract is fully compatible with the animation loop.
+function makeDriverMarker(team) {
+  const g = new THREE.Group();
+  const color = new THREE.Color(team?.color || "#ff1e00");
+  g.userData = { baseColor: color.clone(), body: [], bodyMats: [], wheels: [] };
+
+  // Add indicator overlays right away (they work independently of the car body).
+  addIndicatorOverlays(g, color);
+
+  // Kick off the async model load. Once resolved, clone the base model and
+  // insert it into the group, wiring up the userData hooks the animation loop
+  // depends on.
+  loadBaseCarModel().then((baseModel) => {
+    const clone = baseModel.clone();
+    // Deep-clone materials so each car gets its own instances. Without this,
+    // Object3D.clone() shares materials and tinting one car tints all of them.
+    const matMap = new Map();
+    clone.traverse((child) => {
+      if (!child.isMesh) return;
+      if (child.material && !matMap.has(child.material)) {
+        matMap.set(child.material, child.material.clone());
+      }
+      child.material = matMap.get(child.material);
+    });
+    // Collect all meshes in the clone for the animation loop hooks.
+    // Separate wheels from body parts so team colour is applied to the
+    // body only, not the wheels. Use material name as the primary heuristic
+    // (the GLB model names its wheel material "wheels"), falling back to
+    // geometry aspect ratio for unnamed materials.
+    const body = [];
+    const bodyMats = [];
+    const wheels = [];
+    const wheelMats = [];
+    // If all wheels share a single mesh, we can't spin them individually —
+    // store a flag so the animation loop skips the spin on GLB models.
+    let wheelsAreSeparateMeshes = true;
+    clone.traverse((child) => {
+      if (!child.isMesh) return;
+      const matName = (child.material?.name || "").toLowerCase();
+      const isWheelByMat = matName.includes("wheel") || matName.includes("tire") || matName.includes("tyre");
+      let isWheelByGeom = false;
+      if (!isWheelByMat && child.geometry) {
+        child.geometry.computeBoundingBox();
+        const sz = child.geometry.boundingBox.getSize(new THREE.Vector3());
+        const maxDim = Math.max(sz.x, sz.y, sz.z, 0.01);
+        const minDim = Math.min(sz.x, sz.y, sz.z, 0.01);
+        isWheelByGeom = (minDim / maxDim) > 0.45 && (maxDim / minDim) < 2.5;
+      }
+      if (isWheelByMat || isWheelByGeom) {
+        wheels.push(child);
+        if (child.material && !wheelMats.includes(child.material)) {
+          wheelMats.push(child.material);
+        }
+        return;
+      }
+      body.push(child);
+      if (child.material && !bodyMats.includes(child.material)) {
+        bodyMats.push(child.material);
+      }
+    });
+    // If fewer than 4 wheel meshes were found, the GLB likely merged some
+    // wheels together — rotating those meshes would tumble the whole set
+    // like a helicopter rather than spinning each wheel individually.
+    if (wheels.length < 4) wheelsAreSeparateMeshes = false;
+    // Apply team livery colour to body materials only (not wheels).
+    // The GLB model uses plain #000000 materials — tint them with the team
+    // colour so each car is visually distinct. Only override the albedo
+    // colour; leave roughness, metalness, emissive etc. intact.
+    for (const mat of bodyMats) {
+      if (mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial) {
+        mat.color.copy(color);
+      }
+    }
+    // Force wheel/tyre materials to black — they should never be coloured.
+    for (const mat of wheelMats) {
+      if (mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial) {
+        mat.color.set(0x0a0a0a);
+      }
+    }
+    // Scale the GLB model to match the scene's car dimensions. The model's
+    // native size is unknown until loaded, so we normalise it to fit within
+    // the CAR_LENGTH × CAR_WIDTH bounding box.
+    const bbox = new THREE.Box3().setFromObject(clone);
+    const size = bbox.getSize(new THREE.Vector3());
+    const scaleX = CAR_LENGTH / Math.max(size.x, 0.01);
+    const scaleZ = CAR_WIDTH / Math.max(size.z, 0.01);
+    const scale = Math.min(scaleX, scaleZ);
+    clone.scale.setScalar(scale);
+    // Rotate 180° so the model faces +X (forward). The GLB's default
+    // forward is -X, so a Y-axis flip aligns it with the scene convention.
+    clone.rotation.y = Math.PI;
+    // Recompute bbox after scaling to centre the model.
+    const bbox2 = new THREE.Box3().setFromObject(clone);
+    const center = bbox2.getCenter(new THREE.Vector3());
+    clone.position.sub(center);
+    // Lift so the lowest point sits just above the track surface.
+    // Add a small offset to prevent the car from sinking into the track.
+    clone.position.y -= bbox2.min.y;
+    clone.position.y += 0.15;
+
+    g.add(clone);
+    g.userData.body = body;
+    g.userData.bodyMats = bodyMats;
+    g.userData.wheels = wheels;
+    g.userData.wheelsAreSeparateMeshes = wheelsAreSeparateMeshes;
+  }).catch(() => {
+    // GLB failed — use the primitive fallback.
+    const fallback = makeFallbackMarker(team);
+    // Move fallback children into the main group (preserve existing indicators).
+    while (fallback.children.length > 0) {
+      const child = fallback.children[0];
+      fallback.remove(child);
+      g.add(child);
+    }
+    // Overwrite userData with fallback's full set.
+    g.userData.body = fallback.userData.body;
+    g.userData.bodyMats = fallback.userData.bodyMats;
+    g.userData.wheels = fallback.userData.wheels;
+    g.userData.wheelsAreSeparateMeshes = true;
+  });
+
   return g;
 }
 
@@ -880,7 +997,7 @@ const TOD_PRESETS = {
     // asphalt track reads as the darkest ribbon of the three.
     ground: { color: 0xa8adb6 },
     runoff: { color: 0x6a6d76 },
-    trackTint: 0xd8dbe6,
+    trackTint: 0xf2f3fa,
     exposure: 0.95,
     bloom: { strength: 0.22, threshold: 0.95, radius: 0.55 },
     vignette: { base: 0.28, tint: 0x0a0b10 },
@@ -897,7 +1014,7 @@ const TOD_PRESETS = {
     fog: { color: 0x23202c, densityScale: 0.9 },
     ground: { color: 0x262530 },
     runoff: { color: 0x2b2b36 },
-    trackTint: 0xc8cbd8,
+    trackTint: 0xe8eaf2,
     exposure: 0.98,
     bloom: { strength: 0.32, threshold: 0.88, radius: 0.55 },
     vignette: { base: 0.38, tint: 0x07080e },
@@ -915,7 +1032,7 @@ const TOD_PRESETS = {
     fog: { color: 0x08090e, densityScale: 1.0 },
     ground: { color: 0x16161e },
     runoff: { color: 0x1e1e28 },
-    trackTint: 0xb9becf,
+    trackTint: 0xd8dbe6,
     exposure: 1.0,
     bloom: { strength: 0.38, threshold: 0.82, radius: 0.55 },
     vignette: { base: 0.4, tint: 0x04050a },
@@ -1299,7 +1416,7 @@ function Track3D({
     const runoffDryColor = debugLayerColors ? 0x0060ff : preset.runoff.color;
     const runoffWetColor = debugLayerColors ? runoffDryColor : 0x10101a;
     const trackDryColor = debugLayerColors ? 0xff00ff : preset.trackTint;
-    const trackWetColor = debugLayerColors ? trackDryColor : 0x14141c;
+    const trackWetColor = debugLayerColors ? trackDryColor : 0x3a3a48;
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(preset.sceneBg);
 
@@ -1715,8 +1832,19 @@ function Track3D({
         const u = ((frac % 1) + 1) % 1;
         const p = curve.getPointAt(u);
         curve.getTangentAt(u, tmpTan);
-        entry.group.position.set(p.x, p.y + TRACK_TOP_Y + 0.02, p.z);
-        entry.group.rotation.y = Math.atan2(-tmpTan.z, tmpTan.x);
+        // Orient the car to follow the track surface in 3D (yaw + pitch)
+        // so it doesn't sink into or float above the track on elevation changes.
+        const fwd = tmpTan.clone().normalize();
+        const worldUp = new THREE.Vector3(0, 1, 0);
+        const right = new THREE.Vector3().crossVectors(fwd, worldUp).normalize();
+        const up = new THREE.Vector3().crossVectors(right, fwd).normalize();
+        // Car local frame: +X forward, +Y up, +Z right
+        const m = new THREE.Matrix4().makeBasis(fwd, up, right);
+        entry.group.quaternion.setFromRotationMatrix(m);
+        // Position on track surface, offset along the surface normal (up)
+        // so the car sits on top of the track even on slopes.
+        const surfaceOffset = up.clone().multiplyScalar(TRACK_TOP_Y + 0.15);
+        entry.group.position.set(p.x + surfaceOffset.x, p.y + surfaceOffset.y, p.z + surfaceOffset.z);
 
         // Selection halo + ring scale.
         const isPinned = live.pinned === s.driver.code;
@@ -1739,9 +1867,14 @@ function Track3D({
         entry.group.userData.compound.material.color.set(compInfo.color);
 
         // Wheel spin — fake it from speed so the wheels rotate convincingly.
-        const speedMps = (s.speedKph || 0) / 3.6;
-        const spinDelta = (speedMps / WHEEL_RADIUS) * dt;
-        for (const wh of entry.group.userData.wheels) wh.rotation.x += spinDelta;
+        // Only spin if the wheels are separate meshes (4 individual wheels).
+        // If the GLB merged all wheels into one mesh, rotating it would tumble
+        // the whole set like a helicopter — skip spin in that case.
+        if (entry.group.userData.wheelsAreSeparateMeshes) {
+          const speedMps = (s.speedKph || 0) / 3.6;
+          const spinDelta = (speedMps / WHEEL_RADIUS) * dt;
+          for (const wh of entry.group.userData.wheels) wh.rotation.z += spinDelta;
+        }
 
         // Pit / out visibility on body only (keep halo for map legibility).
         const outOfPlay = s.status === "OUT";

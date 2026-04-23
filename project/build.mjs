@@ -1,6 +1,24 @@
 import * as esbuild from "esbuild";
+import { cpSync, mkdirSync, existsSync } from "fs";
+import { join, dirname } from "path";
 
 const isWatch = process.argv.includes("--watch");
+
+// Copy static assets (GLB models, etc.) into project/assets/.
+// The server mounts project/ at /app/, so assets/f1-car.glb is served at
+// /app/assets/f1-car.glb which matches the CAR_MODEL_PATH in Track3D.jsx.
+function copyAssets() {
+  const projectDir = dirname(import.meta.url.replace("file://", ""));
+  const assetsDir = join(projectDir, "assets");
+  if (!existsSync(assetsDir)) mkdirSync(assetsDir, { recursive: true });
+  const src = join(projectDir, "..", "formula-1-car-high-poly.glb");
+  if (existsSync(src)) {
+    cpSync(src, join(assetsDir, "f1-car.glb"));
+    console.log("Copied f1-car.glb → assets/");
+  } else {
+    console.warn("Warning: f1-car.glb not found at project root — cars will use fallback primitives.");
+  }
+}
 
 const ctx = await esbuild.context({
   entryPoints: ["src/index.jsx"],
@@ -21,6 +39,8 @@ const ctx = await esbuild.context({
   sourcemap: isWatch,
   logLevel: "info",
 });
+
+copyAssets();
 
 if (isWatch) {
   await ctx.watch();
