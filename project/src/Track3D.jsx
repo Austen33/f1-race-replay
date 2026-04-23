@@ -33,11 +33,11 @@ const Z_EXAGGERATION = 1.4;
 
 // Car dimensions (metres). Slightly larger than real F1 (~5×2) so the body
 // reads at wider zooms, but still honest enough for the chase cam.
-const CAR_LENGTH = 7.2;
-const CAR_WIDTH = 2.9;
-const CAR_HEIGHT = 0.55;
-const WHEEL_RADIUS = 0.45;
-const WHEEL_WIDTH = 0.42;
+const CAR_LENGTH = 14.4;
+const CAR_WIDTH = 5.8;
+const CAR_HEIGHT = 1.1;
+const WHEEL_RADIUS = 0.9;
+const WHEEL_WIDTH = 0.84;
 // Fixed-size ground halo so distant cars still read as markers even when the
 // body shrinks below a pixel. Does not scale with the car model.
 const HALO_RADIUS = 6.5;
