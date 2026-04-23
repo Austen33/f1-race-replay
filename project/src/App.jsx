@@ -55,7 +55,7 @@ function App() {
   const SESSION = {
     event: ev ? `${ev.year} · R${ev.round} · ${ev.event_name}` : "LOADING...",
     name: "RACE",
-    circuit: ev ? [ev.circuit_name, snapshot?.geometry?.total_length_m ? (snapshot.geometry.total_length_m / 1000).toFixed(3) + "KM" : ""].filter(Boolean).join(" · ") : "",
+    circuit: ev ? [ev.circuit_name, snapshot?.geometry?.total_length_m ? ((snapshot.geometry.total_length_m * window.APEX.UNIT_SCALE) / 1000).toFixed(3) + "KM" : ""].filter(Boolean).join(" · ") : "",
   };
 
   // Selections

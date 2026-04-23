@@ -21,13 +21,41 @@ const TEAMS = {};
 const DRIVERS = [];
 
 // --- CIRCUIT / SECTORS (const arrays, mutated in-place) ---
-// Each point: { x, y, z }. z is in metres (FastF1 telemetry Z column), or 0 if absent.
+// Each point: { x, y, z }. FastF1 hands us decimetre units (1/10 m); we leave
+// CIRCUIT in raw units because IsoTrack rescales via SVG viewBox, and expose
+// UNIT_SCALE so views that need metres (Track3D, HUD length readouts) can
+// convert.
 const CIRCUIT = [{ x: 0, y: 0, z: 0 }];
 const SECTORS = [
   { idx: 0, color: "#FF1E00", name: "S1" },
   { idx: 0, color: "#FFD93A", name: "S2" },
   { idx: 0, color: "#00D9FF", name: "S3" },
 ];
+// Populated from geometry snapshot. Each zone: { startIdx, endIdx }.
+const DRS_ZONES = [];
+// Scalar applied to CIRCUIT coords / total_length_m to convert to metres.
+// 0.1 for FastF1 decimetres (the common case), 1 if already metres, 0.0001
+// for legacy 1/10 mm exports. Set by _recomputeUnitScale on snapshot.
+let UNIT_SCALE = 1;
+
+// Infer the multiplier needed to convert CIRCUIT coords to metres. FastF1
+// position data is in 1/10 m (decimetres), which gives a ~5 km track a
+// diagonal extent in the tens of thousands. Some legacy exports are in
+// 1/10 mm or already in metres.
+function _detectUnitScale(circuit) {
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+  for (const p of circuit) {
+    const x = Number(p?.x), y = Number(p?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if (x < xmin) xmin = x; if (x > xmax) xmax = x;
+    if (y < ymin) ymin = y; if (y > ymax) ymax = y;
+  }
+  if (!Number.isFinite(xmin) || !Number.isFinite(ymin)) return 1;
+  const diag = Math.hypot(xmax - xmin, ymax - ymin);
+  if (diag > 500000) return 0.0001;
+  if (diag > 2000)   return 0.1;
+  return 1;
+}
 
 // --- Populate from summary / geometry (async, non-blocking) ---
 let _dataResolved;
@@ -64,6 +92,12 @@ async function _initAPEX() {
     CIRCUIT.splice(0, CIRCUIT.length, ...cx.map((x, i) => ({
       x, y: cy[i] || 0, z: cz ? (cz[i] || 0) : 0,
     })));
+    UNIT_SCALE = _detectUnitScale(CIRCUIT);
+    DRS_ZONES.splice(0, DRS_ZONES.length,
+      ...(_geometry.drs_zones || []).map((z) => ({
+        startIdx: z.start_idx, endIdx: z.end_idx,
+      }))
+    );
 
     const totalLength = _geometry.total_length_m || 1;
     const n = CIRCUIT.length;
@@ -165,6 +199,12 @@ function _installSnapshot(snap) {
       CIRCUIT.splice(0, CIRCUIT.length, ...cx.map((x, i) => ({
         x, y: cy[i] || 0, z: cz ? (cz[i] || 0) : 0,
       })));
+      UNIT_SCALE = _detectUnitScale(CIRCUIT);
+      DRS_ZONES.splice(0, DRS_ZONES.length,
+        ...(geo.drs_zones || []).map((z) => ({
+          startIdx: z.start_idx, endIdx: z.end_idx,
+        }))
+      );
       const totalLength = geo.total_length_m || 1;
       const n = CIRCUIT.length;
       const boundaries = geo.sector_boundaries_m || [];
@@ -400,7 +440,8 @@ function getPitStops(code) {
 }
 
 window.APEX = {
-  TEAMS, DRIVERS, COMPOUNDS, CIRCUIT, SECTORS,
+  TEAMS, DRIVERS, COMPOUNDS, CIRCUIT, SECTORS, DRS_ZONES,
+  get UNIT_SCALE() { return UNIT_SCALE; },
   computeStandings, telemetryFor, lapTrace,
   fetchLapTrace, getCachedLapTrace, clearLapTelemetry,
   _installSnapshot, _accumulateFrame,
