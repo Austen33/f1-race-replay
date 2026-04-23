@@ -69,6 +69,7 @@ function App() {
   const [rotateX, setRotateX] = React.useState(TWEAK_DEFAULTS.tiltDefault);
   const [rotateZ, setRotateZ] = React.useState(TWEAK_DEFAULTS.rotateDefault);
   const [zoom, setZoom] = React.useState(1);
+  const [cameraControlsCollapsed, setCameraControlsCollapsed] = React.useState(false);
 
   // View mode: "iso" (3D-looking) or "top" (2D top-down). Persist across reloads.
   const [viewMode, setViewMode] = React.useState(() => {
@@ -116,6 +117,7 @@ function App() {
       setSpeedRemote,
       setShowLabels,
       setViewMode,
+      () => setCameraControlsCollapsed((v) => !v),
     );
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -257,7 +259,7 @@ function App() {
           zIndex: 3,
         }}>
           <div style={{ fontSize: 9, color: "rgba(180,180,200,0.55)", letterSpacing: "0.2em" }}>
-            CIRCUIT VIEW · {viewMode === "top" ? "TOP" : "ISO"}
+            CIRCUIT VIEW · {viewMode === "top" ? "TOP" : "3D"}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ fontSize: 24, fontWeight: 800, color: "#F6F6FA", letterSpacing: "-0.02em" }}>
@@ -284,6 +286,8 @@ function App() {
             zoom={zoom} setZoom={setZoom}
             showLabels={showLabels} setShowLabels={setShowLabels}
             viewMode={viewMode} setViewMode={setViewMode}
+            collapsed={cameraControlsCollapsed}
+            setCollapsed={setCameraControlsCollapsed}
           />
         </div>
 

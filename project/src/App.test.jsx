@@ -22,6 +22,7 @@ function makeMocks() {
     setSpeedRemote: vi.fn(),
     setShowLabels: vi.fn(),
     setViewMode: vi.fn(),
+    toggleCameraControls: vi.fn(),
   };
 }
 
@@ -34,6 +35,7 @@ function makeHandler(refs, mocks) {
     mocks.setSpeedRemote,
     mocks.setShowLabels,
     mocks.setViewMode,
+    mocks.toggleCameraControls,
   );
 }
 
@@ -185,6 +187,18 @@ describe("hotkeyHandler", () => {
     it("ignores keys when a TEXTAREA is focused", () => {
       handler(fakeKey("Space", { target: { tagName: "TEXTAREA" } }));
       expect(mocks.post).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("camera hotkeys", () => {
+    it("sets 3D view on D", () => {
+      handler(fakeKey("KeyD", { key: "d" }));
+      expect(mocks.setViewMode).toHaveBeenCalledWith("iso");
+    });
+
+    it("toggles camera controls on C", () => {
+      handler(fakeKey("KeyC", { key: "c" }));
+      expect(mocks.toggleCameraControls).toHaveBeenCalledTimes(1);
     });
   });
 });
