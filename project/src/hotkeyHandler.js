@@ -6,7 +6,7 @@
 
 const SPEED_STEPS = [0.5, 1, 2, 4];
 
-function buildHotkeyHandler(refs, post, togglePlay, seekRemote, setSpeedRemote, setShowLabels, setViewMode) {
+function buildHotkeyHandler(refs, post, togglePlay, seekRemote, setSpeedRemote, setShowLabels, setViewMode, toggleCameraControls) {
   return (e) => {
     if (e.repeat) return;
     if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
@@ -41,6 +41,10 @@ function buildHotkeyHandler(refs, post, togglePlay, seekRemote, setSpeedRemote, 
       seekRemote(0);
     } else if (e.key === "m" || e.key === "M") {
       if (setViewMode) setViewMode((v) => (v === "top" ? "iso" : "top"));
+    } else if (e.key === "d" || e.key === "D") {
+      if (setViewMode) setViewMode("iso");
+    } else if (e.key === "c" || e.key === "C") {
+      if (toggleCameraControls) toggleCameraControls();
     }
   };
 }

@@ -309,8 +309,47 @@ function TransportBtn({ children, onClick, title, primary }) {
 }
 
 // Camera controls
-function CameraControls({ rotateX, setRotateX, rotateZ, setRotateZ, zoom, setZoom, showLabels, setShowLabels, viewMode, setViewMode }) {
+function CameraControls({
+  rotateX,
+  setRotateX,
+  rotateZ,
+  setRotateZ,
+  zoom,
+  setZoom,
+  showLabels,
+  setShowLabels,
+  viewMode,
+  setViewMode,
+  collapsed,
+  setCollapsed,
+}) {
   const isTop = viewMode === "top";
+  if (collapsed) {
+    return (
+      <div style={{
+        display: "flex", flexDirection: "column", gap: 6,
+        background: "linear-gradient(180deg, rgba(20,20,30,0.88), rgba(11,11,17,0.92))",
+        border: "1px solid rgba(255,255,255,0.06)",
+        padding: 6,
+        fontFamily: "JetBrains Mono, monospace",
+        fontSize: 9,
+      }}>
+        <button onClick={() => setCollapsed(false)} style={{
+          padding: "4px 8px",
+          background: "transparent",
+          border: "1px solid rgba(255,255,255,0.12)",
+          color: "rgba(230,230,239,0.78)",
+          cursor: "pointer",
+          fontFamily: "inherit",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: "0.14em",
+        }}>
+          CAMERA <span style={{ opacity: 0.5 }}>[C]</span>
+        </button>
+      </div>
+    );
+  }
   return (
     <div style={{
       display: "flex", flexDirection: "column", gap: 6,
@@ -322,14 +361,24 @@ function CameraControls({ rotateX, setRotateX, rotateZ, setRotateZ, zoom, setZoo
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
         <div style={{ color: "rgba(180,180,200,0.5)", letterSpacing: "0.14em" }}>CAMERA</div>
-        <button onClick={() => { setRotateX(62); setRotateZ(-18); setZoom(1); }} style={{
-          padding: "2px 6px", background: "transparent",
-          border: "1px solid rgba(255,255,255,0.08)",
-          color: "rgba(180,180,200,0.7)", cursor: "pointer",
-          fontFamily: "inherit", fontSize: 8, letterSpacing: "0.12em",
-        }}>RESET</button>
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          {setCollapsed && (
+            <button onClick={() => setCollapsed(true)} style={{
+              padding: "2px 6px", background: "transparent",
+              border: "1px solid rgba(255,255,255,0.08)",
+              color: "rgba(180,180,200,0.7)", cursor: "pointer",
+              fontFamily: "inherit", fontSize: 8, letterSpacing: "0.12em",
+            }}>HIDE <span style={{ opacity: 0.55 }}>[C]</span></button>
+          )}
+          <button onClick={() => { setRotateX(62); setRotateZ(-18); setZoom(1); }} style={{
+            padding: "2px 6px", background: "transparent",
+            border: "1px solid rgba(255,255,255,0.08)",
+            color: "rgba(180,180,200,0.7)", cursor: "pointer",
+            fontFamily: "inherit", fontSize: 8, letterSpacing: "0.12em",
+          }}>RESET</button>
+        </div>
       </div>
-      {/* View mode toggle — segmented ISO / TOP */}
+      {/* View mode toggle — segmented 3D / TOP */}
       {setViewMode && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginBottom: 2 }}>
           {["iso", "top"].map((m) => (
@@ -340,7 +389,7 @@ function CameraControls({ rotateX, setRotateX, rotateZ, setRotateZ, zoom, setZoo
               border: `1px solid ${viewMode === m ? "#FF1E00" : "rgba(255,255,255,0.1)"}`,
               cursor: "pointer",
               fontFamily: "inherit", fontSize: 9, fontWeight: 700, letterSpacing: "0.16em",
-            }}>{m === "iso" ? "ISO" : "TOP"} {m === "top" && <span style={{ opacity: 0.6 }}>[M]</span>}</button>
+            }}>{m === "iso" ? "3D" : "TOP"} {m === "iso" ? <span style={{ opacity: 0.6 }}>[D]</span> : <span style={{ opacity: 0.6 }}>[M]</span>}</button>
           ))}
         </div>
       )}
