@@ -281,7 +281,7 @@ function CompareTraces({ pinned, secondary, lap, channel = "speed", setChannel, 
           )}
         </svg>
         <div style={{
-          position: "absolute", top: 8, right: 10,
+          position: "absolute", top: 24, right: 10,
           display: "flex", gap: 10,
           fontFamily: "JetBrains Mono, monospace",
           fontSize: 9,
