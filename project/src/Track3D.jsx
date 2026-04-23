@@ -38,6 +38,7 @@ const CAR_WIDTH = 5.8;
 const CAR_HEIGHT = 1.1;
 const WHEEL_RADIUS = 0.9;
 const WHEEL_WIDTH = 0.84;
+const CAR_SURFACE_CLEARANCE = 0.03;
 // Fixed-size ground halo so distant cars still read as markers even when the
 // body shrinks below a pixel. Does not scale with the car model.
 const HALO_RADIUS = 6.5;
@@ -917,14 +918,25 @@ function makeDriverMarker(team) {
     // Rotate 180° so the model faces +X (forward). The GLB's default
     // forward is -X, so a Y-axis flip aligns it with the scene convention.
     clone.rotation.y = Math.PI;
-    // Recompute bbox after scaling to centre the model.
+    // Recompute bbox after scaling/rotation to centre the model in X/Z and
+    // anchor Y to the wheel contact plane.
+    clone.updateMatrixWorld(true);
     const bbox2 = new THREE.Box3().setFromObject(clone);
     const center = bbox2.getCenter(new THREE.Vector3());
-    clone.position.sub(center);
-    // Lift so the lowest point sits just above the track surface.
-    // Add a small offset to prevent the car from sinking into the track.
-    clone.position.y -= bbox2.min.y;
-    clone.position.y += 0.15;
+    clone.position.x -= center.x;
+    clone.position.z -= center.z;
+    // Anchor the clone so the lowest wheel point sits at local Y=0. This is a
+    // geometry-derived contact plane (no magic offsets), so placement on track
+    // only needs one global clearance value.
+    let contactY = Infinity;
+    if (wheels.length > 0) {
+      for (const wheel of wheels) {
+        const wheelBox = new THREE.Box3().setFromObject(wheel);
+        if (wheelBox.min.y < contactY) contactY = wheelBox.min.y;
+      }
+    }
+    if (!Number.isFinite(contactY)) contactY = bbox2.min.y;
+    clone.position.y -= contactY;
 
     g.add(clone);
     g.userData.body = body;
@@ -1844,7 +1856,7 @@ function Track3D({
         entry.group.quaternion.setFromRotationMatrix(m);
         // Position on track surface, offset along the surface normal (up)
         // so the car sits on top of the track even on slopes.
-        const surfaceOffset = up.clone().multiplyScalar(TRACK_TOP_Y + 0.15);
+        const surfaceOffset = up.clone().multiplyScalar(TRACK_TOP_Y + CAR_SURFACE_CLEARANCE);
         entry.group.position.set(p.x + surfaceOffset.x, p.y + surfaceOffset.y, p.z + surfaceOffset.z);
 
         // Selection halo + ring scale.
