@@ -21,7 +21,8 @@ const TEAMS = {};
 const DRIVERS = [];
 
 // --- CIRCUIT / SECTORS (const arrays, mutated in-place) ---
-const CIRCUIT = [{ x: 0, y: 0 }];
+// Each point: { x, y, z }. z is in metres (FastF1 telemetry Z column), or 0 if absent.
+const CIRCUIT = [{ x: 0, y: 0, z: 0 }];
 const SECTORS = [
   { idx: 0, color: "#FF1E00", name: "S1" },
   { idx: 0, color: "#FFD93A", name: "S2" },
@@ -59,7 +60,10 @@ async function _initAPEX() {
   if (_geometry) {
     const cx = _geometry.centerline?.x || [];
     const cy = _geometry.centerline?.y || [];
-    CIRCUIT.splice(0, CIRCUIT.length, ...cx.map((x, i) => ({ x, y: cy[i] || 0 })));
+    const cz = _geometry.centerline?.z || null;
+    CIRCUIT.splice(0, CIRCUIT.length, ...cx.map((x, i) => ({
+      x, y: cy[i] || 0, z: cz ? (cz[i] || 0) : 0,
+    })));
 
     const totalLength = _geometry.total_length_m || 1;
     const n = CIRCUIT.length;
@@ -157,7 +161,10 @@ function _installSnapshot(snap) {
     const cx = geo.centerline?.x || [];
     const cy = geo.centerline?.y || [];
     if (cx.length > 1) {
-      CIRCUIT.splice(0, CIRCUIT.length, ...cx.map((x, i) => ({ x, y: cy[i] || 0 })));
+      const cz = geo.centerline?.z || null;
+      CIRCUIT.splice(0, CIRCUIT.length, ...cx.map((x, i) => ({
+        x, y: cy[i] || 0, z: cz ? (cz[i] || 0) : 0,
+      })));
       const totalLength = geo.total_length_m || 1;
       const n = CIRCUIT.length;
       const boundaries = geo.sector_boundaries_m || [];

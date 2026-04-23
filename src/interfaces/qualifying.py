@@ -125,7 +125,7 @@ class QualifyingReplay(arcade.Window):
          self.x_inner, self.y_inner,
          self.x_outer, self.y_outer,
          self.x_min, self.x_max,
-         self.y_min, self.y_max, self.drs_zones_xy) = build_track_from_example_lap(example_lap.get_telemetry())
+         self.y_min, self.y_max, self.drs_zones_xy, _z) = build_track_from_example_lap(example_lap.get_telemetry())
          
         ref_points = self._interpolate_points(self.plot_x_ref, self.plot_y_ref, interp_points=4000)
         self._ref_xs = np.array([p[0] for p in ref_points])

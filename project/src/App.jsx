@@ -43,6 +43,9 @@ function App() {
     air: Math.round(weatherRaw.air_temp ?? 0),
     track: Math.round(weatherRaw.track_temp ?? 0),
     hum: Math.round(weatherRaw.humidity ?? 0),
+    rainState: weatherRaw.rain_state || "DRY",
+    windSpeed: weatherRaw.wind_speed ?? 0,
+    windDirection: weatherRaw.wind_direction ?? 0,
   };
   const isPaused = playback?.is_paused ?? true;
   const speed = playback?.speed ?? 1;
@@ -71,9 +74,10 @@ function App() {
   const [zoom, setZoom] = React.useState(1);
   const [cameraControlsCollapsed, setCameraControlsCollapsed] = React.useState(false);
 
-  // View mode: "iso" (3D-looking) or "top" (2D top-down). Persist across reloads.
+  // View mode: "webgl" (Three.js 3D), "follow" (WebGL chase cam), "iso" (legacy SVG 3D),
+  // or "top" (2D top-down). Persist across reloads. Default = webgl.
   const [viewMode, setViewMode] = React.useState(() => {
-    try { return localStorage.getItem("apex.viewMode") || "iso"; } catch { return "iso"; }
+    try { return localStorage.getItem("apex.viewMode") || "webgl"; } catch { return "webgl"; }
   });
   React.useEffect(() => {
     try { localStorage.setItem("apex.viewMode", viewMode); } catch {}
@@ -268,7 +272,11 @@ function App() {
           zIndex: 3,
         }}>
           <div style={{ fontSize: 9, color: "rgba(180,180,200,0.55)", letterSpacing: "0.2em" }}>
-            CIRCUIT VIEW · {viewMode === "top" ? "TOP" : "3D"}
+            CIRCUIT VIEW · {
+              viewMode === "top" ? "TOP" :
+              viewMode === "follow" ? "CHASE" :
+              viewMode === "webgl" ? "WEBGL" : "SVG 3D"
+            }
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ fontSize: 24, fontWeight: 800, color: "#F6F6FA", letterSpacing: "-0.02em" }}>
@@ -313,21 +321,36 @@ function App() {
           }}/>
         ))}
 
-        <IsoTrack
-          standings={standings}
-          safetyCar={safetyCar}
-          pinned={pinned}
-          secondary={secondary}
-          onPickDriver={(code, e) => {
-            if (e && e.shiftKey) onShiftPick(code);
-            else onPick(code);
-          }}
-          showLabels={showLabels}
-          rotateX={rotateX}
-          rotateZ={rotateZ}
-          zoom={zoom}
-          viewMode={viewMode}
-        />
+        {(viewMode === "webgl" || viewMode === "follow") ? (
+          <window.Track3D
+            standings={standings}
+            pinned={pinned}
+            secondary={secondary}
+            onPickDriver={(code, e) => {
+              if (e && e.shiftKey) onShiftPick(code);
+              else onPick(code);
+            }}
+            showLabels={showLabels}
+            cameraMode={viewMode === "follow" ? "follow" : "orbit"}
+            weather={weather}
+          />
+        ) : (
+          <IsoTrack
+            standings={standings}
+            safetyCar={safetyCar}
+            pinned={pinned}
+            secondary={secondary}
+            onPickDriver={(code, e) => {
+              if (e && e.shiftKey) onShiftPick(code);
+              else onPick(code);
+            }}
+            showLabels={showLabels}
+            rotateX={rotateX}
+            rotateZ={rotateZ}
+            zoom={zoom}
+            viewMode={viewMode}
+          />
+        )}
 
         {/* Bottom HUD: selected driver pip + compare toggle */}
         {pinned && (

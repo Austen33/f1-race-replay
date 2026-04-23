@@ -40,9 +40,11 @@ function buildHotkeyHandler(refs, post, togglePlay, seekRemote, setSpeedRemote, 
     } else if (e.key === "r" || e.key === "R") {
       seekRemote(0);
     } else if (e.key === "m" || e.key === "M") {
-      if (setViewMode) setViewMode((v) => (v === "top" ? "iso" : "top"));
+      if (setViewMode) setViewMode((v) => (v === "top" ? "webgl" : "top"));
     } else if (e.key === "d" || e.key === "D") {
-      if (setViewMode) setViewMode("iso");
+      if (setViewMode) setViewMode("webgl");
+    } else if (e.key === "f" || e.key === "F") {
+      if (setViewMode) setViewMode((v) => (v === "follow" ? "webgl" : "follow"));
     } else if (e.key === "c" || e.key === "C") {
       if (toggleCameraControls) toggleCameraControls();
     }

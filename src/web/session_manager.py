@@ -113,7 +113,7 @@ def _shape_geometry_payload(raw, session, race):
      x_inner, y_inner,
      x_outer, y_outer,
      x_min, x_max,
-     y_min, y_max, drs_zones) = raw
+     y_min, y_max, drs_zones, plot_z_ref) = raw
 
     # Build dense reference polyline + cumulative distances
     ref_xs, ref_ys, ref_cumdist, ref_total_length = _build_reference(
@@ -144,7 +144,11 @@ def _shape_geometry_payload(raw, session, race):
         })
 
     return {
-        "centerline": {"x": _tolist(plot_x_ref), "y": _tolist(plot_y_ref)},
+        "centerline": {
+            "x": _tolist(plot_x_ref),
+            "y": _tolist(plot_y_ref),
+            "z": _tolist(plot_z_ref) if plot_z_ref is not None else None,
+        },
         "inner": {"x": _tolist(x_inner), "y": _tolist(y_inner)},
         "outer": {"x": _tolist(x_outer), "y": _tolist(y_outer)},
         "drs_zones": drs_payload,

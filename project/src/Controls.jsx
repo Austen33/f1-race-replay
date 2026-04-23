@@ -386,24 +386,30 @@ function CameraControls({
           }}>RESET</button>
         </div>
       </div>
-      {/* View mode toggle — segmented 3D / TOP */}
+      {/* View mode toggle — segmented WEBGL / 3D / FOLLOW / TOP */}
       {setViewMode && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginBottom: 2 }}>
-          {["iso", "top"].map((m) => (
-            <button key={m} onClick={() => setViewMode(m)} style={{
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 4, marginBottom: 2 }}>
+          {[
+            { k: "webgl",  label: "GL" },
+            { k: "iso",    label: "SVG" },
+            { k: "follow", label: "CHASE" },
+            { k: "top",    label: "TOP" },
+          ].map(({ k, label }) => (
+            <button key={k} onClick={() => setViewMode(k)} style={{
               padding: "4px 2px",
-              background: viewMode === m ? T.hot : "transparent",
-              color: viewMode === m ? "#FFFFFF" : "rgba(230,230,239,0.7)",
-              border: `1px solid ${viewMode === m ? T.hot : "rgba(255,255,255,0.1)"}`,
+              background: viewMode === k ? T.hot : "transparent",
+              color: viewMode === k ? "#FFFFFF" : "rgba(230,230,239,0.7)",
+              border: `1px solid ${viewMode === k ? T.hot : "rgba(255,255,255,0.1)"}`,
               cursor: "pointer",
               fontFamily: "inherit", fontSize: T.fs.xs, fontWeight: 700, letterSpacing: T.ls.caps,
-            }}>{m === "iso" ? "3D" : "TOP"} {m === "iso" ? <span style={{ opacity: 0.6 }}>[D]</span> : <span style={{ opacity: 0.6 }}>[M]</span>}</button>
+            }}>{label}</button>
           ))}
         </div>
       )}
-      <Slider label="TILT" value={rotateX} onChange={setRotateX} min={0} max={85} suffix="°" disabled={isTop}/>
-      <Slider label="ROT"  value={rotateZ} onChange={setRotateZ} min={-180} max={180} suffix="°"/>
-      <Slider label="ZOOM" value={zoom*100} onChange={(v) => setZoom(v/100)} min={50} max={400} suffix="%"/>
+      {/* Tilt/Rot/Zoom only meaningful for the legacy SVG view. */}
+      <Slider label="TILT" value={rotateX} onChange={setRotateX} min={0} max={85} suffix="°" disabled={isTop || viewMode === "webgl" || viewMode === "follow"}/>
+      <Slider label="ROT"  value={rotateZ} onChange={setRotateZ} min={-180} max={180} suffix="°" disabled={viewMode === "webgl" || viewMode === "follow"}/>
+      <Slider label="ZOOM" value={zoom*100} onChange={(v) => setZoom(v/100)} min={50} max={400} suffix="%" disabled={viewMode === "webgl" || viewMode === "follow"}/>
       <div style={{ height: 1, background: "rgba(255,255,255,0.05)", margin: "4px 0" }}/>
       <Toggle label="LABELS"       on={showLabels}   onChange={setShowLabels} hotkey="L"/>
     </div>

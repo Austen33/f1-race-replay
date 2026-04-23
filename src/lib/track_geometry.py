@@ -10,6 +10,7 @@ def build_track_pure(example_lap, track_width=200):
     drs_zones = _plot_drs_zones(example_lap)
     plot_x_ref = example_lap["X"]
     plot_y_ref = example_lap["Y"]
+    plot_z_ref = example_lap["Z"] if "Z" in example_lap else None
 
     dx = np.gradient(plot_x_ref)
     dy = np.gradient(plot_y_ref)
@@ -33,7 +34,7 @@ def build_track_pure(example_lap, track_width=200):
     y_max = max(plot_y_ref.max(), y_inner.max(), y_outer.max())
 
     return (plot_x_ref, plot_y_ref, x_inner, y_inner, x_outer, y_outer,
-            x_min, x_max, y_min, y_max, drs_zones)
+            x_min, x_max, y_min, y_max, drs_zones, plot_z_ref)
 
 
 def _plot_drs_zones(example_lap):

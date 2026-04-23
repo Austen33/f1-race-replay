@@ -191,9 +191,18 @@ describe("hotkeyHandler", () => {
   });
 
   describe("camera hotkeys", () => {
-    it("sets 3D view on D", () => {
+    it("sets WebGL 3D view on D", () => {
       handler(fakeKey("KeyD", { key: "d" }));
-      expect(mocks.setViewMode).toHaveBeenCalledWith("iso");
+      expect(mocks.setViewMode).toHaveBeenCalledWith("webgl");
+    });
+
+    it("toggles follow cam on F", () => {
+      handler(fakeKey("KeyF", { key: "f" }));
+      expect(mocks.setViewMode).toHaveBeenCalledTimes(1);
+      const fn = mocks.setViewMode.mock.calls[0][0];
+      expect(typeof fn).toBe("function");
+      expect(fn("webgl")).toBe("follow");
+      expect(fn("follow")).toBe("webgl");
     });
 
     it("toggles camera controls on C", () => {
