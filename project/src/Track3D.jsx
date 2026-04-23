@@ -1806,6 +1806,7 @@ function Track3D({
     const tmpTan = new THREE.Vector3();
 
     const animate = () => {
+      try {
       const now = performance.now();
       const dt = Math.min(0.1, (now - lastT) / 1000);
       lastT = now;
@@ -2002,7 +2003,7 @@ function Track3D({
         const vp = new THREE.Vector3();
         for (const [, entry] of driverMap) {
           const firstBody = entry.group.userData.body[0];
-          if (!firstBody.visible) { entry.label.style.display = "none"; continue; }
+          if (!firstBody || !firstBody.visible) { entry.label.style.display = "none"; continue; }
           vp.copy(entry.group.position);
           vp.y += 3;
           vp.project(camera);
@@ -2017,6 +2018,9 @@ function Track3D({
         labelLayer.style.display = "none";
       }
 
+      } catch (err) {
+        console.error('[Track3D animate]', err);
+      }
       composer.render();
       rafId = requestAnimationFrame(animate);
     };
