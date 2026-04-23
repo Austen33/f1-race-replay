@@ -11,7 +11,7 @@ function copyAssets() {
   const projectDir = dirname(import.meta.url.replace("file://", ""));
   const assetsDir = join(projectDir, "assets");
   if (!existsSync(assetsDir)) mkdirSync(assetsDir, { recursive: true });
-  const src = join(projectDir, "..", "formula-1-car-high-poly.glb");
+  const src = join(projectDir, "..", "car_model.glb");
   if (existsSync(src)) {
     cpSync(src, join(assetsDir, "f1-car.glb"));
     console.log("Copied f1-car.glb → assets/");
