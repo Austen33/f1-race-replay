@@ -333,6 +333,7 @@ function App() {
             showLabels={showLabels}
             cameraMode={viewMode === "follow" ? "follow" : "orbit"}
             weather={weather}
+            circuitName={ev?.circuit_name || ev?.event_name || ""}
           />
         ) : (
           <IsoTrack
