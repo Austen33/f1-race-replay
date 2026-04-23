@@ -44,7 +44,7 @@ async function _initAPEX() {
       const teamKey = d.team || "Unknown";
       if (!teamsSeen[teamKey]) {
         teamsSeen[teamKey] = true;
-        TEAMS[teamKey] = { name: teamKey, color: "#FF1E00", sub: "#8A0A00" };
+        TEAMS[teamKey] = { name: teamKey, color: d.team_color || "#FF1E00", sub: "#8A0A00" };
       }
       DRIVERS.push({
         code: d.code,
@@ -125,14 +125,14 @@ function _installSnapshot(snap) {
     if (sentinelIdx !== -1) DRIVERS.splice(sentinelIdx, 1);
     delete TEAMS["Loading"];
   }
-  const colors = snap.driver_colors || {};
   for (const [code, info] of Object.entries(meta)) {
     const teamKey = info.team;
-    if (TEAMS[teamKey] && colors[code]) {
-      TEAMS[teamKey].color = colors[code];
+    const teamColor = info.team_color || "#FF1E00";
+    if (TEAMS[teamKey]) {
+      TEAMS[teamKey].color = teamColor;
     }
     if (!TEAMS[teamKey] && teamKey) {
-      TEAMS[teamKey] = { name: teamKey, color: colors[code] || "#FF1E00", sub: "#8A0A00" };
+      TEAMS[teamKey] = { name: teamKey, color: teamColor, sub: "#8A0A00" };
     }
   }
   // Update driver details from snapshot meta

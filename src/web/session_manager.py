@@ -195,6 +195,7 @@ def _extract_driver_meta(session):
             "number": int(d.get("DriverNumber", 0) or 0),
             "full_name": d.get("FullName", ""),
             "team": d.get("TeamName", ""),
+            "team_color": "#" + d["TeamColor"] if d.get("TeamColor") else "",
             "country": d.get("CountryCode", ""),
         }
     return out
