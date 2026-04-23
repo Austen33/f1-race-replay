@@ -16,6 +16,12 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 
 // Track dimensions (metres).
 const TRACK_WIDTH = 14;
@@ -95,6 +101,65 @@ function makeAsphaltTexture() {
     ctx.fillRect(x, 0, w, size);
   }
   ctx.globalAlpha = 1;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+// Procedural normal map for the asphalt — gives the surface real bump under
+// directional lighting and IBL reflection. Built by generating a height field
+// of low-frequency noise, blurring it, then computing per-pixel normals via
+// central differences (cheap Sobel-equivalent).
+function makeAsphaltNormalMap() {
+  const size = 256;
+  const heights = new Float32Array(size * size);
+  // Layer two octaves of value noise for that "coarse with fine grain" look.
+  for (let i = 0; i < heights.length; i++) heights[i] = Math.random();
+  // Box-blur once to soften single-pixel spikes (which would flicker badly
+  // with view distance).
+  const blurred = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let sum = 0, count = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = (x + dx + size) % size;
+          const yy = (y + dy + size) % size;
+          sum += heights[yy * size + xx];
+          count++;
+        }
+      }
+      blurred[y * size + x] = sum / count;
+    }
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  const img = ctx.createImageData(size, size);
+  const d = img.data;
+  // Strength tuned so reflections shimmer without making the surface look
+  // like coarse gravel.
+  const STRENGTH = 0.55;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const xL = (x - 1 + size) % size, xR = (x + 1) % size;
+      const yU = (y - 1 + size) % size, yD = (y + 1) % size;
+      const dx = (blurred[y * size + xR] - blurred[y * size + xL]) * STRENGTH;
+      const dy = (blurred[yD * size + x] - blurred[yU * size + x]) * STRENGTH;
+      // Tangent-space normal: pack into (R, G, B) with Z dominant (out of
+      // surface). Length-normalise so the map is valid.
+      let nx = -dx, ny = -dy, nz = 1.0;
+      const len = Math.hypot(nx, ny, nz);
+      nx /= len; ny /= len; nz /= len;
+      const idx = (y * size + x) * 4;
+      d[idx + 0] = (nx * 0.5 + 0.5) * 255;
+      d[idx + 1] = (ny * 0.5 + 0.5) * 255;
+      d[idx + 2] = (nz * 0.5 + 0.5) * 255;
+      d[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.anisotropy = 4;
@@ -218,42 +283,75 @@ function buildEdgeLineGeometry(curve, segments, offset, width, yLift) {
   return geom;
 }
 
-// Red/white kerbs. STRIPE_SEGS = how many curve-segments span one colour band.
-// At ~2000 segments round a 5 km track, 2 ≈ 5 m per stripe — matches real
-// kerbing.
-function buildKerbGeometry(curve, segments, innerOffset, outerOffset, side, yLift) {
-  const positions = new Float32Array((segments + 1) * 2 * 3);
-  const colors = new Float32Array((segments + 1) * 2 * 3);
+// Raised, extruded kerbs with a top face + outer fascia (the inner face is
+// hidden against the track surface, the underside never sees the camera).
+// Colour stripes are painted by duplicating vertices at each colour boundary
+// so the bands are crisp instead of gradient-interpolated.
+//
+// At ~2000 segments around a 5 km track, STRIPE_SEGS=2 ≈ 5 m per stripe —
+// matches real F1 kerbing.
+function buildKerbGeometry(curve, segments, innerOffset, outerOffset, side, kerbHeight) {
+  const STRIPE_SEGS = 2;
+  const red = new THREE.Color(0xff1e00);
+  const white = new THREE.Color(0xf4f4f8);
+  const positions = [];
+  const colors = [];
   const indices = [];
   const up = new THREE.Vector3(0, 1, 0);
   const right = new THREE.Vector3();
   const tan = new THREE.Vector3();
-  const red = new THREE.Color(0xff1e00);
-  const white = new THREE.Color(0xf4f4f8);
-  const STRIPE_SEGS = 2;
-  for (let i = 0; i <= segments; i++) {
-    const t = i / segments;
+  // Per ring at curve-step i we emit 3 vertices:
+  //   0: bottom-outer (sits on track surface, hidden by ribbon)
+  //   1: top-inner    (top edge nearest the racing surface)
+  //   2: top-outer    (top edge nearest the runoff)
+  // Stripe boundaries split the ring so each band has its own pair.
+  let lastBand = -1;
+  const pushRing = (t, band) => {
     const p = curve.getPoint(t);
     curve.getTangent(t, tan);
     right.crossVectors(tan, up).normalize();
-    const inner = side * innerOffset, outer = side * outerOffset;
-    positions[i * 6 + 0] = p.x + right.x * inner;
-    positions[i * 6 + 1] = p.y + yLift;
-    positions[i * 6 + 2] = p.z + right.z * inner;
-    positions[i * 6 + 3] = p.x + right.x * outer;
-    positions[i * 6 + 4] = p.y + yLift;
-    positions[i * 6 + 5] = p.z + right.z * outer;
-    const c = Math.floor(i / STRIPE_SEGS) % 2 === 0 ? red : white;
-    colors[i * 6 + 0] = c.r; colors[i * 6 + 1] = c.g; colors[i * 6 + 2] = c.b;
-    colors[i * 6 + 3] = c.r; colors[i * 6 + 4] = c.g; colors[i * 6 + 5] = c.b;
-    if (i < segments) {
-      const a = i * 2, b = i * 2 + 1, c2 = (i + 1) * 2, d = (i + 1) * 2 + 1;
-      indices.push(a, c2, b, b, c2, d);
+    const inner = side * innerOffset;
+    const outer = side * outerOffset;
+    const baseY = p.y + 0.05;
+    const topY = p.y + kerbHeight;
+    positions.push(
+      p.x + right.x * outer, baseY, p.z + right.z * outer,
+      p.x + right.x * inner, topY,  p.z + right.z * inner,
+      p.x + right.x * outer, topY,  p.z + right.z * outer,
+    );
+    const c = (band % 2 === 0) ? red : white;
+    colors.push(c.r, c.g, c.b, c.r, c.g, c.b, c.r, c.g, c.b);
+  };
+  let ringCount = 0;
+  for (let i = 0; i <= segments; i++) {
+    const band = Math.floor(i / STRIPE_SEGS);
+    const t = i / segments;
+    if (band !== lastBand && i > 0) {
+      // Insert a duplicate ring at the same t so the colour change is hard.
+      pushRing(t, lastBand);
+      ringCount++;
+      // Stitch quads from previous ring (ringCount - 2) to this duplicate
+      // (ringCount - 1).
+      const a0 = (ringCount - 2) * 3;
+      const a1 = (ringCount - 1) * 3;
+      // top face quad: a0+1, a0+2, a1+1, a1+2
+      indices.push(a0 + 1, a0 + 2, a1 + 1, a1 + 1, a0 + 2, a1 + 2);
+      // outer face quad: a0+0, a0+2, a1+0, a1+2
+      indices.push(a0 + 0, a0 + 2, a1 + 0, a1 + 0, a0 + 2, a1 + 2);
     }
+    pushRing(t, band);
+    ringCount++;
+    if (i > 0 && (band === lastBand || lastBand === -1)) {
+      const a0 = (ringCount - 2) * 3;
+      const a1 = (ringCount - 1) * 3;
+      indices.push(a0 + 1, a0 + 2, a1 + 1, a1 + 1, a0 + 2, a1 + 2);
+      indices.push(a0 + 0, a0 + 2, a1 + 0, a1 + 0, a0 + 2, a1 + 2);
+    }
+    lastBand = band;
   }
   const geom = new THREE.BufferGeometry();
-  geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+  geom.setAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
   geom.setIndex(indices);
   geom.computeVertexNormals();
   return geom;
@@ -377,14 +475,23 @@ function buildRacingLineMesh(curve, segments) {
 function makeDriverMarker(team) {
   const g = new THREE.Group();
   const color = new THREE.Color(team?.color || "#ff1e00");
+  // Slightly clearcoat-y livery: lower roughness + metalness so the IBL env
+  // map paints a real cockpit/shoulder reflection, faint emissive keeps the
+  // brand colour readable in shadow.
   const bodyMat = new THREE.MeshStandardMaterial({
-    color, roughness: 0.55, metalness: 0.25, emissive: color, emissiveIntensity: 0.08,
+    color, roughness: 0.32, metalness: 0.45,
+    emissive: color, emissiveIntensity: 0.06,
+    envMapIntensity: 1.4,
   });
+  // Black aero (wings, halo, endplates) — lacquered carbon look.
   const darkMat = new THREE.MeshStandardMaterial({
-    color: 0x0e0e14, roughness: 0.75, metalness: 0.1,
+    color: 0x080810, roughness: 0.42, metalness: 0.35,
+    envMapIntensity: 1.1,
   });
+  // Tyres stay matte rubber.
   const tyreMat = new THREE.MeshStandardMaterial({
-    color: 0x16161c, roughness: 0.9, metalness: 0.02,
+    color: 0x101015, roughness: 0.92, metalness: 0.0,
+    envMapIntensity: 0.4,
   });
 
   // Floor + sidepod-ish main body — a low flat slab that tapers slightly at
@@ -513,6 +620,16 @@ function makeDriverMarker(team) {
   compound.position.set(-CAR_LENGTH * 0.05, 1.9, 0);
   g.add(compound);
 
+  // Cast soft shadows from every solid car part. Lights/halo/compound bobble
+  // are intentionally excluded so they don't paint hard squares onto the
+  // track.
+  for (const m of [floor, sidepods, nose, airbox, halo,
+                   frontWing, rearWingFlap, rearEndplateL, rearEndplateR,
+                   ...wheels]) {
+    m.castShadow = true;
+    m.receiveShadow = true;
+  }
+
   g.userData = {
     body: [floor, sidepods, nose, airbox, rearWingFlap, rearEndplateL, rearEndplateR, frontWing],
     bodyMats: [bodyMat, darkMat],
@@ -554,53 +671,144 @@ function makeLabel(code, teamColor) {
 // Atmosphere — sky, grandstand rim, rain.
 // ───────────────────────────────────────────────────────────────────────────
 
-function buildSkyDome(radius) {
-  const geom = new THREE.SphereGeometry(radius, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.55);
+// Procedural night-into-dusk sky: zenith (deep blue) → horizon (warm haze) →
+// ground tone, plus a soft sun disc + glow and sparse procedural stars near
+// zenith. Full sphere (BackSide) so the chase camera can pitch up freely.
+function buildSkyDome(radius, sunDir) {
+  const geom = new THREE.SphereGeometry(radius, 48, 24);
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
     uniforms: {
-      top:    { value: new THREE.Color(0x0a0c14) },
-      bottom: { value: new THREE.Color(0x1e1528) },
+      uZenith:    { value: new THREE.Color(0x070914) },
+      uHorizon:   { value: new THREE.Color(0x4a2a3c) },
+      uGround:    { value: new THREE.Color(0x06070b) },
+      uSunDir:    { value: sunDir.clone().normalize() },
+      uSunColor:  { value: new THREE.Color(0xffd4a8) },
+      uSunSize:   { value: 0.9985 },
+      uStarStrength: { value: 0.6 },
     },
     vertexShader: `
-      varying vec3 vWorld;
+      varying vec3 vDir;
       void main() {
-        vec4 wp = modelMatrix * vec4(position, 1.0);
-        vWorld = wp.xyz;
-        gl_Position = projectionMatrix * viewMatrix * wp;
+        vDir = normalize(position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
     fragmentShader: `
-      varying vec3 vWorld;
-      uniform vec3 top;
-      uniform vec3 bottom;
+      varying vec3 vDir;
+      uniform vec3 uZenith;
+      uniform vec3 uHorizon;
+      uniform vec3 uGround;
+      uniform vec3 uSunDir;
+      uniform vec3 uSunColor;
+      uniform float uSunSize;
+      uniform float uStarStrength;
+
+      float hash21(vec2 p) {
+        p = fract(p * vec2(443.8975, 397.2973));
+        p += dot(p.xy, p.yx + 19.19);
+        return fract(p.x * p.y);
+      }
+
       void main() {
-        float h = clamp(vWorld.y / ${(radius).toFixed(1)}, 0.0, 1.0);
-        gl_FragColor = vec4(mix(bottom, top, h), 1.0);
+        vec3 d = normalize(vDir);
+        float t = clamp(d.y, -1.0, 1.0);
+        // Sky-vertical gradient.
+        vec3 sky = (t > 0.0)
+          ? mix(uHorizon, uZenith, smoothstep(0.0, 0.55, t))
+          : mix(uHorizon, uGround, smoothstep(0.0, -0.25, t));
+        // Warm haze concentrated at the horizon.
+        float haze = exp(-abs(t) * 5.5);
+        sky = mix(sky, uHorizon * 1.6, haze * 0.55);
+        // Sun disc + bloom-friendly glow.
+        float sd = max(0.0, dot(d, normalize(uSunDir)));
+        float disc = smoothstep(uSunSize, uSunSize + 0.0008, sd);
+        float halo = pow(sd, 64.0) * 0.55 + pow(sd, 6.0) * 0.10;
+        sky += uSunColor * (disc * 6.0 + halo);
+        // Sparse stars: only above horizon, fade in as we look up.
+        if (t > 0.05) {
+          // Project direction onto a stable grid (uses xz / y pseudo-tangent).
+          vec2 grid = floor(d.xz / max(0.04, d.y) * 220.0);
+          float h = hash21(grid);
+          float star = step(0.9965, h) * uStarStrength * smoothstep(0.05, 0.4, t);
+          // Twinkle bias — vary brightness per star.
+          star *= 0.5 + 0.5 * hash21(grid + 13.7);
+          sky += vec3(star) * vec3(0.85, 0.9, 1.0);
+        }
+        gl_FragColor = vec4(sky, 1.0);
       }
     `,
   });
   return new THREE.Mesh(geom, mat);
 }
 
-// A ring of randomly-sized low-poly boxes around the track's outer bbox,
-// suggesting grandstands / outer facilities without needing real models.
-// Blobby and imprecise on purpose — only visible as silhouettes through fog.
-function buildGrandstandRing(center, extent, yBase) {
+// Rolling-hills horizon silhouette built as a single radial fan: smoother and
+// reads better through fog than a wall of cubes. Two layered rings — closer
+// hills slightly warmer/lighter, distant ones nearly the sky tone for depth.
+function buildHorizonHills(center, extent, yBase) {
   const g = new THREE.Group();
-  const radius = extent * 1.1;
-  const count = 64;
-  const baseColor = new THREE.Color(0x1a1a22);
-  const accentColor = new THREE.Color(0x2a2230);
+  const layers = [
+    { radius: extent * 1.4,  hMin: 14, hMax: 70,  color: 0x141520, segs: 192 },
+    { radius: extent * 2.6,  hMin: 28, hMax: 120, color: 0x0f1018, segs: 144 },
+    { radius: extent * 4.2,  hMin: 60, hMax: 200, color: 0x0a0b13, segs: 96  },
+  ];
+  for (const L of layers) {
+    const N = L.segs;
+    // (N+1) outer ring verts + 1 center vert; we still build it as a flat ring
+    // anchored at yBase, so the inner edge sits on the ground.
+    const outer = new Float32Array((N + 1) * 3);
+    const inner = new Float32Array((N + 1) * 3);
+    for (let i = 0; i <= N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      // Two-octave sin-noise for a soft hilly profile.
+      const n = 0.5 + 0.5 * Math.sin(a * 3.7 + L.radius * 0.001)
+                * Math.cos(a * 1.9 + L.radius * 0.0017);
+      const n2 = 0.5 + 0.5 * Math.sin(a * 11.3) * 0.6;
+      const h = L.hMin + (L.hMax - L.hMin) * (n * 0.7 + n2 * 0.3);
+      const cosA = Math.cos(a), sinA = Math.sin(a);
+      // inner vertex at yBase
+      inner[i * 3 + 0] = center.x + cosA * L.radius;
+      inner[i * 3 + 1] = yBase;
+      inner[i * 3 + 2] = center.z + sinA * L.radius;
+      // outer (top) vertex pushed up by `h`
+      outer[i * 3 + 0] = center.x + cosA * L.radius;
+      outer[i * 3 + 1] = yBase + h;
+      outer[i * 3 + 2] = center.z + sinA * L.radius;
+    }
+    const positions = new Float32Array((N + 1) * 6);
+    positions.set(inner, 0);
+    positions.set(outer, (N + 1) * 3);
+    const indices = [];
+    for (let i = 0; i < N; i++) {
+      const a = i, b = i + 1, c = (N + 1) + i, d = (N + 1) + i + 1;
+      indices.push(a, c, b, b, c, d);
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geom.setIndex(indices);
+    geom.computeVertexNormals();
+    const mat = new THREE.MeshBasicMaterial({ color: L.color, fog: true });
+    g.add(new THREE.Mesh(geom, mat));
+  }
+  return g;
+}
+
+// Closer-in grandstand silhouette: low boxes scattered on the inner ring.
+// Only ~24 of them so they read as accents, not a fence.
+function buildGrandstands(center, extent, yBase) {
+  const g = new THREE.Group();
+  const radius = extent * 1.15;
+  const count = 22;
+  const baseColor = new THREE.Color(0x1c1d28);
+  const accentColor = new THREE.Color(0x322438);
   for (let i = 0; i < count; i++) {
-    const a = (i / count) * Math.PI * 2;
-    const jitter = 1 + (Math.random() - 0.5) * 0.25;
-    const r = radius * jitter;
-    const h = 6 + Math.random() * 14;
-    const w = 30 + Math.random() * 70;
-    const d = 18 + Math.random() * 40;
-    const col = Math.random() > 0.75 ? accentColor : baseColor;
+    const a = (i / count) * Math.PI * 2 + Math.random() * 0.1;
+    const r = radius * (0.92 + Math.random() * 0.18);
+    const h = 8 + Math.random() * 14;
+    const w = 50 + Math.random() * 90;
+    const d = 22 + Math.random() * 30;
+    const col = Math.random() > 0.7 ? accentColor : baseColor;
     const m = new THREE.Mesh(
       new THREE.BoxGeometry(w, h, d),
       new THREE.MeshBasicMaterial({ color: col }),
@@ -610,7 +818,7 @@ function buildGrandstandRing(center, extent, yBase) {
       yBase + h * 0.5,
       center.z + Math.sin(a) * r,
     );
-    m.rotation.y = -a + Math.PI * 0.5 + (Math.random() - 0.5) * 0.3;
+    m.rotation.y = -a + Math.PI * 0.5 + (Math.random() - 0.5) * 0.4;
     g.add(m);
   }
   return g;
@@ -809,13 +1017,20 @@ function Track3D({
 
     // --- Scene + lights ---
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0a0c14);
+    scene.background = new THREE.Color(0x05060c);
 
-    const hemi = new THREE.HemisphereLight(0xb0c4ff, 0x14141c, 0.9);
+    // Hemisphere fills shadowed undersides with a cool sky tint vs warm
+    // ground bounce. Sun is the key light (shadow-caster, configured below
+    // once we know the bbox).
+    const hemi = new THREE.HemisphereLight(0xb6c8ff, 0x161420, 0.55);
     scene.add(hemi);
-    const sun = new THREE.DirectionalLight(0xffe5c2, 1.0);
-    sun.position.set(800, 1200, 600);
+    // Sun direction expressed in scene-world units; reused by the skydome so
+    // the on-sky disc and the cast shadows agree. Pointing back-low for that
+    // dusk-grand-prix look.
+    const sunDir = new THREE.Vector3(0.45, 0.55, -0.7).normalize();
+    const sun = new THREE.DirectionalLight(0xffd7a8, 2.4);
     scene.add(sun);
+    scene.add(sun.target);
 
     // --- Curve ---
     const scale = detectUnitScale(circuit);
@@ -839,15 +1054,41 @@ function Track3D({
       sx: Math.max(size.x, 300), sy: Math.max(size.y, 20), sz: Math.max(size.z, 300),
     };
 
-    scene.fog = new THREE.FogExp2(0x0a0c14, 1.2 / extent);
+    scene.fog = new THREE.FogExp2(0x10131c, 0.9 / extent);
 
-    const sky = buildSkyDome(extent * 4);
+    // Sun position: place it relative to the bbox so DirectionalLight's
+    // shadow frustum has something to anchor to. Fold the sun down toward the
+    // horizon for golden-hour rim light on the cars.
+    const sunDistance = extent * 2.0;
+    sun.position.set(
+      center.x + sunDir.x * sunDistance,
+      bb.min.y + sunDir.y * sunDistance,
+      center.z + sunDir.z * sunDistance,
+    );
+    sun.target.position.copy(center);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    const shadowFrustum = extent * 1.1;
+    sun.shadow.camera.left = -shadowFrustum;
+    sun.shadow.camera.right = shadowFrustum;
+    sun.shadow.camera.top = shadowFrustum;
+    sun.shadow.camera.bottom = -shadowFrustum;
+    sun.shadow.camera.near = 1;
+    sun.shadow.camera.far = sunDistance * 3;
+    sun.shadow.bias = -0.0003;
+    sun.shadow.normalBias = 0.6;
+    sun.shadow.radius = 4; // soft PCF radius
+
+    const sky = buildSkyDome(extent * 4, sunDir);
     sky.position.copy(center);
     scene.add(sky);
 
-    // Distant grandstand / facility silhouettes.
+    // Layered horizon: rolling hills in the distance, scattered grandstand
+    // accents close in. Both sit just below the lowest curve point so the
+    // track always reads as on top of the terrain.
     const standsY = bb.min.y - 0.4;
-    scene.add(buildGrandstandRing(center, extent, standsY));
+    scene.add(buildHorizonHills(center, extent, standsY));
+    scene.add(buildGrandstands(center, extent, standsY));
 
     // Ground plane with concrete noise texture.
     const concreteTex = makeConcreteTexture();
@@ -860,6 +1101,7 @@ function Track3D({
     });
     const ground = new THREE.Mesh(groundGeom, groundMat);
     ground.position.set(center.x, bb.min.y - 0.5, center.z);
+    ground.receiveShadow = true;
     scene.add(ground);
 
     // Runoff band (wide, asphalt).
@@ -870,16 +1112,25 @@ function Track3D({
       color: 0x272732, map: runoffTex, roughness: 0.95, metalness: 0,
     });
     const runoff = new THREE.Mesh(runoffGeom, runoffMat);
+    runoff.receiveShadow = true;
     scene.add(runoff);
 
-    // Main track surface.
+    // Main track surface — albedo + normal map share UVs (tile counts match).
+    const trackUv = Math.max(40, extent / 60);
     const asphaltTex = makeAsphaltTexture();
-    asphaltTex.repeat.set(1, Math.max(40, extent / 60));
-    const trackGeom = buildRibbonGeometry(curve, segments, TRACK_WIDTH, 0.08, Math.max(40, extent / 60));
+    asphaltTex.repeat.set(1, trackUv);
+    const asphaltNrm = makeAsphaltNormalMap();
+    asphaltNrm.repeat.set(1, trackUv);
+    const trackGeom = buildRibbonGeometry(curve, segments, TRACK_WIDTH, 0.08, trackUv);
     const trackMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff, map: asphaltTex, roughness: 0.88, metalness: 0.06,
+      color: 0xffffff, map: asphaltTex,
+      normalMap: asphaltNrm,
+      normalScale: new THREE.Vector2(0.55, 0.55),
+      roughness: 0.78, metalness: 0.08,
+      envMapIntensity: 0.6,
     });
     const track = new THREE.Mesh(trackGeom, trackMat);
+    track.receiveShadow = true;
     scene.add(track);
 
     // White edge lines just inside each kerb.
@@ -896,15 +1147,26 @@ function Track3D({
     );
     scene.add(edgeL); scene.add(edgeR);
 
-    // Kerbs.
+    // Raised kerbs — proper extruded geometry so they cast shadow stripes
+    // onto the track and pop under bloom. Slightly emissive so the bloom pass
+    // turns the red bands into subtle glows when shot from low angles.
+    const KERB_HEIGHT = 0.45;
+    const kerbMat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.55, metalness: 0.05,
+      emissive: 0x1a0000, emissiveIntensity: 0.35,
+      envMapIntensity: 0.5,
+    });
     const kerbL = new THREE.Mesh(
-      buildKerbGeometry(curve, segments, TRACK_WIDTH, TRACK_WIDTH + KERB_WIDTH, -1, 0.12),
-      new THREE.MeshBasicMaterial({ vertexColors: true }),
+      buildKerbGeometry(curve, segments, TRACK_WIDTH, TRACK_WIDTH + KERB_WIDTH, -1, KERB_HEIGHT),
+      kerbMat,
     );
     const kerbR = new THREE.Mesh(
-      buildKerbGeometry(curve, segments, TRACK_WIDTH, TRACK_WIDTH + KERB_WIDTH, +1, 0.12),
-      new THREE.MeshBasicMaterial({ vertexColors: true }),
+      buildKerbGeometry(curve, segments, TRACK_WIDTH, TRACK_WIDTH + KERB_WIDTH, +1, KERB_HEIGHT),
+      kerbMat,
     );
+    kerbL.castShadow = true; kerbL.receiveShadow = true;
+    kerbR.castShadow = true; kerbR.receiveShadow = true;
     scene.add(kerbL); scene.add(kerbR);
 
     // DRS zones — green stripes on the outer side of each zone.
@@ -936,11 +1198,82 @@ function Track3D({
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    // Filmic tonemap + slight overshoot exposure makes the bloom pass + the
+    // emissive lights/sun read like a TV broadcast feed instead of a flat
+    // unlit pipeline.
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     mount.appendChild(renderer.domElement);
     Object.assign(renderer.domElement.style, {
       position: "absolute", inset: "0", width: "100%", height: "100%",
       display: "block",
     });
+
+    // Image-based lighting from a procedural RoomEnvironment — gives the car
+    // bodies real shoulder/cockpit reflections and lifts the metal kerb
+    // accents without shipping an HDRI asset.
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    pmrem.compileEquirectangularShader();
+    const envScene = new RoomEnvironment();
+    const envTex = pmrem.fromScene(envScene, 0.04).texture;
+    scene.environment = envTex;
+    pmrem.dispose();
+
+    // --- Post-processing composer ---
+    // Bloom is the headline effect (kerbs/DRS/brake lights/sun pop).
+    // Vignette frames the shot and intensifies in chase cam at speed.
+    // OutputPass handles tonemap+colorspace conversion at the end of the
+    // chain (the renderer's tonemap is bypassed once we go through composer).
+    const renderTarget = new THREE.WebGLRenderTarget(1, 1, {
+      type: THREE.HalfFloatType, // HDR pipeline so bloom has dynamic range
+      samples: 4,                // multisample = free SMAA-quality edges
+      colorSpace: THREE.LinearSRGBColorSpace,
+    });
+    const composer = new EffectComposer(renderer, renderTarget);
+    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const renderPass = new RenderPass(scene, camera);
+    composer.addPass(renderPass);
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(1, 1),
+      0.55,   // strength
+      0.6,    // radius
+      0.78,   // threshold — only emissives + sun disc pass it
+    );
+    composer.addPass(bloomPass);
+    const vignettePass = new ShaderPass({
+      uniforms: {
+        tDiffuse: { value: null },
+        uStrength: { value: 0.85 },
+        uRadius:   { value: 1.05 },
+        uTint:     { value: new THREE.Color(0x05060c) },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        varying vec2 vUv;
+        uniform sampler2D tDiffuse;
+        uniform float uStrength;
+        uniform float uRadius;
+        uniform vec3 uTint;
+        void main() {
+          vec4 col = texture2D(tDiffuse, vUv);
+          vec2 d = vUv - vec2(0.5);
+          float r = length(d) * 1.4142136;
+          float v = smoothstep(uRadius, 0.45, r);
+          col.rgb = mix(uTint, col.rgb, mix(1.0, v, uStrength));
+          gl_FragColor = col;
+        }
+      `,
+    });
+    composer.addPass(vignettePass);
+    composer.addPass(new OutputPass());
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -979,6 +1312,8 @@ function Track3D({
       const w = mount.clientWidth || 1;
       const h = mount.clientHeight || 1;
       renderer.setSize(w, h, false);
+      composer.setSize(w, h);
+      bloomPass.setSize(w, h);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
     };
@@ -1077,9 +1412,15 @@ function Track3D({
 
       // --- Camera modes ---
       const inFollow = live.cameraMode === "follow" && !!live.pinned;
+      // Target vignette state — settles by lerp at the bottom so the FX
+      // doesn't snap when the camera mode changes.
+      let targetVignetteStrength = 0.85;
+      let targetVignetteRadius = 1.05;
+      let chaseSpeedKph = 0;
       if (inFollow) {
         const pinnedStanding = standings.find((s) => s.driver.code === live.pinned);
         if (pinnedStanding) {
+          chaseSpeedKph = pinnedStanding.speedKph || 0;
           const frac = pinnedStanding.fraction ?? 0;
           const u = ((frac % 1) + 1) % 1;
           const carPos = curve.getPointAt(u);
@@ -1105,6 +1446,17 @@ function Track3D({
           controls.enabled = false;
           updatePovHud(povHud, pinnedStanding,
             window.APEX.COMPOUNDS[pinnedStanding.compound]);
+          // Speed → vignette: at 0 kph it sits cinematic-mild; by ~320 kph
+          // edges crush in for a sense of velocity. Smoothstep so it ramps
+          // softly through the meaningful 150–300 band.
+          const sNorm = Math.max(0, Math.min(1, (chaseSpeedKph - 80) / 240));
+          const sCurve = sNorm * sNorm * (3 - 2 * sNorm);
+          targetVignetteStrength = 1.0 + sCurve * 0.6;
+          targetVignetteRadius = 1.0 - sCurve * 0.45;
+          // Subtle FOV widening at speed for that "hood-cam" effect.
+          const targetFov = 50 + sCurve * 12;
+          camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-3 * dt));
+          camera.updateProjectionMatrix();
         } else {
           povHud.root.style.display = "none";
         }
@@ -1116,6 +1468,9 @@ function Track3D({
         controls.enabled = true;
         controls.update();
         povHud.root.style.display = "none";
+        // Reset chase-cam FOV when we leave follow.
+        camera.fov += (50 - camera.fov) * (1 - Math.exp(-3 * dt));
+        camera.updateProjectionMatrix();
       }
 
       // --- Weather ---
@@ -1128,18 +1483,40 @@ function Track3D({
         const wSpeed = (w.windSpeed || 0) * 0.2778;
         const windVec = new THREE.Vector3(Math.sin(wRad) * wSpeed, 0, -Math.cos(wRad) * wSpeed);
         advanceRain(rain, dt, windVec);
-        trackMat.color.setHex(0x1a1a22);
-        trackMat.roughness = 0.45;
-        trackMat.metalness = 0.35;
-        runoffMat.color.setHex(0x13131a);
+        // Wet asphalt: very low roughness + raised metalness so the env map
+        // smears across the surface as a streaked reflection.
+        trackMat.color.setHex(0x14141c);
+        trackMat.roughness = 0.18;
+        trackMat.metalness = 0.55;
+        trackMat.envMapIntensity = 1.4;
+        runoffMat.color.setHex(0x10101a);
+        runoffMat.roughness = 0.5;
+        runoffMat.metalness = 0.25;
         scene.fog.density = 2.2 / extent;
+        // Slight bloom lift in rain — wet headlights/brake lights glow more.
+        bloomPass.strength = 0.78;
+        bloomPass.threshold = 0.65;
+        // Vignette darker in rain to reinforce the mood.
+        vignettePass.uniforms.uTint.value.setHex(0x02030a);
       } else {
         trackMat.color.setHex(0xffffff); // white so asphalt texture shows full tone
-        trackMat.roughness = 0.88;
-        trackMat.metalness = 0.06;
+        trackMat.roughness = 0.78;
+        trackMat.metalness = 0.08;
+        trackMat.envMapIntensity = 0.6;
         runoffMat.color.setHex(0x272732);
-        scene.fog.density = 1.2 / extent;
+        runoffMat.roughness = 0.95;
+        runoffMat.metalness = 0;
+        scene.fog.density = 0.9 / extent;
+        bloomPass.strength = 0.55;
+        bloomPass.threshold = 0.78;
+        vignettePass.uniforms.uTint.value.setHex(0x05060c);
       }
+
+      // Smoothly settle vignette toward target each frame.
+      const kV = 1 - Math.exp(-4 * dt);
+      const vu = vignettePass.uniforms;
+      vu.uStrength.value += (targetVignetteStrength - vu.uStrength.value) * kV;
+      vu.uRadius.value   += (targetVignetteRadius   - vu.uRadius.value)   * kV;
 
       // --- Driver labels overlay ---
       if (live.showLabels && !inFollow) {
@@ -1164,7 +1541,7 @@ function Track3D({
         labelLayer.style.display = "none";
       }
 
-      renderer.render(scene, camera);
+      composer.render();
       rafId = requestAnimationFrame(animate);
     };
     rafId = requestAnimationFrame(animate);
@@ -1177,6 +1554,9 @@ function Track3D({
       for (const [, entry] of driverMap) entry.label.remove();
       labelLayer.remove();
       povHud.root.remove();
+      composer.dispose();
+      renderTarget.dispose();
+      envTex.dispose();
       renderer.domElement.remove();
       renderer.dispose();
       scene.traverse((o) => {
