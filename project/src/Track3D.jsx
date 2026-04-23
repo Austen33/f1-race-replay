@@ -71,39 +71,70 @@ function toThree(p, zBase, scale) {
 // tile cleanly because we control the pixel data directly.
 // ───────────────────────────────────────────────────────────────────────────
 
+// Real asphalt reads as a uniform dark charcoal with visible aggregate (tiny
+// lighter chips embedded in bitumen) and a subtly darker racing line where
+// tyres have polished the seal coat. We build that in three passes:
+//  (a) near-uniform dark base with a faint low-frequency luminance variation
+//      so tiling doesn't broadcast a grid pattern,
+//  (b) aggregate specks of varying size/brightness — most tiny, a few larger,
+//      pulling the reader's eye toward "stone in tar" rather than "noise",
+//  (c) a soft darker band down the centre (UV-Y), suggesting the polished
+//      racing line — keeps scale cues when the camera flies low.
+// Real F1 asphalt reads as near-black charcoal with visible aggregate chips.
+// Tuning notes:
+//  - Base `#07070b`: under ACES tonemap + bright sun + IBL, anything lighter
+//    than ~#10 lifts to a medium grey that's indistinguishable from concrete.
+//    The base needs to be *very* dark so the lit surface still reads as
+//    asphalt rather than paving.
+//  - Aggregate count kept modest (600) so individual chips read at close
+//    range but don't average into a mid-tone when the mipmap collapses at
+//    distance — the old tuning (1800) washed the track out to grey.
+//  - Specks themselves are dim too (luminance 22–46) — real aggregate isn't
+//    white rocks, it's slightly-lighter stones embedded in bitumen.
 function makeAsphaltTexture() {
-  const size = 256;
+  const size = 512;
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext("2d");
-  // Base tarmac tone.
-  const grad = ctx.createLinearGradient(0, 0, size, size);
-  grad.addColorStop(0, "#2b2b37");
-  grad.addColorStop(1, "#23232d");
-  ctx.fillStyle = grad;
+  // (a) Base — dark grey asphalt, kept bright enough to survive fog +
+  // post-processing compression at distance.
+  ctx.fillStyle = "#2a2f3a";
   ctx.fillRect(0, 0, size, size);
-  // Coarse grain — tiny specks of lighter/darker dust.
   const img = ctx.getImageData(0, 0, size, size);
   const d = img.data;
+  // Tiny luminance jitter so the base isn't a dead flat colour.
   for (let i = 0; i < d.length; i += 4) {
-    const n = (Math.random() - 0.5) * 36;
-    d[i] = Math.max(0, Math.min(255, d[i] + n));
+    const n = (Math.random() - 0.5) * 10;
+    d[i]     = Math.max(0, Math.min(255, d[i]     + n));
     d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + n));
     d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + n));
   }
   ctx.putImageData(img, 0, 0);
-  // A few longitudinal darker streaks to suggest tyre rubber/racing line.
-  ctx.globalAlpha = 0.18;
-  ctx.fillStyle = "#12121a";
-  for (let i = 0; i < 8; i++) {
+  // (b) Aggregate — scattered dim chips. Mostly sub-pixel.
+  for (let i = 0; i < 600; i++) {
     const x = Math.random() * size;
-    const w = 1 + Math.random() * 2;
-    ctx.fillRect(x, 0, w, size);
+    const y = Math.random() * size;
+    const r = Math.random() < 0.9 ? (0.3 + Math.random() * 0.7) : (1.0 + Math.random() * 1.3);
+    const l = 58 + Math.random() * 42;
+    ctx.fillStyle = `rgba(${l},${l},${l + 2},${0.45 + Math.random() * 0.3})`;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
   }
-  ctx.globalAlpha = 1;
+  // (c) Racing line wear — subtle darker polish down the middle of the
+  // ribbon (UV-Y runs length-wise in buildRibbonGeometry).
+  const rl = ctx.createLinearGradient(0, 0, size, 0);
+  rl.addColorStop(0.00, "rgba(0,0,0,0.0)");
+  rl.addColorStop(0.45, "rgba(0,0,0,0.08)");
+  rl.addColorStop(0.50, "rgba(0,0,0,0.12)");
+  rl.addColorStop(0.55, "rgba(0,0,0,0.08)");
+  rl.addColorStop(1.00, "rgba(0,0,0,0.0)");
+  ctx.fillStyle = rl;
+  ctx.fillRect(0, 0, size, size);
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.anisotropy = 4;
+  tex.anisotropy = 8;
+  tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
 
@@ -166,24 +197,58 @@ function makeAsphaltNormalMap() {
   return tex;
 }
 
+// Neutral-grey noise texture for paved surroundings (ground, runoff). A
+// midtone (~128) base lets the material's `color` preset actually read
+// through — a dark base would be multiplied with the preset colour and the
+// surface would collapse to near-black, which used to make the ground
+// indistinguishable from the asphalt track. Low-amplitude noise keeps the
+// surface from tiling into a visible weave at grazing angles.
 function makeConcreteTexture() {
-  const size = 128;
+  const size = 256;
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#181822";
+  ctx.fillStyle = "#8a8a90";
   ctx.fillRect(0, 0, size, size);
   const img = ctx.getImageData(0, 0, size, size);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4) {
-    const n = (Math.random() - 0.5) * 18;
-    d[i] = Math.max(0, Math.min(255, d[i] + n));
+    const n = (Math.random() - 0.5) * 14;
+    d[i]     = Math.max(0, Math.min(255, d[i]     + n));
     d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + n));
     d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + n));
   }
   ctx.putImageData(img, 0, 0);
+  // A handful of darker flecks — reads as grit without being structured.
+  for (let i = 0; i < 220; i++) {
+    const x = Math.random() * size, y = Math.random() * size;
+    ctx.fillStyle = `rgba(40,40,48,${0.15 + Math.random() * 0.2})`;
+    ctx.fillRect(x, y, 1 + Math.random() * 1.5, 1 + Math.random() * 1.5);
+  }
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 4;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makeKerbStripeTexture() {
+  const w = 32;
+  const h = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  const band = 8;
+  for (let y = 0; y < h; y += band) {
+    const isRed = ((y / band) | 0) % 2 === 0;
+    ctx.fillStyle = isRed ? "#ff3a24" : "#f2f3f6";
+    ctx.fillRect(0, y, w, band);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 8;
+  tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
 
@@ -212,6 +277,20 @@ function buildCenterlineCurve(circuit, zBase, scale) {
   return new THREE.CatmullRomCurve3(pts, closed, "centripetal", 0.5);
 }
 
+function updateStableRight(tan, up, right, prevRight, havePrevRight) {
+  right.crossVectors(tan, up);
+  const len2 = right.lengthSq();
+  if (len2 < 1e-10) {
+    if (havePrevRight) right.copy(prevRight);
+    else right.set(1, 0, 0);
+  } else {
+    right.multiplyScalar(1 / Math.sqrt(len2));
+    if (havePrevRight && right.dot(prevRight) < 0) right.multiplyScalar(-1);
+  }
+  prevRight.copy(right);
+  return true;
+}
+
 // Ribbon of constant half-width along the curve. `yLift` puts layered ribbons
 // (runoff, track, kerbs) on separate tiny y-planes to avoid z-fighting.
 // `uvRepeat` controls how many times the texture tiles along the length.
@@ -221,13 +300,15 @@ function buildRibbonGeometry(curve, segments, halfWidth, yLift, uvRepeat = 80) {
   const indices = [];
   const up = new THREE.Vector3(0, 1, 0);
   const right = new THREE.Vector3();
+  const prevRight = new THREE.Vector3();
   const tan = new THREE.Vector3();
+  let havePrevRight = false;
 
   for (let i = 0; i <= segments; i++) {
     const t = i / segments;
     const p = curve.getPoint(t);
     curve.getTangent(t, tan);
-    right.crossVectors(tan, up).normalize();
+    havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
     positions[i * 6 + 0] = p.x - right.x * halfWidth;
     positions[i * 6 + 1] = p.y + yLift;
     positions[i * 6 + 2] = p.z - right.z * halfWidth;
@@ -249,21 +330,93 @@ function buildRibbonGeometry(curve, segments, halfWidth, yLift, uvRepeat = 80) {
   return geom;
 }
 
-// Thin painted edge line (like white track boundaries) — a slab offset from
-// the centerline by `offset` with a small `width`. Used for both inner and
-// outer edge stripes.
-function buildEdgeLineGeometry(curve, segments, offset, width, yLift) {
-  const positions = new Float32Array((segments + 1) * 2 * 3);
+// Extruded ribbon — a top surface + outer side walls (no bottom cap, it's
+// never seen). Gives the track real vertical thickness so it physically sits
+// above the ground plane and cannot z-fight under any camera angle. The top
+// face carries UVs for the asphalt albedo; side walls use a flat UV so the
+// raw asphalt colour shows on the edge chamfer without tile seams.
+//
+// Vertex layout per ring (4 verts): 0 top-left, 1 top-right, 2 bot-left,
+// 3 bot-right. Side faces are stitched between consecutive rings.
+function buildExtrudedRibbonGeometry(curve, segments, halfWidth, baseY, thickness, uvRepeat = 80) {
+  const vertsPerRing = 4;
+  const positions = new Float32Array((segments + 1) * vertsPerRing * 3);
+  const uvs = new Float32Array((segments + 1) * vertsPerRing * 2);
   const indices = [];
   const up = new THREE.Vector3(0, 1, 0);
   const right = new THREE.Vector3();
+  const prevRight = new THREE.Vector3();
   const tan = new THREE.Vector3();
+  let havePrevRight = false;
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const p = curve.getPoint(t);
+    curve.getTangent(t, tan);
+    havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
+    const yTop = p.y + baseY + thickness;
+    const yBot = p.y + baseY;
+    const base = i * vertsPerRing * 3;
+    // top-left
+    positions[base + 0] = p.x - right.x * halfWidth;
+    positions[base + 1] = yTop;
+    positions[base + 2] = p.z - right.z * halfWidth;
+    // top-right
+    positions[base + 3] = p.x + right.x * halfWidth;
+    positions[base + 4] = yTop;
+    positions[base + 5] = p.z + right.z * halfWidth;
+    // bot-left
+    positions[base + 6] = p.x - right.x * halfWidth;
+    positions[base + 7] = yBot;
+    positions[base + 8] = p.z - right.z * halfWidth;
+    // bot-right
+    positions[base + 9]  = p.x + right.x * halfWidth;
+    positions[base + 10] = yBot;
+    positions[base + 11] = p.z + right.z * halfWidth;
+    // UVs: top face uses (0..1, t*repeat). Side walls reuse u=0/1 plus the
+    // same length coord so texturing is continuous.
+    const uvBase = i * vertsPerRing * 2;
+    uvs[uvBase + 0] = 0; uvs[uvBase + 1] = t * uvRepeat; // top-left
+    uvs[uvBase + 2] = 1; uvs[uvBase + 3] = t * uvRepeat; // top-right
+    uvs[uvBase + 4] = 0; uvs[uvBase + 5] = t * uvRepeat; // bot-left
+    uvs[uvBase + 6] = 1; uvs[uvBase + 7] = t * uvRepeat; // bot-right
+    if (i < segments) {
+      const a = i * vertsPerRing;
+      const b = (i + 1) * vertsPerRing;
+      // Top face (winding so normal points +Y).
+      indices.push(a + 0, a + 1, b + 0, a + 1, b + 1, b + 0);
+      // Left side wall (normal points -right).
+      indices.push(a + 2, a + 0, b + 2, a + 0, b + 0, b + 2);
+      // Right side wall (normal points +right).
+      indices.push(a + 3, b + 3, a + 1, a + 1, b + 3, b + 1);
+    }
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
+}
+
+// Thin painted edge line (like white track boundaries) — a slab offset from
+// the centerline by `offset` with a small `width`. Used for both edge
+// stripes and for the runoff parallel strips. `uvRepeat` controls how many
+// times a mapped texture tiles along the length.
+function buildEdgeLineGeometry(curve, segments, offset, width, yLift, uvRepeat = 1) {
+  const positions = new Float32Array((segments + 1) * 2 * 3);
+  const uvs = new Float32Array((segments + 1) * 2 * 2);
+  const indices = [];
+  const up = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3();
+  const prevRight = new THREE.Vector3();
+  const tan = new THREE.Vector3();
+  let havePrevRight = false;
   const half = width * 0.5;
   for (let i = 0; i <= segments; i++) {
     const t = i / segments;
     const p = curve.getPoint(t);
     curve.getTangent(t, tan);
-    right.crossVectors(tan, up).normalize();
+    havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
     const inner = offset - half, outer = offset + half;
     positions[i * 6 + 0] = p.x + right.x * inner;
     positions[i * 6 + 1] = p.y + yLift;
@@ -271,6 +424,8 @@ function buildEdgeLineGeometry(curve, segments, offset, width, yLift) {
     positions[i * 6 + 3] = p.x + right.x * outer;
     positions[i * 6 + 4] = p.y + yLift;
     positions[i * 6 + 5] = p.z + right.z * outer;
+    uvs[i * 4 + 0] = 0; uvs[i * 4 + 1] = t * uvRepeat;
+    uvs[i * 4 + 2] = 1; uvs[i * 4 + 3] = t * uvRepeat;
     if (i < segments) {
       const a = i * 2, b = i * 2 + 1, c = (i + 1) * 2, d = (i + 1) * 2 + 1;
       indices.push(a, c, b, b, c, d);
@@ -278,6 +433,7 @@ function buildEdgeLineGeometry(curve, segments, offset, width, yLift) {
   }
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
   geom.setIndex(indices);
   geom.computeVertexNormals();
   return geom;
@@ -290,7 +446,7 @@ function buildEdgeLineGeometry(curve, segments, offset, width, yLift) {
 //
 // At ~2000 segments around a 5 km track, STRIPE_SEGS=2 ≈ 5 m per stripe —
 // matches real F1 kerbing.
-function buildKerbGeometry(curve, segments, innerOffset, outerOffset, side, kerbHeight) {
+function buildKerbGeometry(curve, segments, innerOffset, outerOffset, side, kerbHeight, baseYOffset = 0.05) {
   const STRIPE_SEGS = 2;
   const red = new THREE.Color(0xff1e00);
   const white = new THREE.Color(0xf4f4f8);
@@ -299,7 +455,9 @@ function buildKerbGeometry(curve, segments, innerOffset, outerOffset, side, kerb
   const indices = [];
   const up = new THREE.Vector3(0, 1, 0);
   const right = new THREE.Vector3();
+  const prevRight = new THREE.Vector3();
   const tan = new THREE.Vector3();
+  let havePrevRight = false;
   // Per ring at curve-step i we emit 3 vertices:
   //   0: bottom-outer (sits on track surface, hidden by ribbon)
   //   1: top-inner    (top edge nearest the racing surface)
@@ -309,11 +467,11 @@ function buildKerbGeometry(curve, segments, innerOffset, outerOffset, side, kerb
   const pushRing = (t, band) => {
     const p = curve.getPoint(t);
     curve.getTangent(t, tan);
-    right.crossVectors(tan, up).normalize();
+    havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
     const inner = side * innerOffset;
     const outer = side * outerOffset;
-    const baseY = p.y + 0.05;
-    const topY = p.y + kerbHeight;
+    const baseY = p.y + baseYOffset;
+    const topY = p.y + baseYOffset + kerbHeight;
     positions.push(
       p.x + right.x * outer, baseY, p.z + right.z * outer,
       p.x + right.x * inner, topY,  p.z + right.z * inner,
@@ -370,7 +528,9 @@ function buildDRSZoneMesh(curve, segments, circuitLen, zone, side) {
   const indices = [];
   const up = new THREE.Vector3(0, 1, 0);
   const right = new THREE.Vector3();
+  const prevRight = new THREE.Vector3();
   const tan = new THREE.Vector3();
+  let havePrevRight = false;
   const inner = side * (TRACK_WIDTH + KERB_WIDTH + 0.4);
   const outer = side * (TRACK_WIDTH + KERB_WIDTH + 0.4 + DRS_STRIPE_WIDTH);
   for (let i = 0; i <= zoneSegs; i++) {
@@ -378,7 +538,7 @@ function buildDRSZoneMesh(curve, segments, circuitLen, zone, side) {
     const u = (uStart + tu * span) % 1;
     const p = curve.getPointAt(u);
     curve.getTangentAt(u, tan);
-    right.crossVectors(tan, up).normalize();
+    havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
     positions[i * 6 + 0] = p.x + right.x * inner;
     positions[i * 6 + 1] = p.y + 0.42;
     positions[i * 6 + 2] = p.z + right.z * inner;
@@ -396,6 +556,7 @@ function buildDRSZoneMesh(curve, segments, circuitLen, zone, side) {
   geom.computeVertexNormals();
   const mat = new THREE.MeshBasicMaterial({
     color: 0x18ff74, transparent: true, opacity: 0.55,
+    depthWrite: false,
     polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
   });
   const mesh = new THREE.Mesh(geom, mat);
@@ -426,8 +587,25 @@ function buildSectorGate(curve, circuitLen, idx, color) {
   geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geom.setIndex(indices);
   geom.computeVertexNormals();
+  let gateColor = 0xf4f4f8;
+  if (typeof color === "string") {
+    const c = color.trim().toLowerCase();
+    if (c === "purple") gateColor = 0xb78cff;
+    else if (c === "green") gateColor = 0x18ff74;
+    else if (c === "yellow") gateColor = 0xffd84a;
+    else if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c)) {
+      const hex = c.slice(1);
+      gateColor = Number.parseInt(
+        hex.length === 3 ? `${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}` : hex,
+        16,
+      );
+    }
+  } else if (typeof color === "number") {
+    gateColor = color;
+  }
   const mat = new THREE.MeshBasicMaterial({
-    color, transparent: true, opacity: 0.85,
+    color: gateColor, transparent: true, opacity: 0.52,
+    depthWrite: false,
     polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
   });
   const mesh = new THREE.Mesh(geom, mat);
@@ -446,14 +624,14 @@ function buildStartFinishMesh(curve, halfWidth) {
   canvas.width = 8; canvas.height = 64;
   const ctx = canvas.getContext("2d");
   for (let i = 0; i < 16; i++) {
-    ctx.fillStyle = i % 2 ? "#ffffff" : "#0b0b11";
+    ctx.fillStyle = i % 2 ? "#ffffff" : "#6d7382";
     ctx.fillRect(0, i * 4, 8, 4);
   }
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(1, 4);
   const mat = new THREE.MeshBasicMaterial({
-    map: tex, transparent: true,
+    map: tex, transparent: true, opacity: 0.72, depthWrite: false,
     polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
   });
   const mesh = new THREE.Mesh(planeGeom, mat);
@@ -471,7 +649,7 @@ function buildRacingLineMesh(curve, segments) {
   }
   const geom = new THREE.BufferGeometry().setFromPoints(pts);
   const mat = new THREE.LineDashedMaterial({
-    color: 0x7a7a90, dashSize: 6, gapSize: 10, transparent: true, opacity: 0.4,
+    color: 0xd7deef, dashSize: 10, gapSize: 16, transparent: true, opacity: 0.12,
     polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
   });
   const line = new THREE.Line(geom, mat);
@@ -634,14 +812,14 @@ function makeDriverMarker(team) {
   compound.position.set(-CAR_LENGTH * 0.05, 1.9, 0);
   g.add(compound);
 
-  // Cast soft shadows from every solid car part. Lights/halo/compound bobble
-  // are intentionally excluded so they don't paint hard squares onto the
-  // track.
+  // Disable car-part shadow casting: at wide zoom levels the tiny wing/wheel
+  // geometry aliasing in the directional shadow map produces long black spike
+  // artifacts on the ground/runoff.
   for (const m of [floor, sidepods, nose, airbox, halo,
                    frontWing, rearWingFlap, rearEndplateL, rearEndplateR,
                    ...wheels]) {
-    m.castShadow = true;
-    m.receiveShadow = true;
+    m.castShadow = false;
+    m.receiveShadow = false;
   }
 
   g.userData = {
@@ -700,9 +878,9 @@ const TOD_PRESETS = {
     fog: { color: 0x9aadc4, densityScale: 0.55 },
     // Runoff is lighter-grey paved, ground concrete even lighter, so the dark
     // asphalt track reads as the darkest ribbon of the three.
-    ground: { color: 0x7c7f88 },
-    runoff: { color: 0x5f6268 },
-    trackTint: 0xffffff,
+    ground: { color: 0xa8adb6 },
+    runoff: { color: 0x6a6d76 },
+    trackTint: 0xd8dbe6,
     exposure: 0.95,
     bloom: { strength: 0.22, threshold: 0.95, radius: 0.55 },
     vignette: { base: 0.28, tint: 0x0a0b10 },
@@ -719,7 +897,7 @@ const TOD_PRESETS = {
     fog: { color: 0x23202c, densityScale: 0.9 },
     ground: { color: 0x262530 },
     runoff: { color: 0x2b2b36 },
-    trackTint: 0xffffff,
+    trackTint: 0xc8cbd8,
     exposure: 0.98,
     bloom: { strength: 0.32, threshold: 0.88, radius: 0.55 },
     vignette: { base: 0.38, tint: 0x07080e },
@@ -737,7 +915,7 @@ const TOD_PRESETS = {
     fog: { color: 0x08090e, densityScale: 1.0 },
     ground: { color: 0x16161e },
     runoff: { color: 0x1e1e28 },
-    trackTint: 0xffffff,
+    trackTint: 0xb9becf,
     exposure: 1.0,
     bloom: { strength: 0.38, threshold: 0.82, radius: 0.55 },
     vignette: { base: 0.4, tint: 0x04050a },
@@ -1113,6 +1291,15 @@ function Track3D({
 
     // --- Scene + lights ---
     const preset = TOD_PRESETS[todKey] || TOD_PRESETS.day;
+    const search = new URLSearchParams(window.location.search);
+    const debugLayerColors = search.get("trackDebug") === "1";
+    const disableToneMapping = search.get("trackToneMap") === "off";
+    const showTrackHelpers = search.get("trackHelpers") === "1";
+    const groundBaseColor = debugLayerColors ? 0x00ff00 : preset.ground.color;
+    const runoffDryColor = debugLayerColors ? 0x0060ff : preset.runoff.color;
+    const runoffWetColor = debugLayerColors ? runoffDryColor : 0x10101a;
+    const trackDryColor = debugLayerColors ? 0xff00ff : preset.trackTint;
+    const trackWetColor = debugLayerColors ? trackDryColor : 0x14141c;
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(preset.sceneBg);
 
@@ -1137,7 +1324,7 @@ function Track3D({
       const z = Number(p?.z ?? 0);
       if (Number.isFinite(z) && z < zMin) zMin = z;
     }
-    if (!isFinite(zMin)) zMin = 0;
+    if (!Number.isFinite(zMin)) zMin = 0;
     const curve = buildCenterlineCurve(circuit, zMin * scale, scale);
     const segments = Math.min(2000, Math.max(400, circuit.length * 2));
 
@@ -1188,14 +1375,17 @@ function Track3D({
     scene.add(buildHorizonHills(center, extent, standsY));
     scene.add(buildGrandstands(center, extent, standsY));
 
-    // Ground plane with concrete noise texture.
-    const concreteTex = makeConcreteTexture();
-    concreteTex.repeat.set(extent / 40, extent / 40);
+    // Ground plane with concrete noise texture. Tile count scales with the
+    // ground extent so individual noise cells stay roughly 120 m across —
+    // dense enough to kill visible tiling, loose enough that the ground
+    // reads as a calm surface rather than a bubbling sea under fog.
     const groundSize = extent * 6;
+    const concreteTex = makeConcreteTexture();
+    concreteTex.repeat.set(groundSize / 120, groundSize / 120);
     const groundGeom = new THREE.PlaneGeometry(groundSize, groundSize, 1, 1);
     groundGeom.rotateX(-Math.PI / 2);
     const groundMat = new THREE.MeshStandardMaterial({
-      color: preset.ground.color, map: concreteTex, roughness: 0.95, metalness: 0,
+      color: groundBaseColor, map: concreteTex, roughness: 0.95, metalness: 0,
       polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 4,
     });
     const ground = new THREE.Mesh(groundGeom, groundMat);
@@ -1203,47 +1393,83 @@ function Track3D({
     ground.receiveShadow = true;
     scene.add(ground);
 
-    // Runoff band (wide, asphalt).
+    // Runoff band — TWO parallel strips outside the track/kerbs, NOT a full
+    // ribbon under the track. The previous version was a single wide ribbon
+    // spanning ±RUNOFF_WIDTH that physically overlapped the track strip
+    // (±TRACK_WIDTH). At grazing camera angles the 30 cm yLift gap + polygon
+    // offset weren't enough to stop z-fighting, and the runoff would win for
+    // the central strip — making the track look translucent / missing its
+    // material. Two parallel strips outside the kerbs eliminate the overlap
+    // entirely: each side spans from kerb-outer to runoff-outer.
+    const RUNOFF_INNER = TRACK_WIDTH + KERB_WIDTH;
+    const RUNOFF_STRIP_WIDTH = RUNOFF_WIDTH - RUNOFF_INNER;
+    const RUNOFF_STRIP_CENTER = RUNOFF_INNER + RUNOFF_STRIP_WIDTH * 0.5;
     const runoffTex = makeConcreteTexture();
-    runoffTex.repeat.set(2, 120);
-    const runoffGeom = buildRibbonGeometry(curve, segments, RUNOFF_WIDTH, 0.05, 120);
+    runoffTex.repeat.set(2, 80);
     const runoffMat = new THREE.MeshStandardMaterial({
-      color: preset.runoff.color, map: runoffTex, roughness: 0.95, metalness: 0,
-      polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 4,
+      color: runoffDryColor, map: runoffTex, roughness: 0.92, metalness: 0,
     });
-    const runoff = new THREE.Mesh(runoffGeom, runoffMat);
-    runoff.receiveShadow = true;
-    runoff.renderOrder = 1;
-    scene.add(runoff);
+    const runoffL = new THREE.Mesh(
+      buildEdgeLineGeometry(curve, segments, -RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, 0.05, 80),
+      runoffMat,
+    );
+    const runoffR = new THREE.Mesh(
+      buildEdgeLineGeometry(curve, segments, +RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, 0.05, 80),
+      runoffMat,
+    );
+    runoffL.receiveShadow = false; runoffR.receiveShadow = false;
+    runoffL.renderOrder = 1; runoffR.renderOrder = 1;
+    scene.add(runoffL); scene.add(runoffR);
 
-    // Main track surface — albedo + normal map share UVs (tile counts match).
-    const trackUv = Math.max(40, extent / 60);
+    // Main track surface — an extruded box rather than a flat ribbon. The
+    // previous flat ribbon kept reading as grey/transparent because:
+    //  (1) at wide orbit distances the 512² asphalt texture mipmap-averaged
+    //      the dark base + scattered chips into a mid-grey tone
+    //      indistinguishable from the concrete ground, and
+    //  (2) ACES tonemap applied by OutputPass compressed near-black albedo
+    //      upward, further closing the gap with the neutral-grey ground.
+    // Extruding to a 0.45 m thick slab with a solid (un-textured) dark
+    // charcoal albedo fixes both: no mipmap averaging, no chance of the
+    // track collapsing onto a near-identical lit value as the ground, and
+    // physical thickness that makes z-fighting with the runoff / ground
+    // impossible at any camera angle. The side walls catch a sliver of
+    // rim-light that reads as a tar "kerb" even from high orbit.
+    const TRACK_BASE_Y = 0.4;
+    const TRACK_THICKNESS = 0.45;
+    const TRACK_TOP_Y = TRACK_BASE_Y + TRACK_THICKNESS;
+    const curveLenApprox = extent * Math.PI;
+    const trackUv = Math.max(60, curveLenApprox / 40);
     const asphaltTex = makeAsphaltTexture();
     asphaltTex.repeat.set(1, trackUv);
-    const asphaltNrm = makeAsphaltNormalMap();
-    asphaltNrm.repeat.set(1, trackUv);
-    // Track ribbon sits 30 cm above the runoff — a physical gap this wide
-    // resists precision collapse at distance on top of the polygonOffset/
-    // renderOrder stack below. Without it, perspective compression makes the
-    // two coplanar ribbons z-fight and the track appears "transparent".
-    const trackGeom = buildRibbonGeometry(curve, segments, TRACK_WIDTH, 0.35, trackUv);
-    const trackMat = new THREE.MeshStandardMaterial({
-      color: preset.trackTint, map: asphaltTex,
-      normalMap: asphaltNrm,
-      normalScale: new THREE.Vector2(0.55, 0.55),
-      roughness: 0.78, metalness: 0.08,
-      envMapIntensity: 0.6,
-      polygonOffset: true, polygonOffsetFactor: -8, polygonOffsetUnits: -8,
+    const trackGeom = buildExtrudedRibbonGeometry(
+      curve, segments, TRACK_WIDTH, TRACK_BASE_Y, TRACK_THICKNESS, trackUv,
+    );
+    // Solid-color base ensures the fragment never dips into "same luma as
+    // the ground" territory, even when the texture mip averages to grey at
+    // distance. `#1a1a22` reads as tar: darker than the concrete ground
+    // (0xa8adb6) by a wide margin but not so black that ACES clips it.
+    // Texture is still bound so the subtle aggregate pattern shows at close
+    // range; `toneMapped = false` keeps it from getting pushed toward grey.
+    const trackMat = new THREE.MeshBasicMaterial({
+      color: trackDryColor,
+      map: asphaltTex,
+      toneMapped: false,
     });
     const track = new THREE.Mesh(trackGeom, trackMat);
-    track.receiveShadow = true;
     track.renderOrder = 2;
     scene.add(track);
+
+    // Everything that was previously layered via tiny Y offsets on a flat
+    // ribbon now has to live on the top face of the extruded track slab.
+    // `ABOVE_TRACK` lifts a mesh whose helper builds vertices at `p.y +
+    // builtinOffset` up to `p.y + TRACK_TOP_Y + clearance`. We pass the
+    // helper's builtin Y offset as `base` so the final vertex Y is
+    // independent of whatever the helper decided internally.
+    const ABOVE_TRACK = (base, clearance = 0.02) => TRACK_TOP_Y - base + clearance;
 
     // White edge lines just inside each kerb.
     const edgeMat = new THREE.MeshBasicMaterial({
       color: 0xdcdce4, transparent: true, opacity: 0.75,
-      polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
     });
     const edgeL = new THREE.Mesh(
       buildEdgeLineGeometry(curve, segments, -(TRACK_WIDTH - 0.25), 0.25, 0.38),
@@ -1253,47 +1479,63 @@ function Track3D({
       buildEdgeLineGeometry(curve, segments, +(TRACK_WIDTH - 0.25), 0.25, 0.38),
       edgeMat,
     );
+    edgeL.position.y = ABOVE_TRACK(0.38, 0.01);
+    edgeR.position.y = ABOVE_TRACK(0.38, 0.01);
     edgeL.renderOrder = 3; edgeR.renderOrder = 3;
     scene.add(edgeL); scene.add(edgeR);
 
-    // Raised kerbs — proper extruded geometry so they cast shadow stripes
-    // onto the track and pop under bloom. Slightly emissive so the bloom pass
-    // turns the red bands into subtle glows when shot from low angles.
-    const KERB_HEIGHT = 0.45;
-    const kerbMat = new THREE.MeshStandardMaterial({
-      vertexColors: true,
-      roughness: 0.55, metalness: 0.05,
-      emissive: preset.kerb.emissive,
-      emissiveIntensity: preset.kerb.emissiveIntensity,
-      envMapIntensity: 0.5,
+    // Kerbs rendered as flat striped ribbons. This avoids long spike artifacts
+    // from side-face triangulation while preserving clear red/white boundaries.
+    const kerbTex = makeKerbStripeTexture();
+    const kerbUv = Math.max(120, curveLenApprox / 5);
+    const kerbMat = new THREE.MeshBasicMaterial({
+      map: kerbTex,
+      side: THREE.DoubleSide,
+      toneMapped: false,
     });
     const kerbL = new THREE.Mesh(
-      buildKerbGeometry(curve, segments, TRACK_WIDTH, TRACK_WIDTH + KERB_WIDTH, -1, KERB_HEIGHT),
+      buildEdgeLineGeometry(curve, segments, -(TRACK_WIDTH + KERB_WIDTH * 0.5), KERB_WIDTH, TRACK_TOP_Y + 0.015, kerbUv),
       kerbMat,
     );
     const kerbR = new THREE.Mesh(
-      buildKerbGeometry(curve, segments, TRACK_WIDTH, TRACK_WIDTH + KERB_WIDTH, +1, KERB_HEIGHT),
+      buildEdgeLineGeometry(curve, segments, +(TRACK_WIDTH + KERB_WIDTH * 0.5), KERB_WIDTH, TRACK_TOP_Y + 0.015, kerbUv),
       kerbMat,
     );
-    kerbL.castShadow = true; kerbL.receiveShadow = true;
-    kerbR.castShadow = true; kerbR.receiveShadow = true;
+    kerbL.castShadow = false; kerbL.receiveShadow = false;
+    kerbR.castShadow = false; kerbR.receiveShadow = false;
+    kerbL.renderOrder = 4;
+    kerbR.renderOrder = 4;
     scene.add(kerbL); scene.add(kerbR);
 
     // DRS zones — green stripes on the outer side of each zone.
     for (const z of window.APEX.DRS_ZONES || []) {
-      scene.add(buildDRSZoneMesh(curve, segments, circuit.length, z, +1));
-      scene.add(buildDRSZoneMesh(curve, segments, circuit.length, z, -1));
+      for (const side of [+1, -1]) {
+        const m = buildDRSZoneMesh(curve, segments, circuit.length, z, side);
+        m.position.y = ABOVE_TRACK(0.42, 0.03);
+        scene.add(m);
+      }
     }
 
-    // Sector boundary gates.
-    for (const s of window.APEX.SECTORS || []) {
-      if (s.idx == null) continue;
-      scene.add(buildSectorGate(curve, circuit.length, s.idx, s.color || "#f4f4f8"));
+    // Sector boundary gates are disabled by default in 3D because they can
+    // read as intrusive cross-track bars at wide camera distances.
+    if (showTrackHelpers) {
+      for (const s of window.APEX.SECTORS || []) {
+        if (s.idx == null) continue;
+        const g = buildSectorGate(curve, circuit.length, s.idx, s.color || "#f4f4f8");
+        g.position.y = ABOVE_TRACK(0.40, 0.04);
+        scene.add(g);
+      }
     }
 
-    // Racing line + start/finish.
-    scene.add(buildRacingLineMesh(curve, segments));
-    scene.add(buildStartFinishMesh(curve, TRACK_WIDTH));
+    // Racing line + start/finish — lifted onto the track top face.
+    const racingLine = buildRacingLineMesh(curve, segments);
+    racingLine.position.y = ABOVE_TRACK(0.39, 0.015);
+    scene.add(racingLine);
+    if (showTrackHelpers) {
+      const sf = buildStartFinishMesh(curve, TRACK_WIDTH);
+      sf.position.y += ABOVE_TRACK(0.41, 0.025);
+      scene.add(sf);
+    }
 
     // Rain.
     const rain = buildRain(bboxInfo);
@@ -1311,8 +1553,8 @@ function Track3D({
     // Filmic tonemap + slight overshoot exposure makes the bloom pass + the
     // emissive lights/sun read like a TV broadcast feed instead of a flat
     // unlit pipeline.
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = preset.exposure;
+    renderer.toneMapping = disableToneMapping ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = disableToneMapping ? 1.0 : preset.exposure;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     mount.appendChild(renderer.domElement);
@@ -1473,7 +1715,7 @@ function Track3D({
         const u = ((frac % 1) + 1) % 1;
         const p = curve.getPointAt(u);
         curve.getTangentAt(u, tmpTan);
-        entry.group.position.set(p.x, p.y + 0.38, p.z);
+        entry.group.position.set(p.x, p.y + TRACK_TOP_Y + 0.02, p.z);
         entry.group.rotation.y = Math.atan2(-tmpTan.z, tmpTan.x);
 
         // Selection halo + ring scale.
@@ -1592,13 +1834,11 @@ function Track3D({
         const wSpeed = (w.windSpeed || 0) * 0.2778;
         const windVec = new THREE.Vector3(Math.sin(wRad) * wSpeed, 0, -Math.cos(wRad) * wSpeed);
         advanceRain(rain, dt, windVec);
-        // Wet asphalt: very low roughness + raised metalness so the env map
-        // smears across the surface as a streaked reflection.
-        trackMat.color.setHex(0x14141c);
-        trackMat.roughness = 0.2;
-        trackMat.metalness = 0.45;
-        trackMat.envMapIntensity = 1.2;
-        runoffMat.color.setHex(0x10101a);
+        // Wet asphalt — just darken the tint on the unlit track material.
+        // (No env-map reflections since we're on MeshBasicMaterial now; a
+        // proper wet sheen would need a different setup.)
+        trackMat.color.setHex(trackWetColor);
+        runoffMat.color.setHex(runoffWetColor);
         runoffMat.roughness = 0.55;
         runoffMat.metalness = 0.2;
         scene.fog.density = (preset.fog.densityScale * 2.4) / extent;
@@ -1606,12 +1846,9 @@ function Track3D({
         bloomPass.strength = preset.bloom.strength + 0.12;
         bloomPass.threshold = Math.max(0.7, preset.bloom.threshold - 0.1);
       } else {
-        trackMat.color.setHex(preset.trackTint);
-        trackMat.roughness = 0.78;
-        trackMat.metalness = 0.08;
-        trackMat.envMapIntensity = 0.6;
-        runoffMat.color.setHex(preset.runoff.color);
-        runoffMat.roughness = 0.95;
+        trackMat.color.setHex(trackDryColor);
+        runoffMat.color.setHex(runoffDryColor);
+        runoffMat.roughness = 0.92;
         runoffMat.metalness = 0;
         scene.fog.density = preset.fog.densityScale / extent;
         bloomPass.strength = preset.bloom.strength;
