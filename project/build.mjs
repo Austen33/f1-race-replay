@@ -18,6 +18,13 @@ function copyAssets() {
   } else {
     console.warn("Warning: f1-car.glb not found at project root — cars will use fallback primitives.");
   }
+  const scSrc = join(projectDir, "..", "safety_car.glb");
+  if (existsSync(scSrc)) {
+    cpSync(scSrc, join(assetsDir, "safety_car.glb"));
+    console.log("Copied safety_car.glb → assets/");
+  } else {
+    console.warn("Warning: safety_car.glb not found at project root — safety car will use fallback primitives.");
+  }
 }
 
 const ctx = await esbuild.context({

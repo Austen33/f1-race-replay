@@ -703,6 +703,34 @@ function loadBaseCarModel() {
   return _baseModelPromise;
 }
 
+const SAFETY_CAR_MODEL_PATH = "assets/safety_car.glb";
+let _safetyCarModelPromise = null;
+
+function loadSafetyCarModel() {
+  if (_safetyCarModelPromise) return _safetyCarModelPromise;
+  _safetyCarModelPromise = new Promise((resolve, reject) => {
+    gltfLoader.load(
+      SAFETY_CAR_MODEL_PATH,
+      (gltf) => {
+        const model = gltf.scene;
+        model.traverse((child) => {
+          if (child.isMesh) {
+            child.castShadow = false;
+            child.receiveShadow = false;
+          }
+        });
+        resolve(model);
+      },
+      undefined,
+      (err) => {
+        console.warn("Safety car GLB failed to load, will use fallback:", err);
+        reject(err);
+      },
+    );
+  });
+  return _safetyCarModelPromise;
+}
+
 // Build a fallback car from primitives (same as the old makeDriverMarker) if
 // the GLB model fails to load.
 function makeFallbackMarker(team) {
@@ -957,6 +985,83 @@ function makeDriverMarker(team) {
     g.userData.bodyMats = fallback.userData.bodyMats;
     g.userData.wheels = fallback.userData.wheels;
     g.userData.wheelsAreSeparateMeshes = true;
+  });
+
+  return g;
+}
+
+// Safety car marker — yellow GLB model scaled to match F1 car dimensions.
+// Uses same placement contract as driver markers (fraction → curve position).
+function makeSafetyCarMarker() {
+  const SC_COLOR = new THREE.Color(0xffcc00);
+  const g = new THREE.Group();
+  g.userData = { body: [], bodyMats: [], wheels: [], wheelsAreSeparateMeshes: false };
+
+  // Ground halo in yellow so it's distinct from driver rings.
+  const haloGeom = new THREE.RingGeometry(HALO_RADIUS * 0.75, HALO_RADIUS * 1.1, 36);
+  haloGeom.rotateX(-Math.PI / 2);
+  const haloMat = new THREE.MeshBasicMaterial({
+    color: SC_COLOR, transparent: true, opacity: 0.55, depthWrite: false,
+  });
+  const groundHalo = new THREE.Mesh(haloGeom, haloMat);
+  groundHalo.position.y = 0.02;
+  g.add(groundHalo);
+  g.userData.groundHalo = groundHalo;
+  g.userData.haloMat = haloMat;
+
+  loadSafetyCarModel().then((baseModel) => {
+    const clone = baseModel.clone();
+    const matMap = new Map();
+    clone.traverse((child) => {
+      if (!child.isMesh) return;
+      if (child.material && !matMap.has(child.material)) {
+        matMap.set(child.material, child.material.clone());
+      }
+      child.material = matMap.get(child.material);
+    });
+
+    // Safety car (Mercedes AMG GT) is ~4.7 m long in real life — slightly
+    // smaller than an F1 car. Use the same scene-unit scale as F1 cars but
+    // target SC_LENGTH instead of CAR_LENGTH.
+    const SC_LENGTH = CAR_LENGTH * 0.75;
+    const SC_WIDTH  = CAR_WIDTH  * 0.75;
+    const bbox = new THREE.Box3().setFromObject(clone);
+    const size = bbox.getSize(new THREE.Vector3());
+    // GLB forward is +Z, so fit against Z axis for length and X for width.
+    const scaleZ = SC_LENGTH / Math.max(size.z, 0.01);
+    const scaleX = SC_WIDTH  / Math.max(size.x, 0.01);
+    clone.scale.setScalar(Math.min(scaleZ, scaleX));
+    // Rotate +90° so GLB's +Z forward maps to scene's +X forward.
+    clone.rotation.y = Math.PI / 2;
+
+    clone.updateMatrixWorld(true);
+    const bbox2 = new THREE.Box3().setFromObject(clone);
+    const center = bbox2.getCenter(new THREE.Vector3());
+    clone.position.x -= center.x;
+    clone.position.z -= center.z;
+
+    // Anchor lowest point to Y=0 (same as driver markers).
+    clone.position.y -= bbox2.min.y;
+
+    const body = [];
+    const bodyMats = [];
+    clone.traverse((child) => {
+      if (!child.isMesh) return;
+      body.push(child);
+      if (child.material && !bodyMats.includes(child.material)) bodyMats.push(child.material);
+    });
+
+    g.add(clone);
+    g.userData.body = body;
+    g.userData.bodyMats = bodyMats;
+  }).catch(() => {
+    // Fallback: yellow box.
+    const mat = new THREE.MeshStandardMaterial({ color: SC_COLOR, roughness: 0.4, metalness: 0.3 });
+    const box = new THREE.Mesh(new THREE.BoxGeometry(CAR_LENGTH, 1.4, CAR_WIDTH * 0.8), mat);
+    box.position.y = 0.7;
+    g.add(box);
+    g.userData.body = [box];
+    g.userData.bodyMats = [mat];
   });
 
   return g;
@@ -1392,10 +1497,11 @@ function Track3D({
   cameraMode = "orbit",
   weather = null,
   circuitName = "",
+  safetyCar = null,
 }) {
   const mountRef = React.useRef(null);
-  const liveRef = React.useRef({ standings, pinned, secondary, cameraMode, weather, showLabels });
-  liveRef.current = { standings, pinned, secondary, cameraMode, weather, showLabels };
+  const liveRef = React.useRef({ standings, pinned, secondary, cameraMode, weather, showLabels, safetyCar });
+  liveRef.current = { standings, pinned, secondary, cameraMode, weather, showLabels, safetyCar };
   // Rebuild scene when the circuit changes (TOD preset is baked at setup).
   const todKey = detectTimeOfDay(circuitName);
 
@@ -1772,6 +1878,10 @@ function Track3D({
     scene.add(driverGroup);
     const driverMap = new Map();
 
+    // --- Safety car mesh + label ---
+    let scGroup = null;  // created on first SC appearance, reused thereafter
+    let scLabel = null;  // DOM label, created alongside scGroup
+
     const raycaster = new THREE.Raycaster();
     const ndc = new THREE.Vector2();
     const onClick = (e) => {
@@ -1908,6 +2018,52 @@ function Track3D({
         }
       }
 
+      // --- Safety car ---
+      const sc = live.safetyCar;
+      if (sc && sc.fraction != null) {
+        if (!scGroup) {
+          scGroup = makeSafetyCarMarker();
+          scene.add(scGroup);
+          scLabel = document.createElement("div");
+          scLabel.textContent = "SC";
+          Object.assign(scLabel.style, {
+            position: "absolute",
+            fontSize: "10px", fontWeight: "700", letterSpacing: "0.08em",
+            color: "#ffcc00",
+            background: "rgba(0,0,0,0.72)",
+            border: "1px solid #ffcc0088",
+            borderRadius: "3px",
+            padding: "1px 4px",
+            pointerEvents: "none",
+            transform: "translate(-50%, -100%)",
+            display: "none",
+          });
+          labelLayer.appendChild(scLabel);
+        }
+        scGroup.visible = true;
+        const u = ((sc.fraction % 1) + 1) % 1;
+        const p = curve.getPointAt(u);
+        curve.getTangentAt(u, tmpTan);
+        const fwd = tmpTan.clone().normalize();
+        const worldUp = new THREE.Vector3(0, 1, 0);
+        const right = new THREE.Vector3().crossVectors(fwd, worldUp).normalize();
+        const up = new THREE.Vector3().crossVectors(right, fwd).normalize();
+        const m = new THREE.Matrix4().makeBasis(fwd, up, right);
+        scGroup.quaternion.setFromRotationMatrix(m);
+        const surfaceOffset = up.clone().multiplyScalar(TRACK_TOP_Y + CAR_SURFACE_CLEARANCE);
+        scGroup.position.set(p.x + surfaceOffset.x, p.y + surfaceOffset.y, p.z + surfaceOffset.z);
+        // Pulse the halo opacity during "deploying" phase.
+        const alpha = sc.alpha ?? 1;
+        if (scGroup.userData.haloMat) {
+          scGroup.userData.haloMat.opacity = sc.phase === "deploying"
+            ? 0.3 + 0.25 * Math.sin(performance.now() * 0.005)
+            : 0.55 * alpha;
+        }
+      } else {
+        if (scGroup) scGroup.visible = false;
+        if (scLabel) scLabel.style.display = "none";
+      }
+
       // --- Camera modes ---
       const inFollow = live.cameraMode === "follow" && !!live.pinned;
       // Target vignette state — settles by lerp at the bottom so the FX
@@ -2026,6 +2182,19 @@ function Track3D({
           entry.label.style.left = `${px}px`;
           entry.label.style.top = `${py}px`;
         }
+        // SC label.
+        if (scLabel && scGroup?.visible) {
+          vp.copy(scGroup.position);
+          vp.y += 3;
+          vp.project(camera);
+          if (vp.z < -1 || vp.z > 1) {
+            scLabel.style.display = "none";
+          } else {
+            scLabel.style.display = "block";
+            scLabel.style.left = `${(vp.x * 0.5 + 0.5) * w2}px`;
+            scLabel.style.top = `${(-vp.y * 0.5 + 0.5) * h2}px`;
+          }
+        }
       } else {
         labelLayer.style.display = "none";
       }
@@ -2044,6 +2213,7 @@ function Track3D({
       controls.dispose();
       renderer.domElement.removeEventListener("click", onClick);
       for (const [, entry] of driverMap) entry.label.remove();
+      if (scLabel) scLabel.remove();
       labelLayer.remove();
       povHud.root.remove();
       composer.dispose();

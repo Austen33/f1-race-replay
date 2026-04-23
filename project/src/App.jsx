@@ -172,11 +172,12 @@ function App() {
       }));
   }, [trackStatuses, totalDurationS]);
 
-  // Safety car from live frame — project world coords to nearest CIRCUIT index
+  // Safety car from live frame — project world coords to arc-length fraction (0-1)
   let safetyCar = null;
   const scData = frame?.safety_car;
   if (scData) {
     const n = CIRCUIT.length;
+    // Find nearest CIRCUIT index by XY distance.
     let bestIdx = 0, bestDist = Infinity;
     for (let i = 0; i < n; i++) {
       const dx = CIRCUIT[i].x - (scData.x || 0);
@@ -184,7 +185,21 @@ function App() {
       const d2 = dx * dx + dy * dy;
       if (d2 < bestDist) { bestDist = d2; bestIdx = i; }
     }
-    safetyCar = { trackIdx: bestIdx, phase: scData.phase || "on_track", alpha: scData.alpha ?? 1, pulse: tSeconds * 60 };
+    // Convert index to arc-length fraction using cumulative chord lengths so
+    // Track3D's arc-length-parameterised curve (getPointAt) gets the right u.
+    let fraction = 0;
+    if (n > 1) {
+      let totalLen = 0;
+      const cumLen = new Float64Array(n);
+      for (let i = 1; i < n; i++) {
+        const dx = CIRCUIT[i].x - CIRCUIT[i - 1].x;
+        const dy = CIRCUIT[i].y - CIRCUIT[i - 1].y;
+        totalLen += Math.sqrt(dx * dx + dy * dy);
+        cumLen[i] = totalLen;
+      }
+      fraction = totalLen > 0 ? cumLen[bestIdx] / totalLen : 0;
+    }
+    safetyCar = { trackIdx: bestIdx, fraction, phase: scData.phase || "on_track", alpha: scData.alpha ?? 1, pulse: tSeconds * 60 };
   }
 
   // Race control feed from WS
@@ -334,6 +349,7 @@ function App() {
             cameraMode={viewMode === "follow" ? "follow" : "orbit"}
             weather={weather}
             circuitName={ev?.circuit_name || ev?.event_name || ""}
+            safetyCar={safetyCar}
           />
         ) : (
           <IsoTrack
