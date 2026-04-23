@@ -20,11 +20,20 @@ function fmtLap(t) {
   return `${m}:${s.padStart(6, "0")}`;
 }
 
+const SECTOR_COLORS = ["#FF1E00", "#FFD93A", "#00D9FF"];
+function sectorOf(fraction) {
+  if (fraction == null) return 0;
+  if (fraction < 0.33) return 0;
+  if (fraction < 0.66) return 1;
+  return 2;
+}
+
 function Leaderboard({ standings, pinned, secondary, onPick, onShiftPick, bestLapCode }) {
+  const T = window.THEME;
   return (
-    <div style={{
-      background: "linear-gradient(180deg, rgba(20,20,30,0.92) 0%, rgba(11,11,17,0.94) 100%)",
-      border: "1px solid rgba(255,255,255,0.06)",
+    <div className="apex-panel-mount" style={{
+      background: T.surface,
+      border: T.border,
       borderRadius: 2,
       backdropFilter: "blur(8px)",
       display: "flex", flexDirection: "column",
@@ -36,85 +45,140 @@ function Leaderboard({ standings, pinned, secondary, onPick, onShiftPick, bestLa
         display: "grid",
         gridTemplateColumns: "24px 26px 1fr 62px 62px 58px 22px",
         gap: 6, padding: "6px 10px",
-        fontFamily: "JetBrains Mono, monospace",
-        fontSize: 9,
-        color: "rgba(180,180,200,0.5)",
-        letterSpacing: "0.1em",
-        borderBottom: "1px solid rgba(255,255,255,0.04)",
+        fontFamily: T.mono,
+        fontSize: T.fs.xs,
+        color: T.textDim,
+        letterSpacing: T.ls.label,
+        borderBottom: T.borderSoft,
       }}>
         <div>P</div><div></div><div>DRIVER</div><div style={{textAlign:"right"}}>GAP</div><div style={{textAlign:"right"}}>INT</div><div style={{textAlign:"right"}}>LAST</div><div></div>
       </div>
       <div style={{ overflow: "auto", flex: 1 }}>
-        {standings.map((s) => {
-          const team = TEAMS[s.driver.team];
-          const isPinned = pinned === s.driver.code;
-          const isSec = secondary === s.driver.code;
-          const isOut = s.status === "OUT";
-          const isBest = bestLapCode === s.driver.code;
-          return (
-            <div
-              key={s.driver.code}
-              onClick={(e) => {
-                if (e.shiftKey) onShiftPick(s.driver.code);
-                else onPick(s.driver.code);
-              }}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "24px 26px 1fr 62px 62px 58px 22px",
-                gap: 6,
-                padding: "5px 10px",
-                alignItems: "center",
-                fontFamily: "JetBrains Mono, monospace",
-                fontSize: 11,
-                color: isOut ? "rgba(180,180,200,0.35)" : "#E6E6EF",
-                cursor: "pointer",
-                borderLeft: isPinned ? "2px solid #FF1E00" : isSec ? "2px solid #00D9FF" : "2px solid transparent",
-                background: isPinned
-                  ? "linear-gradient(90deg, rgba(255,30,0,0.12), transparent 60%)"
-                  : isSec
-                  ? "linear-gradient(90deg, rgba(0,217,255,0.12), transparent 60%)"
-                  : "transparent",
-                borderBottom: "1px solid rgba(255,255,255,0.03)",
-                transition: "background 100ms",
-              }}
-              onMouseEnter={(e) => { if (!isPinned && !isSec) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
-              onMouseLeave={(e) => { if (!isPinned && !isSec) e.currentTarget.style.background = "transparent"; }}
-            >
-              <div style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                {String(s.pos).padStart(2, " ")}
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <div style={{ width: 3, height: 14, background: team.color }}/>
-                <div style={{ fontSize: 9, color: "rgba(180,180,200,0.55)" }}>{s.driver.num}</div>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.1 }}>
-                <div style={{ fontWeight: 700, letterSpacing: "0.04em" }}>{s.driver.code}</div>
-                <div style={{ fontSize: 8, color: "rgba(180,180,200,0.45)", letterSpacing: "0.08em" }}>{team.name}</div>
-              </div>
-              <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums", fontSize: 10, color: isOut ? "inherit" : "rgba(230,230,239,0.85)" }}>
-                {isOut ? "DNF" : fmtGap(s.gap)}
-              </div>
-              <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums", fontSize: 10, color: "rgba(180,180,200,0.6)" }}>
-                {isOut ? "—" : fmtInterval(s.interval)}
-              </div>
-              <div style={{
-                textAlign: "right",
-                fontVariantNumeric: "tabular-nums",
-                fontSize: 10,
-                color: (() => {
-                  if (isBest) return "#C15AFF";
-                  if (s.lastLap > 0 && s.pbLap > 0 && s.lastLap === s.pbLap) return "#1EFF6A";
-                  if (s.lastLap > 0 && s.pbLap > 0 && s.lastLap < s.pbLap + 0.2) return "#FFD93A";
-                  return "rgba(230,230,239,0.75)";
-                })(),
-              }}>
-                {isOut ? "—" : fmtLap(s.lastLap)}
-              </div>
-              <TyrePip compound={s.compound} age={s.tyreAge} pit={s.pit} out={isOut}/>
-            </div>
-          );
-        })}
+        {standings.map((s) => (
+          <LeaderboardRow
+            key={s.driver.code}
+            s={s}
+            pinned={pinned}
+            secondary={secondary}
+            bestLapCode={bestLapCode}
+            onPick={onPick}
+            onShiftPick={onShiftPick}
+          />
+        ))}
       </div>
+    </div>
+  );
+}
+
+function LeaderboardRow({ s, pinned, secondary, bestLapCode, onPick, onShiftPick }) {
+  const T = window.THEME;
+  const team = TEAMS[s.driver.team];
+  const isPinned = pinned === s.driver.code;
+  const isSec = secondary === s.driver.code;
+  const isOut = s.status === "OUT";
+  const isBest = bestLapCode === s.driver.code;
+
+  // Detect sector transitions — pulse the row for pinned driver when they
+  // cross a sector boundary. For all rows we keep a cheap ref-compare; pulse
+  // is only rendered when the driver is pinned (the one the user is watching).
+  const rowRef = React.useRef(null);
+  const lastSectorRef = React.useRef(sectorOf(s.fraction));
+  React.useEffect(() => {
+    const cur = sectorOf(s.fraction);
+    if (cur !== lastSectorRef.current) {
+      lastSectorRef.current = cur;
+      if (isPinned && rowRef.current) {
+        const el = rowRef.current;
+        el.classList.remove("apex-row-pulse");
+        // force reflow so animation restarts
+        void el.offsetWidth;
+        el.classList.add("apex-row-pulse");
+      }
+    }
+  }, [s.fraction, isPinned]);
+
+  const frac = s.fraction != null ? (s.fraction % 1) : 0;
+  const curSector = sectorOf(frac);
+  const sectorBarColor = SECTOR_COLORS[curSector];
+
+  return (
+    <div
+      ref={rowRef}
+      className="apex-row"
+      onClick={(e) => {
+        if (e.shiftKey) onShiftPick(s.driver.code);
+        else onPick(s.driver.code);
+      }}
+      style={{
+        display: "grid",
+        gridTemplateColumns: "24px 26px 1fr 62px 62px 58px 22px",
+        gap: 6,
+        padding: "5px 10px",
+        alignItems: "center",
+        fontFamily: T.mono,
+        fontSize: 11,
+        color: isOut ? T.textFaint : T.text,
+        cursor: "pointer",
+        borderLeft: isPinned ? `2px solid ${T.hot}` : isSec ? `2px solid ${T.cool}` : "2px solid transparent",
+        background: isPinned
+          ? "linear-gradient(90deg, rgba(255,30,0,0.12), transparent 60%)"
+          : isSec
+          ? "linear-gradient(90deg, rgba(0,217,255,0.12), transparent 60%)"
+          : "transparent",
+        borderBottom: T.borderSoft,
+      }}
+      onMouseEnter={(e) => { if (!isPinned && !isSec) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
+      onMouseLeave={(e) => { if (!isPinned && !isSec) e.currentTarget.style.background = "transparent"; }}
+    >
+      <div style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+        {String(s.pos).padStart(2, " ")}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+        <div style={{ width: 3, height: 14, background: team.color }}/>
+        <div style={{ fontSize: T.fs.xs, color: "rgba(180,180,200,0.55)" }}>{s.driver.num}</div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.1, minWidth: 0 }}>
+        <div style={{ fontWeight: 700, letterSpacing: T.ls.body }}>{s.driver.code}</div>
+        {/* Sector-colored lap-progress bar — 2px, fills with s.fraction */}
+        {!isOut && (
+          <div style={{
+            height: 2, marginTop: 2,
+            background: "rgba(255,255,255,0.04)",
+            position: "relative",
+          }}>
+            <div
+              className="apex-sector-bar-fill"
+              style={{
+                position: "absolute", left: 0, top: 0, bottom: 0,
+                width: `${Math.max(0, Math.min(1, frac)) * 100}%`,
+                background: sectorBarColor,
+                boxShadow: isPinned ? `0 0 4px ${sectorBarColor}` : "none",
+              }}
+            />
+          </div>
+        )}
+        <div style={{ fontSize: 8, color: T.textFaint, letterSpacing: T.ls.label, marginTop: isOut ? 0 : 1 }}>{team.name}</div>
+      </div>
+      <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums", fontSize: T.fs.sm, color: isOut ? "inherit" : "rgba(230,230,239,0.85)" }}>
+        {isOut ? "DNF" : fmtGap(s.gap)}
+      </div>
+      <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums", fontSize: T.fs.sm, color: T.textMuted }}>
+        {isOut ? "—" : fmtInterval(s.interval)}
+      </div>
+      <div style={{
+        textAlign: "right",
+        fontVariantNumeric: "tabular-nums",
+        fontSize: T.fs.sm,
+        color: (() => {
+          if (isBest) return T.purple;
+          if (s.lastLap > 0 && s.pbLap > 0 && s.lastLap === s.pbLap) return T.good;
+          if (s.lastLap > 0 && s.pbLap > 0 && s.lastLap < s.pbLap + 0.2) return T.warn;
+          return "rgba(230,230,239,0.75)";
+        })(),
+      }}>
+        {isOut ? "—" : fmtLap(s.lastLap)}
+      </div>
+      <TyrePip compound={s.compound} age={s.tyreAge} pit={s.pit} out={isOut}/>
     </div>
   );
 }
@@ -143,22 +207,24 @@ function TyrePip({ compound, age, pit, out }) {
   );
 }
 
-function PanelHeader({ title, meta, accent = "#FF1E00" }) {
+function PanelHeader({ title, meta, accent }) {
+  const T = window.THEME;
+  const a = accent || T.accent;
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
       padding: "10px 12px",
-      borderBottom: "1px solid rgba(255,255,255,0.06)",
-      fontFamily: "JetBrains Mono, monospace",
+      borderBottom: T.border,
+      fontFamily: T.mono,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <div style={{ width: 6, height: 6, background: accent, boxShadow: `0 0 6px ${accent}` }}/>
-        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.18em", color: "#E6E6EF" }}>
+        <div style={{ width: 6, height: 6, background: a, boxShadow: `0 0 6px ${a}` }}/>
+        <div style={{ fontSize: T.fs.sm, fontWeight: 700, letterSpacing: T.ls.wide, color: T.text }}>
           {title}
         </div>
       </div>
       {meta && (
-        <div style={{ fontSize: 9, color: "rgba(180,180,200,0.6)", letterSpacing: "0.1em" }}>
+        <div style={{ fontSize: T.fs.xs, color: T.textMuted, letterSpacing: T.ls.label }}>
           {meta}
         </div>
       )}

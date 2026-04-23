@@ -1,6 +1,7 @@
 // Entry point for esbuild bundle — imports all modules in load order.
 // Each module assigns its exports to window.XXX globals.
 
+import "./theme.js";
 import "./apex_client.jsx";
 import "./live_state.jsx";
 import "./loading_gate.jsx";

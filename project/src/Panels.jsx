@@ -10,15 +10,16 @@ const COMPOUND_KEY = {
 
 // Stint strategy strip for top-10 drivers — uses real stint & pit stop data
 function StrategyStrip({ standings, totalLaps, lap }) {
+  const T = window.THEME;
   const top = standings.slice(0, 10);
   return (
-    <div style={{
-      background: "linear-gradient(180deg, rgba(20,20,30,0.92), rgba(11,11,17,0.94))",
-      border: "1px solid rgba(255,255,255,0.06)",
+    <div className="apex-panel-mount" style={{
+      background: T.surface,
+      border: T.border,
       overflow: "hidden",
     }}>
       <PanelHeader title="TYRE STRATEGY" meta={`LAP ${lap}/${totalLaps}`}/>
-      <div style={{ padding: "6px 10px", fontFamily: "JetBrains Mono, monospace" }}>
+      <div style={{ padding: "6px 10px", fontFamily: T.mono }}>
         {top.map((s) => {
           const team = TEAMS[s.driver.team];
           const rawStints = getStints(s.driver.code);
@@ -36,14 +37,14 @@ function StrategyStrip({ standings, totalLaps, lap }) {
               display: "grid", gridTemplateColumns: "28px 36px 1fr",
               gap: 8, alignItems: "center",
               padding: "3px 0",
-              fontSize: 9,
+              fontSize: T.fs.xs,
             }}>
-              <div style={{ color: "rgba(180,180,200,0.5)", fontVariantNumeric: "tabular-nums" }}>
+              <div style={{ color: T.textDim, fontVariantNumeric: "tabular-nums" }}>
                 P{String(s.pos).padStart(2, "0")}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <div style={{ width: 2, height: 10, background: team.color }}/>
-                <div style={{ color: "#E6E6EF", fontWeight: 700, letterSpacing: "0.06em" }}>{s.driver.code}</div>
+                <div style={{ color: T.text, fontWeight: 700, letterSpacing: T.ls.body }}>{s.driver.code}</div>
               </div>
               <div style={{ position: "relative", height: 10, background: "rgba(255,255,255,0.04)" }}>
                 {stops.map((stint, i) => {
@@ -64,7 +65,7 @@ function StrategyStrip({ standings, totalLaps, lap }) {
                     position: "absolute",
                     left: `${(ps.lap / totalLaps) * 100}%`,
                     top: -3, bottom: -3, width: 2,
-                    background: "#FFB800",
+                    background: T.caution,
                     borderRadius: 1,
                     zIndex: 2,
                   }}/>
@@ -86,15 +87,16 @@ function StrategyStrip({ standings, totalLaps, lap }) {
 
 // Compact gap-to-leader visualizer (spider)
 function GapViz({ standings, pinned }) {
+  const T = window.THEME;
   const top = standings.slice(0, 10);
   const maxGap = Math.max(...top.map(s => s.gap ?? 0), 1);
   return (
-    <div style={{
-      background: "linear-gradient(180deg, rgba(20,20,30,0.92), rgba(11,11,17,0.94))",
-      border: "1px solid rgba(255,255,255,0.06)",
+    <div className="apex-panel-mount" style={{
+      background: T.surface,
+      border: T.border,
     }}>
       <PanelHeader title="GAP TO LEADER"/>
-      <div style={{ padding: "6px 10px", fontFamily: "JetBrains Mono, monospace" }}>
+      <div style={{ padding: "6px 10px", fontFamily: T.mono }}>
         {top.map((s) => {
           const team = TEAMS[s.driver.team];
           const pct = (s.gap / maxGap) * 100;
@@ -102,10 +104,10 @@ function GapViz({ standings, pinned }) {
           return (
             <div key={s.driver.code} style={{
               display: "grid", gridTemplateColumns: "40px 1fr 58px",
-              gap: 6, alignItems: "center", fontSize: 9,
+              gap: 6, alignItems: "center", fontSize: T.fs.xs,
               padding: "2.5px 0",
             }}>
-              <div style={{ color: isPinned ? "#FF1E00" : "#E6E6EF", fontWeight: 700 }}>
+              <div style={{ color: isPinned ? T.hot : T.text, fontWeight: 700 }}>
                 {s.driver.code}
               </div>
               <div style={{ position: "relative", height: 3, background: "rgba(255,255,255,0.04)" }}>
@@ -124,15 +126,16 @@ function GapViz({ standings, pinned }) {
 
 // Event feed / race control messages
 function RaceFeed({ events }) {
+  const T = window.THEME;
   return (
-    <div style={{
-      background: "linear-gradient(180deg, rgba(20,20,30,0.92), rgba(11,11,17,0.94))",
-      border: "1px solid rgba(255,255,255,0.06)",
+    <div className="apex-panel-mount" style={{
+      background: T.surface,
+      border: T.border,
       display: "flex", flexDirection: "column",
       minHeight: 0, flex: 1,
     }}>
       <PanelHeader title="RACE CONTROL" meta={`${events.length} MSGS`}/>
-      <div style={{ overflow: "auto", flex: 1, fontFamily: "JetBrains Mono, monospace", fontSize: 10 }}>
+      <div style={{ overflow: "auto", flex: 1, fontFamily: T.mono, fontSize: T.fs.sm }}>
         {events.map((e, i) => (
           <div key={i} style={{
             display: "grid", gridTemplateColumns: "54px 42px 1fr",
@@ -140,20 +143,20 @@ function RaceFeed({ events }) {
             borderBottom: "1px solid rgba(255,255,255,0.03)",
             alignItems: "start",
           }}>
-            <div style={{ color: "rgba(180,180,200,0.5)", fontSize: 9, fontVariantNumeric: "tabular-nums" }}>
+            <div style={{ color: T.textDim, fontSize: T.fs.xs, fontVariantNumeric: "tabular-nums" }}>
               {e.time}
             </div>
             <div style={{
-              fontSize: 8, letterSpacing: "0.12em", fontWeight: 700,
+              fontSize: 8, letterSpacing: T.ls.caps, fontWeight: 700,
               padding: "1px 4px",
-              color: e.tag === "SC" ? "#0B0B11" : e.tag === "FLAG" ? "#0B0B11" : "#E6E6EF",
-              background: e.tag === "SC" ? "#FFB800" : e.tag === "FLAG" ? "#FFD93A" : e.tag === "INFO" ? "rgba(255,255,255,0.06)" : "rgba(255,30,0,0.3)",
+              color: e.tag === "SC" ? "#0B0B11" : e.tag === "FLAG" ? "#0B0B11" : T.text,
+              background: e.tag === "SC" ? T.caution : e.tag === "FLAG" ? T.warn : e.tag === "INFO" ? "rgba(255,255,255,0.06)" : "rgba(255,30,0,0.3)",
               textAlign: "center",
               alignSelf: "start",
             }}>
               {e.tag}
             </div>
-            <div style={{ color: "#E6E6EF", fontSize: 10, lineHeight: 1.35, letterSpacing: "0.03em" }}>
+            <div style={{ color: T.text, fontSize: T.fs.sm, lineHeight: 1.35, letterSpacing: T.ls.tight }}>
               {e.msg}
             </div>
           </div>

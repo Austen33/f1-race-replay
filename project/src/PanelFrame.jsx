@@ -107,6 +107,7 @@ function useLayout() {
 }
 
 function IconButton({ onClick, title, children }) {
+  const T = window.THEME;
   const [h, setH] = React.useState(false);
   return (
     <button
@@ -124,10 +125,10 @@ function IconButton({ onClick, title, children }) {
         justifyContent: "center",
         background: h ? "rgba(255,30,0,0.25)" : "rgba(11,11,17,0.55)",
         border: "1px solid rgba(255,255,255,0.1)",
-        color: "#E6E6EF",
+        color: T.text,
         cursor: "pointer",
-        fontFamily: "JetBrains Mono, monospace",
-        fontSize: 10,
+        fontFamily: T.mono,
+        fontSize: T.fs.sm,
         lineHeight: 1,
       }}
     >
@@ -183,20 +184,22 @@ function PanelButtons({
 }
 
 function CollapsedStub({ title, onExpand }) {
+  const T = window.THEME;
   return (
     <div
       onClick={onExpand}
+      className="apex-panel-mount"
       style={{
         height: 28,
         display: "flex",
         alignItems: "center",
         padding: "0 10px",
-        background: "linear-gradient(180deg, rgba(20,20,30,0.92), rgba(11,11,17,0.94))",
-        border: "1px solid rgba(255,255,255,0.06)",
+        background: T.surface,
+        border: T.border,
         cursor: "pointer",
-        fontFamily: "JetBrains Mono, monospace",
-        fontSize: 10,
-        letterSpacing: "0.16em",
+        fontFamily: T.mono,
+        fontSize: T.fs.sm,
+        letterSpacing: T.ls.caps,
         color: "rgba(180,180,200,0.7)",
       }}
     >

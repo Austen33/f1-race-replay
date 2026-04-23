@@ -232,15 +232,15 @@ function App() {
     compare: <CompareTraces pinned={pinned} secondary={secondary} lap={lap} channel={compareChannel} setChannel={setCompareChannel} tWithinLap={tWithinLap}/>,
     sectors: <SectorTimes pinned={pinned} secondary={secondary} lap={lap} standings={standings}/>,
     feed: <RaceFeed events={FEED}/>,
-    driverCard: <DriverCard code={pinned} data={primaryData} accent="#FF1E00" standings={standings}/>,
+    driverCard: <DriverCard code={pinned} data={primaryData} accent={window.THEME.hot} standings={standings}/>,
     driverCard2: secondary
-      ? <DriverCard code={secondary} data={secondaryData} accent="#00D9FF" secondary standings={standings}/>
+      ? <DriverCard code={secondary} data={secondaryData} accent={window.THEME.cool} secondary standings={standings}/>
       : <div style={{
           padding: 14, height: "100%",
           border: "1px dashed rgba(0,217,255,0.2)",
-          fontFamily: "JetBrains Mono, monospace",
-          fontSize: 9, color: "rgba(180,180,200,0.45)",
-          letterSpacing: "0.12em", textAlign: "center",
+          fontFamily: window.THEME.mono,
+          fontSize: window.THEME.fs.xs, color: "rgba(180,180,200,0.45)",
+          letterSpacing: window.THEME.ls.caps, textAlign: "center",
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>SHIFT + CLICK DRIVER TO COMPARE</div>,
     gap: <GapViz standings={standings} pinned={pinned}/>,
@@ -248,9 +248,18 @@ function App() {
       <div className="scanline" style={{
         width: "100%", height: "100%", position: "relative",
         background: "linear-gradient(180deg, #0E0E16, #05050A)",
-        border: "1px solid rgba(255,255,255,0.06)",
+        border: window.THEME.border,
         overflow: "hidden",
       }}>
+        {/* Flag state overlay — yellow wash during SC/VSC/yellow, red pulse during red flag */}
+        {(() => {
+          const cls = flagState === "red" ? "red"
+            : (safetyCar || flagState === "sc") ? "sc"
+            : flagState === "vsc" ? "vsc"
+            : flagState === "yellow" ? "yellow"
+            : null;
+          return cls ? <div className={`apex-flag-layer ${cls}`}/> : null;
+        })()}
         {/* Corner HUD (top-left) */}
         <div style={{
           position: "absolute", top: 12, left: 12,
