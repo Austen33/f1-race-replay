@@ -1,5 +1,5 @@
 // Isometric 3D track view. SVG rendered in a 3D-transformed container.
-// Supports: rotate, zoom, DRS zones toggle, driver labels toggle,
+// Supports: rotate, zoom, driver labels toggle,
 // safety car deployment animation, clickable cars.
 
 const { TEAMS, DRIVERS, COMPOUNDS } = window.APEX;
@@ -114,23 +114,44 @@ function IsoTrack({
   pinned,
   secondary,
   onPickDriver,
-  showDRS = true,
   showLabels = true,
   rotateX = 62,
   rotateZ = -18,
   zoom = 1,
+  viewMode = "iso",
 }) {
+  // Top-down mode flattens tilt only — rotateZ still spins the map. No fake shadow.
+  const isTop = viewMode === "top";
+  const rX = isTop ? 0 : rotateX;
+  const rZ = rotateZ;
   const [hover, setHover] = React.useState(null);
 
   // Memoize geometry derivations against CIRCUIT.length so they recompute when snapshot arrives
   const CIRCUIT = window.APEX.CIRCUIT;
   const SECTORS = window.APEX.SECTORS;
-  const DRS_ZONES = window.APEX.DRS_ZONES;
   const geoKey = CIRCUIT.length;
   const { B, CIRCUIT_EXTENT, S, PAD, VB_W, VB_H, OX, OY, CENTROID } = React.useMemo(
     () => computeDerived(CIRCUIT),
     [geoKey]
   );
+
+  // Kerb tick indices — sampled at high-curvature points for the top-down view.
+  const kerbTicks = React.useMemo(() => {
+    if (!isTop || CIRCUIT.length < 2) return [];
+    const n = CIRCUIT.length;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const pPrev = CIRCUIT[(i - 4 + n) % n];
+      const p     = CIRCUIT[i];
+      const pNext = CIRCUIT[(i + 4) % n];
+      const a1 = Math.atan2(p.y - pPrev.y, p.x - pPrev.x);
+      const a2 = Math.atan2(pNext.y - p.y, pNext.x - p.x);
+      let da = Math.abs(a2 - a1);
+      if (da > Math.PI) da = 2 * Math.PI - da;
+      if (da > 0.18) out.push(i);
+    }
+    return out;
+  }, [isTop, geoKey]);
 
   // Guard against initial render before geometry fetch resolves (CIRCUIT may be a single-point placeholder).
   if (CIRCUIT.length < 2) {
@@ -178,7 +199,7 @@ function IsoTrack({
           linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px)
         `,
         backgroundSize: "100% 100%, 40px 40px, 40px 40px",
-        transform: `rotateX(${rotateX}deg) rotateZ(${rotateZ}deg) scale(${zoom * 2.6})`,
+        transform: `rotateX(${rX}deg) rotateZ(${rZ}deg) scale(${zoom * 2.6})`,
         transformOrigin: "center center",
         transformStyle: "preserve-3d",
         pointerEvents: "none",
@@ -191,12 +212,12 @@ function IsoTrack({
       <div style={{
         position: "relative",
         width: "82%", height: "82%",
-        transform: `rotateX(${rotateX}deg) rotateZ(${rotateZ}deg) scale(${zCSS * 2.0})`,
+        transform: `rotateX(${rX}deg) rotateZ(${rZ}deg) scale(${zCSS * 2.0})`,
         transformStyle: "preserve-3d",
         transition: "transform 240ms cubic-bezier(.2,.7,.2,1)",
       }}>
-        {/* Track shadow (flat plate) */}
-        <svg viewBox={viewBox}
+        {/* Track shadow (flat plate) — iso only; flat in top-down. */}
+        {!isTop && <svg viewBox={viewBox}
           preserveAspectRatio="xMidYMid meet"
           shapeRendering="geometricPrecision" textRendering="geometricPrecision"
           style={{
@@ -207,7 +228,7 @@ function IsoTrack({
           opacity: 0.7,
         }}>
           <path d={trackPath} fill="#000" />
-        </svg>
+        </svg>}
 
         {/* Base plate (deeper than track) */}
         <svg viewBox={viewBox}
@@ -246,15 +267,18 @@ function IsoTrack({
           {/* Racing line (subtle) */}
           <path d={trackPath} fill="none" stroke="#3A3A4A" strokeWidth={1.6*S} strokeDasharray={`${6*S} ${10*S}`} opacity="0.6"/>
 
-          {/* DRS zones (emissive red tint over the track) */}
-          {showDRS && DRS_ZONES.map((z, i) => {
-            const seg = sliceRange(z.start, z.end, CIRCUIT);
-            const d = pathFromPts(seg, OX, OY, false);
+          {/* Kerbs — top-down only. Alternating red/white pips offset along the outward normal at corners. */}
+          {isTop && kerbTicks.map((idx, i) => {
+            const p = CIRCUIT[idx];
+            const { nx, ny } = outwardNormal(idx, CIRCUIT, CENTROID);
+            const inner = 11 * S;
+            const outer = 14 * S;
+            const x1 = p.x + OX + nx * inner, y1 = p.y + OY + ny * inner;
+            const x2 = p.x + OX + nx * outer, y2 = p.y + OY + ny * outer;
             return (
-              <g key={i}>
-                <path d={d} fill="none" stroke="#FF1E00" strokeWidth={22*S} strokeLinejoin="round" opacity="0.22"/>
-                <path d={d} fill="none" stroke="#FF1E00" strokeWidth={3*S}  strokeLinejoin="round" opacity="0.9" strokeDasharray={`${4*S} ${6*S}`}/>
-              </g>
+              <line key={i} x1={x1} y1={y1} x2={x2} y2={y2}
+                stroke={i % 2 === 0 ? "#FF1E00" : "#FFFFFF"}
+                strokeWidth={2.2 * S} strokeLinecap="butt" opacity="0.85"/>
             );
           })}
 
@@ -328,6 +352,9 @@ function IsoTrack({
                 const txtFill = textColorFor(team.color);
                 const speedFrac = Math.min(1, (s.speedKph || 0) / 350);
                 const haloOpacity = isPit ? 0 : 0.2 + 0.5 * speedFrac;
+                // Heading angle (degrees) from tangent at this track index — used for top-down arrow.
+                const np = CIRCUIT[(s.trackIdx + 1) % CIRCUIT.length];
+                const headingDeg = Math.atan2(np.y - p.y, np.x - p.x) * 180 / Math.PI;
                 return (
                   <g
                     key={s.driver.code}
@@ -364,6 +391,11 @@ function IsoTrack({
                     {isPit && (
                       <text x="0" y="-8" textAnchor="middle" fontFamily="JetBrains Mono, monospace" fontSize="7" fontWeight="700" fill="#FFB800">P</text>
                     )}
+                    {isTop && !isPit && (
+                      <g transform={`rotate(${headingDeg}) translate(14, 0)`}>
+                        <path d="M 0 -3 L 5 0 L 0 3 Z" fill={team.color} stroke="#0B0B11" strokeWidth="0.5"/>
+                      </g>
+                    )}
                     {showLabels && (
                       <g transform={`translate(${onx * 18}, ${ony * 18})`}>
                         <rect x="0" y="-7" width="34" height="12" rx="2" fill="rgba(11,11,17,0.85)" stroke={team.color} strokeWidth="0.6"/>
@@ -380,12 +412,6 @@ function IsoTrack({
                         </text>
                       </g>
                     )}
-                    {s.inDRS && showDRS && (
-                      <g transform={`translate(${-onx * 24}, ${-ony * 24})`}>
-                        <rect x="0" y="-6" width="22" height="10" rx="1" fill="#FF1E00"/>
-                        <text x="11" y="2" textAnchor="middle" fontFamily="JetBrains Mono, monospace" fontSize="7" fontWeight="700" fill="#FFFFFF">DRS</text>
-                      </g>
-                    )}
                   </g>
                 );
               }),
@@ -398,7 +424,10 @@ function IsoTrack({
       </div>
 
       {/* Corner labels (flat, on top of 3D plate, don't tilt) */}
-      <CornerLabels rotateX={rotateX} rotateZ={rotateZ} zoom={zoom} viewBox={viewBox} circuit={CIRCUIT} S={S} OX={OX} OY={OY} VB_W={VB_W} VB_H={VB_H} />
+      <CornerLabels rotateX={rX} rotateZ={rZ} zoom={zoom} viewBox={viewBox} circuit={CIRCUIT} S={S} OX={OX} OY={OY} VB_W={VB_W} VB_H={VB_H} />
+
+      {/* Compass — top-down only. N arrow rotates with the map's rotateZ. */}
+      {isTop && <Compass rotateZ={rZ} />}
     </div>
   );
 }
@@ -491,6 +520,31 @@ function SafetyCarGlyph({ sc, circuit, S, OX, OY }) {
         </text>
       </g>
     </g>
+  );
+}
+
+function Compass({ rotateZ }) {
+  // The map rotates by rotateZ, so "north" (map +y-up, which is -y in screen coords)
+  // rotates by the same amount. We rotate the N arrow by rotateZ to match.
+  return (
+    <div style={{
+      position: "absolute",
+      bottom: 14, right: 14,
+      width: 44, height: 44,
+      zIndex: 3,
+      pointerEvents: "none",
+      fontFamily: "JetBrains Mono, monospace",
+    }}>
+      <svg viewBox="-22 -22 44 44" width="44" height="44">
+        <circle r="20" fill="rgba(11,11,17,0.65)" stroke="rgba(255,255,255,0.18)" strokeWidth="1"/>
+        <g transform={`rotate(${rotateZ})`}>
+          <path d="M 0 -14 L 4 4 L 0 1 L -4 4 Z" fill="#FF1E00" stroke="#0B0B11" strokeWidth="0.6"/>
+          <path d="M 0 14 L 4 -4 L 0 -1 L -4 -4 Z" fill="rgba(255,255,255,0.25)"/>
+        </g>
+        <text x="0" y="-15" textAnchor="middle" fontSize="7" fontWeight="700" fill="#F6F6FA" letterSpacing="0.1em"
+          transform={`rotate(${rotateZ})`}>N</text>
+      </svg>
+    </div>
   );
 }
 

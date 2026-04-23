@@ -20,9 +20,8 @@ function makeMocks() {
     togglePlay: vi.fn(),
     seekRemote: vi.fn(),
     setSpeedRemote: vi.fn(),
-    setShowDRS: vi.fn(),
     setShowLabels: vi.fn(),
-    setShowProgress: vi.fn(),
+    setViewMode: vi.fn(),
   };
 }
 
@@ -33,9 +32,8 @@ function makeHandler(refs, mocks) {
     mocks.togglePlay,
     mocks.seekRemote,
     mocks.setSpeedRemote,
-    mocks.setShowDRS,
     mocks.setShowLabels,
-    mocks.setShowProgress,
+    mocks.setViewMode,
   );
 }
 

@@ -20,14 +20,13 @@ const COMPOUND_MAP = { 0: "S", 1: "M", 2: "H", 3: "I", 4: "W" };
 const TEAMS = {};
 const DRIVERS = [];
 
-// --- CIRCUIT / SECTORS / DRS_ZONES (const arrays, mutated in-place) ---
+// --- CIRCUIT / SECTORS (const arrays, mutated in-place) ---
 const CIRCUIT = [{ x: 0, y: 0 }];
 const SECTORS = [
   { idx: 0, color: "#FF1E00", name: "S1" },
   { idx: 0, color: "#FFD93A", name: "S2" },
   { idx: 0, color: "#00D9FF", name: "S3" },
 ];
-const DRS_ZONES = [];
 
 // --- Populate from summary / geometry (async, non-blocking) ---
 let _dataResolved;
@@ -61,11 +60,6 @@ async function _initAPEX() {
     const cx = _geometry.centerline?.x || [];
     const cy = _geometry.centerline?.y || [];
     CIRCUIT.splice(0, CIRCUIT.length, ...cx.map((x, i) => ({ x, y: cy[i] || 0 })));
-
-    DRS_ZONES.splice(0, DRS_ZONES.length, ...(_geometry.drs_zones || []).map(z => ({
-      start: z.start_idx,
-      end: z.end_idx,
-    })));
 
     const totalLength = _geometry.total_length_m || 1;
     const n = CIRCUIT.length;
@@ -164,10 +158,6 @@ function _installSnapshot(snap) {
     const cy = geo.centerline?.y || [];
     if (cx.length > 1) {
       CIRCUIT.splice(0, CIRCUIT.length, ...cx.map((x, i) => ({ x, y: cy[i] || 0 })));
-      DRS_ZONES.splice(0, DRS_ZONES.length, ...(geo.drs_zones || []).map(z => ({
-        start: z.start_idx,
-        end: z.end_idx,
-      })));
       const totalLength = geo.total_length_m || 1;
       const n = CIRCUIT.length;
       const boundaries = geo.sector_boundaries_m || [];
@@ -335,7 +325,7 @@ function getPitStops(code) {
 }
 
 window.APEX = {
-  TEAMS, DRIVERS, COMPOUNDS, CIRCUIT, SECTORS, DRS_ZONES,
+  TEAMS, DRIVERS, COMPOUNDS, CIRCUIT, SECTORS,
   computeStandings, telemetryFor, lapTrace,
   _installSnapshot, _accumulateFrame,
   getSessionBest, getStints, getPitStops,
