@@ -426,8 +426,6 @@ function IsoTrack({
       {/* Corner labels (flat, on top of 3D plate, don't tilt) */}
       <CornerLabels rotateX={rX} rotateZ={rZ} zoom={zoom} viewBox={viewBox} circuit={CIRCUIT} S={S} OX={OX} OY={OY} VB_W={VB_W} VB_H={VB_H} />
 
-      {/* Compass — top-down only. N arrow rotates with the map's rotateZ. */}
-      {isTop && <Compass rotateZ={rZ} />}
     </div>
   );
 }

@@ -2,7 +2,10 @@ const LiveCtx = React.createContext(null);
 function LiveProvider({ children }) {
   const [snapshot, setSnap] = React.useState(null);
   const [frame, setFrame]   = React.useState(null);
-  const [rc, setRc]         = React.useState([]);
+  // Full, time-sorted race control history. The visible `rc` feed is derived
+  // from this by filtering against current playback time — so seeking works
+  // both directions and messages appear in sync with the timeline.
+  const [rcHistory, setRcHistory] = React.useState([]);
   const [playback, setPb]   = React.useState({ speed: 1, is_paused: false });
   const [loading, setLoading] = React.useState({ status: "loading", progress: 0 });
   const [trackStatuses, setTrackStatuses] = React.useState([]);
@@ -13,9 +16,10 @@ function LiveProvider({ children }) {
         setLoading({ status: msg.status || "loading", progress: msg.progress || 0, message: msg.message });
       } else if (msg.type === "snapshot" || msg.type === "reset") {
         setLoading({ status: "ready", progress: 100 });
+        if (window.APEX?.clearLapTelemetry) window.APEX.clearLapTelemetry();
         setSnap(msg);
         window.__LIVE_SNAPSHOT = msg;
-        setRc([...(msg.race_control_history || [])].reverse());
+        setRcHistory([...(msg.race_control_history || [])].sort((a, b) => (a.time || 0) - (b.time || 0)));
         if (msg.track_statuses) setTrackStatuses(msg.track_statuses);
         if (msg.playback) setPb(msg.playback);
         // Install snapshot data into APEX shim (colors, driver meta)
@@ -54,13 +58,32 @@ function LiveProvider({ children }) {
         if (window.APEX?._accumulateFrame) window.APEX._accumulateFrame(msg);
         setFrame(msg);
         setPb((p) => ({ ...p, speed: msg.playback_speed, is_paused: msg.is_paused }));
-        if (msg.new_rc_events?.length) {
-          setRc((prev) => [...msg.new_rc_events.slice().reverse(), ...prev]);
-        }
+        // new_rc_events are already in rcHistory from the snapshot; ignore them
+        // here to keep history immutable and the feed derived from playback time.
       }
     });
     return () => h.close();
   }, []);
+
+  // Derive visible RC feed: everything up to the current playback time,
+  // newest first. Seeking backward hides future messages; seeking forward
+  // reveals them in order — matches the timeline.
+  // Memoize on the index of the *last visible message*, so the feed only
+  // rebuilds when a new message crosses the playhead (not every frame).
+  const tSec = frame?.t_seconds ?? frame?.t ?? 0;
+  const visibleCount = React.useMemo(() => {
+    if (!rcHistory.length) return 0;
+    let lo = 0, hi = rcHistory.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((rcHistory[mid].time || 0) <= tSec) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+  }, [rcHistory, tSec]);
+  const rc = React.useMemo(
+    () => rcHistory.slice(0, visibleCount).reverse(),
+    [rcHistory, visibleCount]
+  );
 
   return <LiveCtx.Provider value={{ snapshot, frame, rc, playback, setPb, loading, trackStatuses }}>{children}</LiveCtx.Provider>;
 }

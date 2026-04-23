@@ -248,8 +248,47 @@ function telemetryFor(driverCode, t) {
   };
 }
 
-// --- Telemetry accumulator: stores real per-lap samples from live frames ---
+// --- Telemetry accumulator: fallback for laps not yet served by the backend ---
+// The backend endpoint /api/session/lap_telemetry/{code}/{lap} is the source of
+// truth for any completed lap. This bucket only fills in the live/current lap
+// (and dry-runs before the endpoint is hit), so CompareTraces has something to
+// show instantly without waiting on a round-trip.
 window.__LAP_TELEMETRY = {};  // { driverCode: { lapNum: [{fraction, speed, throttle, brake, gear, rpm}, ...] } }
+
+// --- Server-fetched lap traces cache: { "CODE:LAP": {fraction[], speed[], ...} } ---
+window.__LAP_TRACE_CACHE = {};
+window.__LAP_TRACE_INFLIGHT = {};
+
+function _lapKey(code, lap) { return code + ":" + lap; }
+
+async function fetchLapTrace(code, lap) {
+  if (!code || !Number.isFinite(lap) || lap < 1) return null;
+  const key = _lapKey(code, lap);
+  if (window.__LAP_TRACE_CACHE[key]) return window.__LAP_TRACE_CACHE[key];
+  if (window.__LAP_TRACE_INFLIGHT[key]) return window.__LAP_TRACE_INFLIGHT[key];
+  const p = (async () => {
+    try {
+      const data = await window.APEX_CLIENT.get(`/api/session/lap_telemetry/${encodeURIComponent(code)}/${lap}`);
+      if (data && Array.isArray(data.fraction) && data.fraction.length >= 2) {
+        window.__LAP_TRACE_CACHE[key] = data;
+        return data;
+      }
+    } catch {}
+    return null;
+  })();
+  window.__LAP_TRACE_INFLIGHT[key] = p;
+  try { return await p; } finally { delete window.__LAP_TRACE_INFLIGHT[key]; }
+}
+
+function getCachedLapTrace(code, lap) {
+  return window.__LAP_TRACE_CACHE[_lapKey(code, lap)] || null;
+}
+
+function clearLapTelemetry() {
+  window.__LAP_TELEMETRY = {};
+  window.__LAP_TRACE_CACHE = {};
+  window.__LAP_TRACE_INFLIGHT = {};
+}
 
 function _accumulateFrame(frame) {
   if (!frame?.standings) return;
@@ -265,53 +304,82 @@ function _accumulateFrame(frame) {
     if (!window.__LAP_TELEMETRY[code][lap]) window.__LAP_TELEMETRY[code][lap] = [];
 
     const bucket = window.__LAP_TELEMETRY[code][lap];
-    // Keep a sample whenever fraction advances by at least ~0.1% of a lap.
-    const last = bucket[bucket.length - 1];
-    if (last && Math.abs(frac - last.fraction) < 0.001) continue;
-
-    bucket.push({
+    // Dedupe against nearest neighbour via binary search, not just the last
+    // sample — handles seeks and out-of-order arrivals. Insert in sorted order.
+    const sample = {
       fraction: frac,
       speed: s.speed_kph ?? 0,
       throttle: s.throttle_pct ?? 0,
       brake: s.brake_pct ?? 0,
       gear: s.gear ?? 1,
       rpm: s.rpm ?? 0,
-    });
+    };
+    let lo = 0, hi = bucket.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (bucket[mid].fraction < frac) lo = mid + 1; else hi = mid;
+    }
+    const prev = bucket[lo - 1];
+    const next = bucket[lo];
+    if (prev && Math.abs(frac - prev.fraction) < 0.001) continue;
+    if (next && Math.abs(next.fraction - frac) < 0.001) continue;
+    bucket.splice(lo, 0, sample);
   }
 }
 
-function lapTrace(driverCode, lap, channel = "speed") {
-  const lapData = window.__LAP_TELEMETRY?.[driverCode]?.[lap];
-  if (!lapData || lapData.length < 2) return [];
-
-  // Sort by fraction and resample only within observed telemetry coverage.
-  // This prevents visual extrapolation into the future (right of playhead).
-  const sorted = [...lapData].sort((a, b) => a.fraction - b.fraction);
-  const firstFrac = Math.max(0, sorted[0].fraction);
-  const lastFrac = Math.min(1, sorted[sorted.length - 1].fraction);
+// Resample a sorted list of {fraction, value} samples to N uniform points.
+function _resampleTrace(sortedFrac, sortedVal, N) {
+  const n = sortedFrac.length;
+  if (n < 2) return [];
+  const firstFrac = Math.max(0, sortedFrac[0]);
+  const lastFrac = Math.min(1, sortedFrac[n - 1]);
   if (!(lastFrac > firstFrac)) return [];
-
-  const N = 200;
-  const out = [];
+  const out = new Array(N);
   let j = 0;
-
   for (let i = 0; i < N; i++) {
     const targetFrac = firstFrac + (i / (N - 1)) * (lastFrac - firstFrac);
-
-    while (j < sorted.length - 2 && sorted[j + 1].fraction < targetFrac) {
-      j += 1;
-    }
-
-    const sLo = sorted[j];
-    const sHi = sorted[Math.min(j + 1, sorted.length - 1)];
-    const span = sHi.fraction - sLo.fraction;
-    const t = span > 0 ? (targetFrac - sLo.fraction) / span : 0;
-    const value = sLo[channel] + t * (sHi[channel] - sLo[channel]);
-
-    out.push({ fraction: targetFrac, value });
+    while (j < n - 2 && sortedFrac[j + 1] < targetFrac) j += 1;
+    const fLo = sortedFrac[j], fHi = sortedFrac[Math.min(j + 1, n - 1)];
+    const vLo = sortedVal[j], vHi = sortedVal[Math.min(j + 1, n - 1)];
+    const span = fHi - fLo;
+    const t = span > 0 ? (targetFrac - fLo) / span : 0;
+    out[i] = { fraction: targetFrac, value: vLo + t * (vHi - vLo) };
   }
-
   return out;
+}
+
+// Prefer server-cached lap trace; fall back to the live accumulator bucket.
+// Returns [] if nothing is available yet. Callers should useMemo this.
+function lapTrace(driverCode, lap, channel = "speed") {
+  const N = 120;
+  const cached = getCachedLapTrace(driverCode, lap);
+  if (cached && cached.fraction.length >= 2) {
+    const chArr = cached[channel];
+    if (!chArr) return [];
+    // Server arrays are already in time order, which on a normal lap is also
+    // fraction-ascending. Pit/anomaly laps may wrap; sort if we detect regress.
+    let monotone = true;
+    for (let i = 1; i < cached.fraction.length; i++) {
+      if (cached.fraction[i] < cached.fraction[i - 1]) { monotone = false; break; }
+    }
+    let fArr = cached.fraction, vArr = chArr;
+    if (!monotone) {
+      const idx = cached.fraction.map((_, i) => i).sort((a, b) => cached.fraction[a] - cached.fraction[b]);
+      fArr = idx.map((i) => cached.fraction[i]);
+      vArr = idx.map((i) => chArr[i]);
+    }
+    return _resampleTrace(fArr, vArr, N);
+  }
+  const lapData = window.__LAP_TELEMETRY?.[driverCode]?.[lap];
+  if (!lapData || lapData.length < 2) return [];
+  // Bucket is kept sorted by _accumulateFrame's binary insert; no resort needed.
+  const fArr = new Array(lapData.length);
+  const vArr = new Array(lapData.length);
+  for (let i = 0; i < lapData.length; i++) {
+    fArr[i] = lapData[i].fraction;
+    vArr[i] = lapData[i][channel];
+  }
+  return _resampleTrace(fArr, vArr, N);
 }
 
 function getSessionBest() {
@@ -327,6 +395,7 @@ function getPitStops(code) {
 window.APEX = {
   TEAMS, DRIVERS, COMPOUNDS, CIRCUIT, SECTORS,
   computeStandings, telemetryFor, lapTrace,
+  fetchLapTrace, getCachedLapTrace, clearLapTelemetry,
   _installSnapshot, _accumulateFrame,
   getSessionBest, getStints, getPitStops,
 };

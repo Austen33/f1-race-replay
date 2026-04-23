@@ -50,7 +50,7 @@ function App() {
   // Session info from snapshot
   const ev = snapshot?.event;
   const SESSION = {
-    event: ev ? `R${ev.round} · ${ev.event_name}` : "LOADING...",
+    event: ev ? `${ev.year} · R${ev.round} · ${ev.event_name}` : "LOADING...",
     name: "RACE",
     circuit: ev ? [ev.circuit_name, snapshot?.geometry?.total_length_m ? (snapshot.geometry.total_length_m / 1000).toFixed(3) + "KM" : ""].filter(Boolean).join(" · ") : "",
   };

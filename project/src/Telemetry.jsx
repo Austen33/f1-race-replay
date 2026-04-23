@@ -179,33 +179,131 @@ function MicroStat({ label, value, color, strong }) {
   );
 }
 
+// Channel metadata — drives the button row, axis units, and short labels.
+const CHANNEL_DEFS = [
+  { key: "speed",    label: "SPD",   unit: "kph" },
+  { key: "throttle", label: "THR",   unit: "%"   },
+  { key: "brake",    label: "BRK",   unit: "%"   },
+  { key: "gear",     label: "GEAR",  unit: ""    },
+  { key: "rpm",      label: "RPM",   unit: "rpm" },
+];
+function fmtAxis(v, unit) {
+  if (unit === "rpm") {
+    if (Math.abs(v) >= 1000) return (v / 1000).toFixed(1) + "k";
+    return Math.round(v).toString();
+  }
+  if (unit === "" || !unit) return Math.round(v).toString();
+  return Math.round(v).toString();
+}
+
+let _clipSeq = 0;
+
 // Compare lap-distance traces for 1-2 drivers
 function CompareTraces({ pinned, secondary, lap, channel = "speed", setChannel, tWithinLap }) {
   const T = window.THEME;
-  const codes = [pinned, secondary].filter(Boolean);
-  const traces = codes.map((c) => lapTrace(c, lap, channel));
+  const clipId = React.useMemo(() => `tr-clip-${++_clipSeq}`, []);
+  const deltaClipId = clipId + "-d";
+  const codes = React.useMemo(() => [pinned, secondary].filter(Boolean), [pinned, secondary]);
+  const channelUnit = (CHANNEL_DEFS.find((c) => c.key === channel) || {}).unit || "";
+
+  // Real sector boundaries from geometry (metres → fraction). Fall back to 1/3, 2/3.
+  const sectorFractions = React.useMemo(() => {
+    const geo = window.__LIVE_SNAPSHOT?.geometry;
+    const total = geo?.total_length_m || 0;
+    const bounds = geo?.sector_boundaries_m || [];
+    if (total > 0 && bounds.length >= 2) {
+      return bounds.slice(0, 2).map((m) => Math.max(0, Math.min(1, m / total)));
+    }
+    return [1 / 3, 2 / 3];
+  }, [window.__LIVE_SNAPSHOT?.geometry?.total_length_m]);
+
+  // Kick off server fetches for any (code, lap) that's not cached yet.
+  // On resolve, bump a tick to force recomputation of the memoized traces.
+  const [cacheTick, setCacheTick] = React.useState(0);
+  React.useEffect(() => {
+    const fetchFn = window.APEX?.fetchLapTrace;
+    const getCached = window.APEX?.getCachedLapTrace;
+    if (!fetchFn || !getCached) return;
+    let cancelled = false;
+    for (const c of codes) {
+      if (!getCached(c, lap)) {
+        fetchFn(c, lap).then((d) => { if (!cancelled && d) setCacheTick((x) => x + 1); });
+      }
+    }
+    return () => { cancelled = true; };
+  }, [codes, lap]);
+
+  // Memoize traces — previously recomputed (sort + 200-point interp) every paint.
+  // Depend on the accumulator bucket length so live growth still shows.
+  const liveSig = codes.map((c) =>
+    (window.__LAP_TELEMETRY?.[c]?.[lap]?.length) || 0
+  ).join(",");
+  const traces = React.useMemo(
+    () => codes.map((c) => lapTrace(c, lap, channel)),
+    [codes, lap, channel, cacheTick, liveSig]
+  );
   const hasData = traces.some((t) => t.length > 0);
   const W = 480, H = 140, PAD_L = 30, PAD_B = 18, PAD_T = 10, PAD_R = 8;
   const iw = W - PAD_L - PAD_R, ih = H - PAD_T - PAD_B;
-  const all = traces.flat();
-  const minRaw = all.length > 0 ? Math.min(...all.map((p) => p.value)) : 0;
-  const maxRaw = all.length > 0 ? Math.max(...all.map((p) => p.value)) : 100;
+
+  // min/max in a single pass; avoids spreading a 400-point array into Math.min.
+  let minRaw = Infinity, maxRaw = -Infinity;
+  for (const t of traces) for (let i = 0; i < t.length; i++) {
+    const v = t[i].value;
+    if (v < minRaw) minRaw = v;
+    if (v > maxRaw) maxRaw = v;
+  }
+  if (!isFinite(minRaw)) { minRaw = 0; maxRaw = 100; }
   const padAbs = Math.max(1, (maxRaw - minRaw) * 0.05);
   const min = minRaw - padAbs;
   const max = maxRaw + padAbs;
-  const span = Math.max(1e-6, max - min);
+  const span_y = Math.max(1e-6, max - min);
   const colors = [T.hot, T.cool];
+
+  // Reveal window — how far along the lap to show trace data. Nudge slightly
+  // past the playhead so the leading-edge dot isn't clipped mid-stroke.
+  const revealFrac = Math.max(0, Math.min(1, (tWithinLap ?? 1) + 0.005));
 
   const pathFor = (t) => {
     if (!t || t.length === 0) return "";
     let d = "";
     for (let i = 0; i < t.length; i++) {
       const x = PAD_L + t[i].fraction * iw;
-      const y = PAD_T + ih - ((t[i].value - min) / span) * ih;
+      const y = PAD_T + ih - ((t[i].value - min) / span_y) * ih;
       d += (i === 0 ? "M" : "L") + ` ${x.toFixed(1)} ${y.toFixed(1)} `;
     }
     return d;
   };
+
+  // Delta strip: speed_a − speed_b vs. fraction. Only meaningful with 2 drivers.
+  const DELTA_H = 28;
+  const deltaData = React.useMemo(() => {
+    if (traces.length !== 2 || traces[0].length === 0 || traces[1].length === 0) return null;
+    const a = traces[0], b = traces[1];
+    const n = Math.min(a.length, b.length);
+    const out = new Array(n);
+    let dMin = Infinity, dMax = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const v = a[i].value - b[i].value;
+      out[i] = { fraction: a[i].fraction, value: v };
+      if (v < dMin) dMin = v;
+      if (v > dMax) dMax = v;
+    }
+    const absMax = Math.max(1, Math.abs(dMin), Math.abs(dMax));
+    return { pts: out, range: absMax };
+  }, [traces]);
+  const deltaPath = React.useMemo(() => {
+    if (!deltaData) return "";
+    const { pts, range } = deltaData;
+    let d = "";
+    for (let i = 0; i < pts.length; i++) {
+      const x = PAD_L + pts[i].fraction * iw;
+      // Center line is zero; positive (pinned faster) goes up.
+      const y = (DELTA_H / 2) - (pts[i].value / range) * (DELTA_H / 2 - 2);
+      d += (i === 0 ? "M" : "L") + ` ${x.toFixed(1)} ${y.toFixed(1)} `;
+    }
+    return d;
+  }, [deltaData, iw]);
 
   return (
     <div className="apex-panel-mount" style={{
@@ -213,7 +311,12 @@ function CompareTraces({ pinned, secondary, lap, channel = "speed", setChannel, 
       border: T.border,
       overflow: "hidden",
     }}>
-      <PanelHeader title={`TRACE · ${channel.toUpperCase()}`} meta={`LAP ${lap}`} />
+      <PanelHeader title={<>{`TRACE · ${channel.toUpperCase()}`}{codes.map((c, i) => {
+            const drv = DRIVERS.find((x) => x.code === c);
+            const team = drv ? TEAMS[drv.team] : null;
+            const teamColor = team?.color || colors[i];
+            return <React.Fragment key={c}>{` · `}<span style={{ color: teamColor }}>{drv?.code || c}</span></React.Fragment>;
+          })}</>} meta={`LAP ${lap}`} />
       <div style={{ position: "relative" }}>
         {!hasData && (
           <div style={{
@@ -232,19 +335,26 @@ function CompareTraces({ pinned, secondary, lap, channel = "speed", setChannel, 
           display: "flex", gap: 4,
           zIndex: 2,
         }}>
-          {["speed","throttle","brake"].map((ch) => (
-            <button key={ch} onClick={() => setChannel && setChannel(ch)} style={{
+          {CHANNEL_DEFS.map((def) => (
+            <button key={def.key} onClick={() => setChannel && setChannel(def.key)} style={{
               padding: "2px 6px",
-              background: channel === ch ? T.hot : "transparent",
-              color: channel === ch ? "#FFFFFF" : T.textMuted,
-              border: `1px solid ${channel === ch ? T.hot : "rgba(255,255,255,0.08)"}`,
+              background: channel === def.key ? T.hot : "transparent",
+              color: channel === def.key ? "#FFFFFF" : T.textMuted,
+              border: `1px solid ${channel === def.key ? T.hot : "rgba(255,255,255,0.08)"}`,
               fontFamily: T.mono,
               fontSize: 8, letterSpacing: T.ls.caps, fontWeight: 700,
               cursor: "pointer",
-            }}>{ch.toUpperCase()}</button>
+            }}>{def.label}</button>
           ))}
         </div>
         <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none">
+          <defs>
+            <clipPath id={clipId}>
+              {/* Reveals only up to the playhead — traces look live even
+                  though the full lap data is already loaded. */}
+              <rect x={PAD_L} y={0} width={Math.max(0, revealFrac * iw)} height={H}/>
+            </clipPath>
+          </defs>
           {/* Grid */}
           {[0, 0.25, 0.5, 0.75, 1].map((g, i) => (
             <line key={i}
@@ -252,26 +362,45 @@ function CompareTraces({ pinned, secondary, lap, channel = "speed", setChannel, 
               y1={PAD_T + g * ih} y2={PAD_T + g * ih}
               stroke="rgba(255,255,255,0.05)" strokeWidth="1"/>
           ))}
-          {/* Sector dividers */}
-          {[0.33, 0.66].map((s, i) => (
+          {/* Sector dividers (real boundaries from geometry if available) */}
+          {sectorFractions.map((s, i) => (
             <line key={i}
               x1={PAD_L + iw * s} x2={PAD_L + iw * s}
               y1={PAD_T} y2={PAD_T + ih}
               stroke="rgba(255,255,255,0.08)" strokeDasharray="2 3"/>
           ))}
-          {/* Axis labels */}
-          <text x={PAD_L - 4} y={PAD_T + 4} fontFamily={T.mono} fontSize="8" fill="rgba(180,180,200,0.45)" textAnchor="end">{Math.round(max)}</text>
-          <text x={PAD_L - 4} y={PAD_T + ih} fontFamily={T.mono} fontSize="8" fill="rgba(180,180,200,0.45)" textAnchor="end">{Math.round(min)}</text>
+          {/* Y-axis labels with units */}
+          <text x={PAD_L - 4} y={PAD_T + 4} fontFamily={T.mono} fontSize="8" fill="rgba(180,180,200,0.45)" textAnchor="end">{fmtAxis(max, channelUnit)}</text>
+          <text x={PAD_L - 4} y={PAD_T + ih} fontFamily={T.mono} fontSize="8" fill="rgba(180,180,200,0.45)" textAnchor="end">{fmtAxis(min, channelUnit)}</text>
+          <text x={PAD_L - 4} y={PAD_T - 2} fontFamily={T.mono} fontSize="7" fill="rgba(180,180,200,0.55)" textAnchor="end" letterSpacing={T.ls.label}>{channelUnit}</text>
+          {/* Sector markers in footer */}
           <text x={PAD_L} y={H - 4} fontFamily={T.mono} fontSize="8" fill="rgba(180,180,200,0.45)">S1</text>
-          <text x={PAD_L + iw * 0.33 + 4} y={H - 4} fontFamily={T.mono} fontSize="8" fill="rgba(180,180,200,0.45)">S2</text>
-          <text x={PAD_L + iw * 0.66 + 4} y={H - 4} fontFamily={T.mono} fontSize="8" fill="rgba(180,180,200,0.45)">S3</text>
-
-          {/* Traces */}
-          {traces.map((t, i) => (
-            <g key={codes[i]}>
-              <path d={pathFor(t)} fill="none" stroke={colors[i]} strokeWidth="1.6" strokeLinejoin="round"/>
-            </g>
+          {sectorFractions.map((s, i) => (
+            <text key={i} x={PAD_L + iw * s + 4} y={H - 4} fontFamily={T.mono} fontSize="8" fill="rgba(180,180,200,0.45)">S{i + 2}</text>
           ))}
+
+          {/* Traces — clipped to the playhead so it looks live */}
+          <g clipPath={`url(#${clipId})`}>
+            {traces.map((t, i) => (
+              <g key={codes[i]}>
+                <path d={pathFor(t)} fill="none" stroke={colors[i]} strokeWidth="1.6" strokeLinejoin="round"/>
+              </g>
+            ))}
+          </g>
+          {/* Leading-edge dots at playhead — ride the tip of each trace */}
+          {tWithinLap != null && traces.map((t, i) => {
+            if (!t || t.length < 2) return null;
+            if (tWithinLap < t[0].fraction || tWithinLap > t[t.length - 1].fraction) return null;
+            let j = 0;
+            while (j < t.length - 1 && t[j + 1].fraction <= tWithinLap) j++;
+            const sLo = t[j], sHi = t[Math.min(j + 1, t.length - 1)];
+            const spanX = sHi.fraction - sLo.fraction;
+            const a = spanX > 0 ? Math.max(0, Math.min(1, (tWithinLap - sLo.fraction) / spanX)) : 0;
+            const v = sLo.value + a * (sHi.value - sLo.value);
+            const x = PAD_L + tWithinLap * iw;
+            const y = PAD_T + ih - ((v - min) / span_y) * ih;
+            return <circle key={codes[i]} cx={x} cy={y} r="2.4" fill={colors[i]} stroke="#000" strokeWidth="0.5"/>;
+          })}
           {/* Playhead */}
           {tWithinLap != null && (
             <line
@@ -286,21 +415,32 @@ function CompareTraces({ pinned, secondary, lap, channel = "speed", setChannel, 
             />
           )}
         </svg>
-        <div style={{
-          position: "absolute", top: 24, right: 10,
-          display: "flex", gap: 10,
-          fontFamily: T.mono,
-          fontSize: T.fs.xs,
-        }}>
-          {codes.map((c, i) => (
-            <div key={c} style={{ color: colors[i], letterSpacing: T.ls.label }}>
-              ■ {c}
-            </div>
-          ))}
-          {codes.length === 0 && (
-            <div style={{ color: T.textFaint }}>NO DRIVER PINNED</div>
-          )}
-        </div>
+        {deltaData && (
+          <svg viewBox={`0 0 ${W} ${DELTA_H}`} width="100%" height={DELTA_H} preserveAspectRatio="none" style={{ display: "block" }}>
+            <defs>
+              <clipPath id={deltaClipId}>
+                <rect x={PAD_L} y={0} width={Math.max(0, revealFrac * iw)} height={DELTA_H}/>
+              </clipPath>
+            </defs>
+            <line
+              x1={PAD_L} x2={W - PAD_R}
+              y1={DELTA_H / 2} y2={DELTA_H / 2}
+              stroke="rgba(255,255,255,0.12)" strokeWidth="1"/>
+            <g clipPath={`url(#${deltaClipId})`}>
+              <path d={deltaPath} fill="none" stroke={T.text} strokeWidth="1.2" strokeLinejoin="round" opacity="0.85"/>
+            </g>
+            <text x={PAD_L + 2} y={10} fontFamily={T.mono} fontSize="8" fill={T.textFaint} letterSpacing={T.ls.label}>
+              Δ {channel.toUpperCase()} ({pinned}−{secondary || "?"}) · ±{deltaData.range.toFixed(1)}
+            </text>
+            {tWithinLap != null && (
+              <line
+                x1={PAD_L + tWithinLap * iw}
+                x2={PAD_L + tWithinLap * iw}
+                y1={0} y2={DELTA_H}
+                stroke={T.hot} strokeWidth="1" strokeDasharray="3 2" opacity="0.6"/>
+            )}
+          </svg>
+        )}
       </div>
     </div>
   );

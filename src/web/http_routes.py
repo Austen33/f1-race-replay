@@ -123,6 +123,60 @@ def session_results(request: Request):
     return safe_jsonable(rows)
 
 
+@router.get("/session/lap_telemetry/{code}/{lap}")
+def session_lap_telemetry(code: str, lap: int, request: Request):
+    """Return the full telemetry trace for (driver, lap) as parallel arrays,
+    sliced from the cached race frames. Frontend uses this instead of rebuilding
+    a sparse trace from live WebSocket frames."""
+    from src.web.playback import _brake_intensity_pct
+    DECEL_FULL = 50.0  # m/s² ≈ 5g, matches playback.standings_from_frame
+
+    loaded = _require_loaded(request)
+    frames = loaded["frames"]
+    if not frames:
+        return {"fraction": [], "speed": [], "throttle": [], "brake": [], "gear": [], "rpm": [], "drs": []}
+
+    fraction, speed, throttle, brake, gear, rpm, drs = [], [], [], [], [], [], []
+    prev_d = None
+    prev_t = None
+    for f in frames:
+        d = f.get("drivers", {}).get(code)
+        if not d or int(round(d.get("lap", 0))) != lap:
+            prev_d = None  # reset brake diff across gaps
+            prev_t = None
+            continue
+        frac = float(d.get("rel_dist", 0.0))
+        frac = max(0.0, min(1.0, frac))
+        t = float(f.get("t", 0.0))
+        if prev_d is not None and prev_t is not None:
+            dt = max(1e-6, t - prev_t)
+            b_pct = _brake_intensity_pct(code, d, {code: prev_d}, dt, DECEL_FULL)
+        else:
+            b_pct = 100.0 if bool(d.get("brake", 0.0)) else 0.0
+
+        fraction.append(round(frac, 5))
+        speed.append(round(float(d.get("speed", 0.0)), 2))
+        throttle.append(round(float(d.get("throttle", 0.0)), 2))
+        brake.append(round(b_pct, 2))
+        gear.append(int(d.get("gear", 0)))
+        rpm.append(round(float(d.get("rpm", 0.0)), 1))
+        drs.append(int(d.get("drs", 0)))
+        prev_d = d
+        prev_t = t
+
+    return {
+        "code": code,
+        "lap": lap,
+        "fraction": fraction,
+        "speed": speed,
+        "throttle": throttle,
+        "brake": brake,
+        "gear": gear,
+        "rpm": rpm,
+        "drs": drs,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Playback controls
 # ---------------------------------------------------------------------------
