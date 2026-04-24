@@ -1102,17 +1102,16 @@ function makeLabel(code, teamColor) {
 // fog, post FX) off the circuit name. Unknown circuits default to "day".
 const TOD_PRESETS = {
   day: {
-    sceneBg: 0xaac4dc,
+    sceneBg: 0xc8dff0,
     sky: {
-      // Clean cool-blue gradient with a slightly lighter horizon haze — matches
-      // the Melbourne reference. Zenith is saturated blue, horizon washes out
-      // to a pale sky tone, ground plug is muted neutral so the skydome's
-      // lower hemisphere doesn't bleed warmth onto the track.
-      zenith: 0x4f86c6, horizon: 0xd4e2ee, ground: 0x6b7480,
-      sunColor: 0xfff4d6, sunDisc: 1.8, hazeTint: 1.0, starStrength: 0.0,
-      horizonGlow: 0xffffff, horizonGlowStrength: 0.18,
+      // Richer blue zenith, slightly warmer horizon, and a soft golden glow
+      // band so the horizon reads as sun-lit air rather than haze washout.
+      // Sun lowered to ~40° elevation so its disc + halo are visible in frame.
+      zenith: 0x2e6db5, horizon: 0xb8d4e8, ground: 0x7a8090,
+      sunColor: 0xffe8b0, sunDisc: 2.2, hazeTint: 1.0, starStrength: 0.0,
+      horizonGlow: 0xffd080, horizonGlowStrength: 0.28, cloudStrength: 0.55,
     },
-    sun: { dir: [0.35, 0.85, -0.35], color: 0xfff1d6, intensity: 2.0 },
+    sun: { dir: [0.55, 0.65, -0.45], color: 0xfff0cc, intensity: 2.1 },
     hemi: { sky: 0xbcd4ff, ground: 0x6a6d78, intensity: 0.9 },
     fog: { color: 0xbdcedd, densityScale: 0.5 },
     ground: { color: 0xa8adb6 },
@@ -1223,6 +1222,7 @@ function buildSkyDome(radius, sunDir, preset) {
       uHazeTint:  { value: preset.sky.hazeTint },
       uHorizonGlow: { value: new THREE.Color(preset.sky.horizonGlow || 0x000000) },
       uHorizonGlowStrength: { value: preset.sky.horizonGlowStrength || 0.0 },
+      uCloudStrength: { value: preset.sky.cloudStrength ?? 0.0 },
     },
     vertexShader: `
       varying vec3 vDir;
@@ -1243,21 +1243,63 @@ function buildSkyDome(radius, sunDir, preset) {
       uniform float uHazeTint;
       uniform vec3 uHorizonGlow;
       uniform float uHorizonGlowStrength;
+      uniform float uCloudStrength;
+
+      // Cheap 2-octave hash-based cloud layer. No textures, no uniforms beyond
+      // the strength scalar. Uses the normalised sphere direction so the clouds
+      // are fixed in sky-space (they don't swim as the camera moves).
+      float hash(vec2 p) {
+        p = fract(p * vec2(127.1, 311.7));
+        p += dot(p, p + 43.21);
+        return fract(p.x * p.y);
+      }
+      float smoothNoise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(
+          mix(hash(i),           hash(i + vec2(1,0)), u.x),
+          mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), u.x),
+          u.y
+        );
+      }
+      float clouds(vec3 d) {
+        // Project upper hemisphere onto a flat plane then tile.
+        if (d.y < 0.04) return 0.0;
+        vec2 uv = d.xz / (d.y + 0.15) * 1.4;
+        float n = smoothNoise(uv * 2.2) * 0.62
+                + smoothNoise(uv * 4.8) * 0.28
+                + smoothNoise(uv * 9.5) * 0.10;
+        // Threshold so we get puffy breaks rather than a uniform layer.
+        float c = smoothstep(0.48, 0.72, n);
+        // Fade clouds toward the horizon so they don't slice the gradient.
+        float horizonFade = smoothstep(0.04, 0.20, d.y);
+        return c * horizonFade;
+      }
 
       void main() {
         vec3 d = normalize(vDir);
         float t = clamp(d.y, -1.0, 1.0);
-        // Sky-vertical gradient.
+        // Sky-vertical gradient — tighter smoothstep keeps the deep zenith blue
+        // from washing out too quickly toward the horizon.
         vec3 sky = (t > 0.0)
-          ? mix(uHorizon, uZenith, smoothstep(0.0, 0.55, t))
+          ? mix(uHorizon, uZenith, smoothstep(0.0, 0.50, t))
           : mix(uHorizon, uGround, smoothstep(0.0, -0.25, t));
-        // Haze concentrated at the horizon.
+        // Haze concentrated at the horizon — reduced multiplier so the gradient
+        // survives in the upper sky.
         float haze = exp(-abs(t) * 5.5);
-        sky = mix(sky, uHorizon * uHazeTint, haze * 0.45);
-        // Horizon glow band — a soft warm/cool lift that sells city-light
-        // bleed at night and gives daytime scenes a cleaner horizon.
+        sky = mix(sky, uHorizon * uHazeTint, haze * 0.28);
+        // Horizon glow band.
         float glow = pow(max(0.0, 1.0 - abs(t)), 8.0);
         sky += uHorizonGlow * (glow * uHorizonGlowStrength);
+        // Procedural cloud layer (day only via uCloudStrength).
+        if (uCloudStrength > 0.001) {
+          float c = clouds(d);
+          // Lit side of clouds picks up a little sun warmth.
+          float sunLit = max(0.0, dot(d, normalize(uSunDir))) * 0.3 + 0.7;
+          vec3 cloudColor = mix(vec3(0.82, 0.86, 0.90), vec3(1.0, 0.98, 0.94) * sunLit, 0.5);
+          sky = mix(sky, cloudColor, c * uCloudStrength);
+        }
         // Sun disc + bloom-friendly glow (disabled at night via uSunDisc=0).
         if (uSunDisc > 0.001) {
           float sd = max(0.0, dot(d, normalize(uSunDir)));
@@ -1680,7 +1722,9 @@ function Track3D({
     const fogDryColor = preset.fog.color;
     const fogWetColor = WET_OVERLAY.fogTint;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(preset.sceneBg);
+    // Match background to the sky horizon so any gap (first frame, skydome
+    // miss) blends seamlessly rather than flashing a different tone.
+    scene.background = new THREE.Color(preset.sky.horizon);
 
     // Hemisphere fills shadowed undersides with a cool sky tint vs warm
     // ground bounce. Sun is the key light (shadow-caster, configured below
