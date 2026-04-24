@@ -1102,16 +1102,19 @@ function makeLabel(code, teamColor) {
 // fog, post FX) off the circuit name. Unknown circuits default to "day".
 const TOD_PRESETS = {
   day: {
-    sceneBg: 0x7f93ad,
+    sceneBg: 0xaac4dc,
     sky: {
-      zenith: 0x3a6fb6, horizon: 0xbfd0e0, ground: 0x4e5560,
-      sunColor: 0xfff4d6, sunDisc: 2.2, hazeTint: 1.15, starStrength: 0.0,
+      // Clean cool-blue gradient with a slightly lighter horizon haze — matches
+      // the Melbourne reference. Zenith is saturated blue, horizon washes out
+      // to a pale sky tone, ground plug is muted neutral so the skydome's
+      // lower hemisphere doesn't bleed warmth onto the track.
+      zenith: 0x4f86c6, horizon: 0xd4e2ee, ground: 0x6b7480,
+      sunColor: 0xfff4d6, sunDisc: 1.8, hazeTint: 1.0, starStrength: 0.0,
+      horizonGlow: 0xffffff, horizonGlowStrength: 0.18,
     },
     sun: { dir: [0.35, 0.85, -0.35], color: 0xfff1d6, intensity: 2.0 },
     hemi: { sky: 0xbcd4ff, ground: 0x6a6d78, intensity: 0.9 },
-    fog: { color: 0x9aadc4, densityScale: 0.55 },
-    // Runoff is lighter-grey paved, ground concrete even lighter, so the dark
-    // asphalt track reads as the darkest ribbon of the three.
+    fog: { color: 0xbdcedd, densityScale: 0.5 },
     ground: { color: 0xa8adb6 },
     runoff: { color: 0x6a6d76 },
     trackTint: 0xf2f3fa,
@@ -1119,12 +1122,14 @@ const TOD_PRESETS = {
     bloom: { strength: 0.22, threshold: 0.95, radius: 0.55 },
     vignette: { base: 0.28, tint: 0x0a0b10 },
     kerb: { emissive: 0x000000, emissiveIntensity: 0.0 },
+    stadiumLights: null,
   },
   dusk: {
     sceneBg: 0x1a1826,
     sky: {
       zenith: 0x121933, horizon: 0x703845, ground: 0x100f18,
-      sunColor: 0xffb889, sunDisc: 3.4, hazeTint: 1.45, starStrength: 0.18,
+      sunColor: 0xffb889, sunDisc: 3.4, hazeTint: 1.45, starStrength: 0.22,
+      horizonGlow: 0xff9a66, horizonGlowStrength: 0.55,
     },
     sun: { dir: [0.45, 0.55, -0.7], color: 0xffc194, intensity: 1.6 },
     hemi: { sky: 0xa39abb, ground: 0x3b2f3a, intensity: 0.55 },
@@ -1136,12 +1141,16 @@ const TOD_PRESETS = {
     bloom: { strength: 0.32, threshold: 0.88, radius: 0.55 },
     vignette: { base: 0.38, tint: 0x07080e },
     kerb: { emissive: 0x0a0000, emissiveIntensity: 0.05 },
+    stadiumLights: null,
   },
   night: {
     sceneBg: 0x05060c,
     sky: {
-      zenith: 0x05070f, horizon: 0x181428, ground: 0x05060a,
-      sunColor: 0xffd9a8, sunDisc: 1.2, hazeTint: 1.4, starStrength: 0.55,
+      zenith: 0x04060c, horizon: 0x14182a, ground: 0x04050a,
+      sunColor: 0xffd9a8, sunDisc: 0.0, hazeTint: 1.0, starStrength: 1.0,
+      // Warm city-glow band along the horizon — what really sells a night
+      // stadium race, pushes the black wall away from the viewer.
+      horizonGlow: 0xffb070, horizonGlowStrength: 0.4,
     },
     // Under stadium lights → key comes from high overhead, cool white.
     sun: { dir: [0.25, 0.95, -0.15], color: 0xe8ecff, intensity: 1.1 },
@@ -1151,11 +1160,34 @@ const TOD_PRESETS = {
     runoff: { color: 0x1e1e28 },
     trackTint: 0xd8dbe6,
     exposure: 1.0,
-    bloom: { strength: 0.38, threshold: 0.82, radius: 0.55 },
+    bloom: { strength: 0.4, threshold: 0.78, radius: 0.6 },
     vignette: { base: 0.4, tint: 0x04050a },
     kerb: { emissive: 0x140000, emissiveIntensity: 0.12 },
+    // Stadium light ring: 8 floodlight pylons around the bbox, each a
+    // low-intensity cool-white PointLight. Kept cheap — no shadows — since the
+    // sun directional already carries the cast-shadow budget.
+    stadiumLights: { count: 8, color: 0xf0f4ff, intensity: 0.8, heightFactor: 0.35, radiusFactor: 1.1 },
   },
 };
+
+// Weather overlay — mutates the active TOD preset in-place so that "night +
+// rain" doesn't need its own preset. Applied once after TOD lookup.
+const WET_OVERLAY = {
+  fogDensityMult: 1.8,
+  fogTint: 0x0a0d14,       // cool blue-grey wash
+  groundDarken: 0.55,      // multiply ground albedo
+  runoffDarken: 0.45,
+  trackDarken: 0.6,
+  bloomStrengthAdd: 0.1,
+  bloomThresholdDrop: 0.08,
+};
+
+function mulHex(hex, k) {
+  const r = Math.max(0, Math.min(255, Math.round(((hex >> 16) & 0xff) * k)));
+  const g = Math.max(0, Math.min(255, Math.round(((hex >> 8) & 0xff) * k)));
+  const b = Math.max(0, Math.min(255, Math.round((hex & 0xff) * k)));
+  return (r << 16) | (g << 8) | b;
+}
 
 function detectTimeOfDay(circuitName) {
   const name = (circuitName || "").toLowerCase();
@@ -1189,7 +1221,8 @@ function buildSkyDome(radius, sunDir, preset) {
       uSunSize:   { value: 0.9985 },
       uSunDisc:   { value: preset.sky.sunDisc },
       uHazeTint:  { value: preset.sky.hazeTint },
-      uStarStrength: { value: preset.sky.starStrength },
+      uHorizonGlow: { value: new THREE.Color(preset.sky.horizonGlow || 0x000000) },
+      uHorizonGlowStrength: { value: preset.sky.horizonGlowStrength || 0.0 },
     },
     vertexShader: `
       varying vec3 vDir;
@@ -1208,13 +1241,8 @@ function buildSkyDome(radius, sunDir, preset) {
       uniform float uSunSize;
       uniform float uSunDisc;
       uniform float uHazeTint;
-      uniform float uStarStrength;
-
-      float hash21(vec2 p) {
-        p = fract(p * vec2(443.8975, 397.2973));
-        p += dot(p.xy, p.yx + 19.19);
-        return fract(p.x * p.y);
-      }
+      uniform vec3 uHorizonGlow;
+      uniform float uHorizonGlowStrength;
 
       void main() {
         vec3 d = normalize(vDir);
@@ -1223,29 +1251,142 @@ function buildSkyDome(radius, sunDir, preset) {
         vec3 sky = (t > 0.0)
           ? mix(uHorizon, uZenith, smoothstep(0.0, 0.55, t))
           : mix(uHorizon, uGround, smoothstep(0.0, -0.25, t));
-        // Haze concentrated at the horizon — warmer in dusk, cooler in day.
+        // Haze concentrated at the horizon.
         float haze = exp(-abs(t) * 5.5);
         sky = mix(sky, uHorizon * uHazeTint, haze * 0.45);
-        // Sun disc + bloom-friendly glow.
-        float sd = max(0.0, dot(d, normalize(uSunDir)));
-        float disc = smoothstep(uSunSize, uSunSize + 0.0008, sd);
-        float halo = pow(sd, 64.0) * 0.40 + pow(sd, 6.0) * 0.08;
-        sky += uSunColor * (disc * uSunDisc + halo);
-        // Sparse stars: only above horizon, fade in as we look up.
-        if (uStarStrength > 0.01 && t > 0.05) {
-          // Project direction onto a stable grid (uses xz / y pseudo-tangent).
-          vec2 grid = floor(d.xz / max(0.04, d.y) * 220.0);
-          float h = hash21(grid);
-          float star = step(0.9965, h) * uStarStrength * smoothstep(0.05, 0.4, t);
-          // Twinkle bias — vary brightness per star.
-          star *= 0.5 + 0.5 * hash21(grid + 13.7);
-          sky += vec3(star) * vec3(0.85, 0.9, 1.0);
+        // Horizon glow band — a soft warm/cool lift that sells city-light
+        // bleed at night and gives daytime scenes a cleaner horizon.
+        float glow = pow(max(0.0, 1.0 - abs(t)), 8.0);
+        sky += uHorizonGlow * (glow * uHorizonGlowStrength);
+        // Sun disc + bloom-friendly glow (disabled at night via uSunDisc=0).
+        if (uSunDisc > 0.001) {
+          float sd = max(0.0, dot(d, normalize(uSunDir)));
+          float disc = smoothstep(uSunSize, uSunSize + 0.0008, sd);
+          float halo = pow(sd, 64.0) * 0.40 + pow(sd, 6.0) * 0.08;
+          sky += uSunColor * (disc * uSunDisc + halo);
         }
         gl_FragColor = vec4(sky, 1.0);
       }
     `,
   });
   return new THREE.Mesh(geom, mat);
+}
+
+// Procedural star field as a Points cloud on the upper hemisphere. Uniform
+// spherical distribution (no grid banding), per-point size + brightness
+// variation, and per-point twinkle phase animated in the shader. Cheap: ~1500
+// points, one draw call, no depth write so it composes cleanly over the sky.
+function buildStarField(radius, count = 1500, strength = 1.0) {
+  const positions = new Float32Array(count * 3);
+  const sizes = new Float32Array(count);
+  const brightness = new Float32Array(count);
+  const phases = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    // Uniform on the upper hemisphere: reject points with y < 0.05 so stars
+    // never render inside the ground plane / below the horizon silhouette.
+    let x = 0, y = 0, z = 0;
+    do {
+      x = Math.random() * 2 - 1;
+      y = Math.random() * 2 - 1;
+      z = Math.random() * 2 - 1;
+      const len = Math.sqrt(x * x + y * y + z * z);
+      if (len < 0.01 || len > 1) continue;
+      x /= len; y /= len; z /= len;
+    } while (y < 0.05);
+    positions[i * 3 + 0] = x * radius;
+    positions[i * 3 + 1] = y * radius;
+    positions[i * 3 + 2] = z * radius;
+    // Heavy-tailed size distribution so a handful of stars read as brighter.
+    const r = Math.random();
+    sizes[i] = 0.6 + r * r * 2.8;
+    brightness[i] = 0.35 + Math.random() * 0.65;
+    phases[i] = Math.random() * Math.PI * 2;
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
+  geom.setAttribute("aBrightness", new THREE.BufferAttribute(brightness, 1));
+  geom.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
+  const mat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      uTime: { value: 0 },
+      uStrength: { value: strength },
+      uPixelRatio: { value: Math.min(window.devicePixelRatio, 2) },
+    },
+    vertexShader: `
+      attribute float aSize;
+      attribute float aBrightness;
+      attribute float aPhase;
+      uniform float uTime;
+      uniform float uPixelRatio;
+      varying float vBrightness;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        // Scale with pixel ratio so stars look consistent across displays.
+        gl_PointSize = aSize * uPixelRatio;
+        // Twinkle: per-point phase + a slow global modulation.
+        float tw = 0.75 + 0.25 * sin(uTime * 1.3 + aPhase);
+        vBrightness = aBrightness * tw;
+      }
+    `,
+    fragmentShader: `
+      uniform float uStrength;
+      varying float vBrightness;
+      void main() {
+        // Round soft point with a tight core + gentle halo.
+        vec2 uv = gl_PointCoord - 0.5;
+        float r2 = dot(uv, uv);
+        if (r2 > 0.25) discard;
+        float core = smoothstep(0.25, 0.0, r2);
+        float halo = smoothstep(0.25, 0.05, r2) * 0.35;
+        float a = (core + halo) * vBrightness * uStrength;
+        gl_FragColor = vec4(vec3(0.92, 0.95, 1.0) * a, a);
+      }
+    `,
+  });
+  const pts = new THREE.Points(geom, mat);
+  pts.frustumCulled = false;
+  pts.renderOrder = -1;
+  return pts;
+}
+
+// Stadium floodlight ring for night races. A ring of PointLights around the
+// bbox perimeter plus matching emissive pylon cap meshes so the bloom pass
+// has obvious bright dots to smear. Shadowless — the sun directional carries
+// the shadow budget.
+function buildStadiumLights(center, extent, yBase, config) {
+  const g = new THREE.Group();
+  const lights = [];
+  const height = extent * config.heightFactor;
+  const radius = extent * config.radiusFactor;
+  const pylonGeom = new THREE.BoxGeometry(4, height, 4);
+  const pylonMat = new THREE.MeshBasicMaterial({ color: 0x181a20 });
+  const capGeom = new THREE.BoxGeometry(18, 3, 6);
+  const capMat = new THREE.MeshBasicMaterial({ color: 0xf4f7ff, toneMapped: false });
+  const lightRange = extent * 1.4;
+  for (let i = 0; i < config.count; i++) {
+    const a = (i / config.count) * Math.PI * 2 + 0.15;
+    const px = center.x + Math.cos(a) * radius;
+    const pz = center.z + Math.sin(a) * radius;
+    const pylon = new THREE.Mesh(pylonGeom, pylonMat);
+    pylon.position.set(px, yBase + height * 0.5, pz);
+    g.add(pylon);
+    const cap = new THREE.Mesh(capGeom, capMat);
+    cap.position.set(px, yBase + height, pz);
+    cap.lookAt(center.x, yBase + height, center.z);
+    g.add(cap);
+    const pl = new THREE.PointLight(config.color, config.intensity, lightRange, 1.6);
+    pl.position.set(px, yBase + height * 0.95, pz);
+    g.add(pl);
+    lights.push(pl);
+  }
+  g.userData.lights = lights;
+  return g;
 }
 
 // Rolling-hills horizon silhouette built as a single radial fan: smoother and
@@ -1531,10 +1672,13 @@ function Track3D({
     const disableToneMapping = search.get("trackToneMap") === "off";
     const showTrackHelpers = search.get("trackHelpers") === "1";
     const groundBaseColor = debugLayerColors ? 0x00ff00 : preset.ground.color;
+    const groundWetColor = debugLayerColors ? groundBaseColor : mulHex(preset.ground.color, WET_OVERLAY.groundDarken);
     const runoffDryColor = debugLayerColors ? 0x0060ff : preset.runoff.color;
-    const runoffWetColor = debugLayerColors ? runoffDryColor : 0x10101a;
+    const runoffWetColor = debugLayerColors ? runoffDryColor : mulHex(preset.runoff.color, WET_OVERLAY.runoffDarken);
     const trackDryColor = debugLayerColors ? 0xff00ff : preset.trackTint;
-    const trackWetColor = debugLayerColors ? trackDryColor : 0x3a3a48;
+    const trackWetColor = debugLayerColors ? trackDryColor : mulHex(preset.trackTint, WET_OVERLAY.trackDarken);
+    const fogDryColor = preset.fog.color;
+    const fogWetColor = WET_OVERLAY.fogTint;
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(preset.sceneBg);
 
@@ -1603,12 +1747,26 @@ function Track3D({
     sky.position.copy(center);
     scene.add(sky);
 
+    // Star field — uniform Points cloud on the upper hemisphere, only built
+    // when the active preset calls for stars. Sits just inside the skydome.
+    let stars = null;
+    if (preset.sky.starStrength > 0.01) {
+      stars = buildStarField(extent * 3.8, 1800, preset.sky.starStrength);
+      stars.position.copy(center);
+      scene.add(stars);
+    }
+
     // Layered horizon: rolling hills in the distance, scattered grandstand
     // accents close in. Both sit just below the lowest curve point so the
     // track always reads as on top of the terrain.
     const standsY = bb.min.y - 0.4;
     scene.add(buildHorizonHills(center, extent, standsY));
     scene.add(buildGrandstands(center, extent, standsY));
+
+    // Stadium lights ring (night only) — 8 floodlight pylons around the bbox.
+    if (preset.stadiumLights) {
+      scene.add(buildStadiumLights(center, extent, standsY, preset.stadiumLights));
+    }
 
     // Ground plane with concrete noise texture. Tile count scales with the
     // ground extent so individual noise cells stay roughly 120 m across —
@@ -2127,6 +2285,8 @@ function Track3D({
       }
 
       // --- Weather ---
+      // Wet overlay composes on top of whatever TOD preset is active: darken
+      // track/runoff/ground, cool the fog, lift bloom so wet headlights pop.
       const w = live.weather || {};
       const raining = w.rainState === "RAINING";
       rain.visible = raining;
@@ -2136,26 +2296,33 @@ function Track3D({
         const wSpeed = (w.windSpeed || 0) * 0.2778;
         const windVec = new THREE.Vector3(Math.sin(wRad) * wSpeed, 0, -Math.cos(wRad) * wSpeed);
         advanceRain(rain, dt, windVec);
-        // Wet asphalt — just darken the tint on the unlit track material.
-        // (No env-map reflections since we're on MeshBasicMaterial now; a
-        // proper wet sheen would need a different setup.)
         trackMat.color.setHex(trackWetColor);
         runoffMat.color.setHex(runoffWetColor);
-        runoffMat.roughness = 0.55;
-        runoffMat.metalness = 0.2;
-        scene.fog.density = (preset.fog.densityScale * 2.4) / extent;
-        // Slight bloom lift in rain — wet headlights/brake lights glow more.
-        bloomPass.strength = preset.bloom.strength + 0.12;
-        bloomPass.threshold = Math.max(0.7, preset.bloom.threshold - 0.1);
+        runoffMat.roughness = 0.45;
+        runoffMat.metalness = 0.25;
+        groundMat.color.setHex(groundWetColor);
+        groundMat.roughness = 0.6;
+        groundMat.metalness = 0.15;
+        scene.fog.color.setHex(fogWetColor);
+        scene.fog.density = (preset.fog.densityScale * WET_OVERLAY.fogDensityMult) / extent;
+        bloomPass.strength = preset.bloom.strength + WET_OVERLAY.bloomStrengthAdd;
+        bloomPass.threshold = Math.max(0.7, preset.bloom.threshold - WET_OVERLAY.bloomThresholdDrop);
       } else {
         trackMat.color.setHex(trackDryColor);
         runoffMat.color.setHex(runoffDryColor);
         runoffMat.roughness = 0.92;
         runoffMat.metalness = 0;
+        groundMat.color.setHex(groundBaseColor);
+        groundMat.roughness = 0.95;
+        groundMat.metalness = 0;
+        scene.fog.color.setHex(fogDryColor);
         scene.fog.density = preset.fog.densityScale / extent;
         bloomPass.strength = preset.bloom.strength;
         bloomPass.threshold = preset.bloom.threshold;
       }
+
+      // Tick star twinkle.
+      if (stars) stars.material.uniforms.uTime.value += dt;
 
       // Smoothly settle vignette toward target each frame.
       const kV = 1 - Math.exp(-4 * dt);
