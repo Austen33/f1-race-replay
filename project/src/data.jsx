@@ -535,9 +535,16 @@ function sampleStandingsAt(tRender) {
 function enrichStandingsWithDrivers(standings) {
   if (!standings || standings.length === 0) return [];
   return standings.map(s => {
-    if (s.driver) return s;
-    const d = DRIVERS.find(x => x.code === s.code) || { code: s.code, num: 0, name: s.code, team: "Unknown", country: "" };
-    return { ...s, driver: d };
+    const d = s.driver || DRIVERS.find(x => x.code === s.code) || { code: s.code, num: 0, name: s.code, team: "Unknown", country: "" };
+    return {
+      ...s,
+      driver: d,
+      speedKph: s.speedKph ?? s.speed_kph ?? 0,
+      compound: s.compound ?? COMPOUND_MAP[s.compound_int] ?? "M",
+      tyreAge: s.tyreAge ?? s.tyre_age_laps ?? 0,
+      status: s.status || "RUN",
+      pos: s.pos ?? 0,
+    };
   });
 }
 
