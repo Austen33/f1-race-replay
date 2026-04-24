@@ -25,13 +25,14 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 // Quality presets — control the rendering cost/quality trade-off.
-// high: current visual baseline (dprCap 2, shadowSize 2048, msaa 4, bloom on)
-// med:  moderate drop for mid-range devices
-// low:  minimum cost for weak/mobile hardware
+// `bloomScale` downsamples the bloom pyramid render target (1.0 = full screen,
+// 0.5 = quarter-area). UnrealBloomPass is the single most expensive pass; on
+// mid GPUs even a 0.5 scale is visually indistinguishable from 1.0 because
+// bloom is heavily blurred anyway.
 const QUALITY_PRESETS = {
-  low:  { dprCap: 1.0, shadowSize: 512,  msaa: 0, bloom: false },
-  med:  { dprCap: 1.5, shadowSize: 1024, msaa: 2, bloom: true  },
-  high: { dprCap: 2.0, shadowSize: 2048, msaa: 4, bloom: true  },
+  low:  { dprCap: 1.0, shadowSize: 512,  msaa: 0, bloom: false, bloomScale: 0   },
+  med:  { dprCap: 1.5, shadowSize: 1024, msaa: 2, bloom: false, bloomScale: 0   },
+  high: { dprCap: 2.0, shadowSize: 2048, msaa: 4, bloom: true,  bloomScale: 0.5 },
 };
 
 // Track dimensions (metres).
@@ -2337,19 +2338,27 @@ function Track3D({
     const trackUv = Math.max(60, curveLenApprox / 40);
     const asphaltTex = makeAsphaltTexture();
     asphaltTex.repeat.set(1, trackUv);
+    const asphaltNormal = makeAsphaltNormalMap();
+    asphaltNormal.wrapS = asphaltNormal.wrapT = THREE.RepeatWrapping;
+    asphaltNormal.repeat.set(1, trackUv);
     const trackGeom = buildExtrudedRibbonGeometry(
       curve, segments, TRACK_WIDTH, TRACK_BASE_Y, TRACK_THICKNESS, trackUv,
     );
-    // Solid-color base ensures the fragment never dips into "same luma as
-    // the ground" territory, even when the texture mip averages to grey at
-    // distance. `#1a1a22` reads as tar: darker than the concrete ground
-    // (0xa8adb6) by a wide margin but not so black that ACES clips it.
-    // Texture is still bound so the subtle aggregate pattern shows at close
-    // range; `toneMapped = false` keeps it from getting pushed toward grey.
-    const trackMat = new THREE.MeshBasicMaterial({
+    // PBR track surface: dark charcoal albedo + procedural normal map so the
+    // sun direction rakes across the asphalt and IBL gives a faint sheen.
+    // Earlier this was MeshBasicMaterial because mip-averaging at distance
+    // collapsed the lit colour toward the ground concrete; a low
+    // envMapIntensity plus high roughness keeps the surface readable as tar
+    // under ACES tonemap while still picking up directional light cues that
+    // were lost on the unlit material.
+    const trackMat = new THREE.MeshStandardMaterial({
       color: trackDryColor,
       map: asphaltTex,
-      toneMapped: false,
+      normalMap: asphaltNormal,
+      normalScale: new THREE.Vector2(0.6, 0.6),
+      roughness: 0.88,
+      metalness: 0.0,
+      envMapIntensity: 0.35,
     });
     const track = new THREE.Mesh(trackGeom, trackMat);
     track.renderOrder = 2;
@@ -2571,21 +2580,29 @@ function Track3D({
       display: "block",
     });
 
-    // Bump every track-surface texture to the GPU's anisotropy ceiling now
-    // that the renderer exists. The procedural noise textures (asphalt, kerb,
-    // grass, gravel, runoff, armco) read at very glancing angles down the
-    // straights — without anisotropic filtering the texels smear into a
-    // featureless blur within ~50 m. Modern desktop GPUs report 16; mobile
-    // typically 4–8. Free quality on whatever the hardware supports.
+    // Anisotropic filtering by texture role:
+    //  - High (max, typically 16): textures the camera sees at extreme grazing
+    //    angles down long straights. The track surface is the obvious case;
+    //    runoff and grass come in second along the verge.
+    //  - Modest (capped at 8): small repeating textures (kerb stripes, armco,
+    //    gravel) where mip aliasing isn't the visible failure mode. Going
+    //    above 8 here just costs samples without changing pixels.
     const maxAniso = renderer.capabilities.getMaxAnisotropy();
-    for (const tex of [
-      asphaltTex, runoffTex, grassTex, gravelTex, kerbTex, vergeTex, barrierTex,
-    ]) {
-      if (tex && tex.anisotropy < maxAniso) {
-        tex.anisotropy = maxAniso;
+    const modestAniso = Math.min(8, maxAniso);
+    const setAniso = (tex, target) => {
+      if (tex && tex.anisotropy < target) {
+        tex.anisotropy = target;
         tex.needsUpdate = true;
       }
-    }
+    };
+    setAniso(asphaltTex,    maxAniso);
+    setAniso(asphaltNormal, maxAniso);
+    setAniso(runoffTex,     maxAniso);
+    setAniso(grassTex,      maxAniso);
+    setAniso(vergeTex,      modestAniso);
+    setAniso(gravelTex,     modestAniso);
+    setAniso(kerbTex,        modestAniso);
+    setAniso(barrierTex,     modestAniso);
 
     // Image-based lighting from a procedural RoomEnvironment — gives the car
     // bodies real shoulder/cockpit reflections and lifts the metal kerb
@@ -2693,7 +2710,10 @@ function Track3D({
       const h = mount.clientHeight || 1;
       renderer.setSize(w, h, false);
       composer.setSize(w, h);
-      if (bloomPass) bloomPass.setSize(w, h);
+      if (bloomPass) {
+        const s = qp.bloomScale || 1;
+        bloomPass.setSize(Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s)));
+      }
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
     };
@@ -2761,14 +2781,6 @@ function Track3D({
         standings = window.APEX.sampleStandingsAt(tRender) || live.standings || [];
       } else {
         standings = live.standings || [];
-      }
-
-      // Index standings by driver code so camera-mode code can look up the
-      // pinned/secondary driver in O(1) instead of scanning each frame.
-      const standingByCode = new Map();
-      for (let i = 0; i < standings.length; i++) {
-        const s = standings[i];
-        if (s?.driver?.code) standingByCode.set(s.driver.code, s);
       }
 
       // Reconcile drivers.
@@ -2957,8 +2969,17 @@ function Track3D({
         lastPovSelfRef.code = povSelf;
       }
 
+      // Linear scan is faster than a per-frame Map for ~20 drivers.
+      const findByCode = (code) => {
+        if (!code) return null;
+        for (let i = 0; i < standings.length; i++) {
+          if (standings[i]?.driver?.code === code) return standings[i];
+        }
+        return null;
+      };
+
       if (inFollow) {
-        const pinnedStanding = standingByCode.get(live.pinned);
+        const pinnedStanding = findByCode(live.pinned);
         if (pinnedStanding) {
           chaseSpeedKph = pinnedStanding.speedKph || 0;
           const frac = pinnedStanding.fraction ?? 0;
@@ -2998,7 +3019,7 @@ function Track3D({
           povHud.root.style.display = "none"; povHud.pill.style.display = "none";
         }
       } else if (inPov) {
-        const pinnedStanding = standingByCode.get(live.pinned);
+        const pinnedStanding = findByCode(live.pinned);
         if (pinnedStanding) {
           chaseSpeedKph = pinnedStanding.speedKph || 0;
 
@@ -3159,10 +3180,12 @@ function Track3D({
         if (labelLayer.style.display !== "none") labelLayer.style.display = "none";
       }
 
+      // Frame ran clean — re-arm the error logger so a recurrence after a
+      // healthy window gets logged again instead of being dedupe-swallowed.
+      animate._lastErr = null;
       } catch (err) {
         // Log only the first occurrence of a recurring error so a buggy frame
-        // doesn't flood the console (which used to push our DevTools timeline
-        // off the visible band and incidentally tank perf).
+        // doesn't flood the console. Cleared on the next clean frame above.
         if (!animate._lastErr || animate._lastErr.message !== err.message) {
           console.error('[Track3D animate]', err);
           animate._lastErr = err;
