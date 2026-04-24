@@ -1861,6 +1861,32 @@ function advanceRain(rain, dt, windVec) {
 // ───────────────────────────────────────────────────────────────────────────
 
 function buildPovHud(mount) {
+  let hidden = false;
+
+  // Tiny pill shown when HUD is hidden — click to restore.
+  const pill = document.createElement("div");
+  Object.assign(pill.style, {
+    position: "absolute", left: "50%", bottom: "38px",
+    transform: "translateX(-50%)",
+    display: "none",
+    fontFamily: "JetBrains Mono, monospace",
+    fontSize: "9px", fontWeight: 800, letterSpacing: "0.18em",
+    color: "rgba(180,180,200,0.7)",
+    padding: "4px 10px",
+    background: "linear-gradient(135deg, rgba(11,11,17,0.6) 0%, rgba(20,22,34,0.5) 50%, rgba(11,11,17,0.6) 100%)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderTopColor: "rgba(255,255,255,0.12)",
+    borderRadius: "4px",
+    backdropFilter: "blur(12px) saturate(1.4)",
+    WebkitBackdropFilter: "blur(12px) saturate(1.4)",
+    boxShadow: "0 2px 12px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06)",
+    cursor: "pointer", pointerEvents: "auto",
+    zIndex: 4, userSelect: "none",
+  });
+  pill.textContent = "SHOW HUD [H]";
+  pill.addEventListener("click", () => { hidden = false; syncVisibility(); });
+  mount.appendChild(pill);
+
   const root = document.createElement("div");
   Object.assign(root.style, {
     position: "absolute", left: "50%", bottom: "38px",
@@ -1869,9 +1895,13 @@ function buildPovHud(mount) {
     fontFamily: "JetBrains Mono, monospace",
     color: "#f4f4f8",
     padding: "10px 16px",
-    background: "rgba(11,11,17,0.8)",
-    border: "1px solid rgba(255,30,0,0.35)",
-    backdropFilter: "blur(6px)",
+    background: "linear-gradient(135deg, rgba(11,11,17,0.65) 0%, rgba(20,22,34,0.55) 50%, rgba(11,11,17,0.65) 100%)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderTopColor: "rgba(255,255,255,0.12)",
+    borderRadius: "8px",
+    backdropFilter: "blur(16px) saturate(1.4)",
+    WebkitBackdropFilter: "blur(16px) saturate(1.4)",
+    boxShadow: "0 4px 20px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.06), 0 0 0 1px rgba(255,30,0,0.2)",
     pointerEvents: "none",
     zIndex: 4,
     minWidth: "360px",
@@ -1930,12 +1960,37 @@ function buildPovHud(mount) {
           border:1px solid rgba(255,217,58,0.3);
         ">—</div>
       </div>
+      <div data-hud="hide" style="
+        font-size:8px;font-weight:700;letter-spacing:0.14em;
+        padding:2px 6px;
+        color:rgba(180,180,200,0.4);
+        border:1px solid rgba(255,255,255,0.06);
+        border-radius:3px;
+        cursor:pointer;
+        pointer-events:auto;
+        user-select:none;
+      " title="Hide HUD [H]">HIDE</div>
     </div>
   `;
   mount.appendChild(root);
+
+  // Toggle logic
+  const syncVisibility = () => {
+    if (hidden) {
+      root.style.display = "none";
+      pill.style.display = "block";
+    } else {
+      root.style.display = "block";
+      pill.style.display = "none";
+    }
+  };
+  const hideBtn = root.querySelector("[data-hud=hide]");
+  if (hideBtn) hideBtn.addEventListener("click", () => { hidden = true; syncVisibility(); });
+
   const q = (sel) => root.querySelector(sel);
   return {
     root,
+    pill,
     code: q("[data-hud=code]"),
     speed: q("[data-hud=speed]"),
     gear: q("[data-hud=gear]"),
@@ -1944,12 +1999,18 @@ function buildPovHud(mount) {
     rpm: q("[data-hud=rpm]"),
     drs: q("[data-hud=drs]"),
     tyre: q("[data-hud=tyre]"),
+    isHidden: () => hidden,
+    toggle: () => { hidden = !hidden; syncVisibility(); },
+    show: () => { hidden = false; syncVisibility(); },
+    hide: () => { hidden = true; syncVisibility(); },
   };
 }
 
 function updatePovHud(hud, standing, compoundInfo) {
-  if (!standing) { hud.root.style.display = "none"; return; }
+  if (!standing) { hud.root.style.display = "none"; hud.pill.style.display = "none"; return; }
+  if (hud.isHidden()) { hud.root.style.display = "none"; hud.pill.style.display = "block"; return; }
   hud.root.style.display = "block";
+  hud.pill.style.display = "none";
   hud.code.textContent = standing.driver.code;
   hud.speed.textContent = String(Math.round(standing.speedKph || 0)).padStart(3, "0");
   hud.gear.textContent = String(standing.stint != null && standing.status === "PIT" ? "P" : (standing.driver && standing.driver.code ? "" : "—"))
@@ -1992,8 +2053,14 @@ function Track3D({
   safetyCar = null,
 }) {
   const mountRef = React.useRef(null);
+  const hudToggleRef = React.useRef(null);
   const liveRef = React.useRef({ standings, pinned, secondary, cameraMode, weather, showLabels, safetyCar });
   liveRef.current = { standings, pinned, secondary, cameraMode, weather, showLabels, safetyCar };
+  // Expose HUD toggle on window so the hotkey handler can reach it.
+  React.useEffect(() => {
+    window.APEX_HUD_TOGGLE = hudToggleRef;
+    return () => { delete window.APEX_HUD_TOGGLE; };
+  }, []);
   // Rebuild scene when the circuit changes (TOD preset is baked at setup).
   const todKey = detectTimeOfDay(circuitName);
 
@@ -2513,6 +2580,7 @@ function Track3D({
 
     const labelLayer = makeLabelLayer(mount);
     const povHud = buildPovHud(mount);
+    hudToggleRef.current = povHud.toggle;
 
     // --- Driver meshes ---
     const driverGroup = new THREE.Group();
@@ -2780,7 +2848,7 @@ function Track3D({
           camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-3 * dt));
           camera.updateProjectionMatrix();
         } else {
-          povHud.root.style.display = "none";
+          povHud.root.style.display = "none"; povHud.pill.style.display = "none";
         }
       } else if (inPov) {
         const pinnedStanding = standings.find((s) => s.driver.code === live.pinned);
@@ -2833,7 +2901,7 @@ function Track3D({
           camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-3 * dt));
           camera.updateProjectionMatrix();
         } else {
-          povHud.root.style.display = "none";
+          povHud.root.style.display = "none"; povHud.pill.style.display = "none";
         }
       } else {
         if (chase.initialised) {
@@ -2842,7 +2910,7 @@ function Track3D({
         }
         controls.enabled = true;
         controls.update();
-        povHud.root.style.display = "none";
+        povHud.root.style.display = "none"; povHud.pill.style.display = "none";
         // Reset chase-cam FOV when we leave follow/pov.
         camera.fov += (50 - camera.fov) * (1 - Math.exp(-3 * dt));
         // Restore the default near plane when leaving POV so distant track
@@ -2950,6 +3018,7 @@ function Track3D({
       if (scLabel) scLabel.remove();
       labelLayer.remove();
       povHud.root.remove();
+      povHud.pill.remove();
       composer.dispose();
       renderTarget.dispose();
       envTex.dispose();

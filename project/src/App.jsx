@@ -137,6 +137,7 @@ function App() {
       setShowLabels,
       setViewMode,
       () => setCameraControlsCollapsed((v) => !v),
+      () => { if (window.APEX_HUD_TOGGLE?.current) window.APEX_HUD_TOGGLE.current(); },
     );
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -292,6 +293,13 @@ function App() {
           display: "flex", flexDirection: "column", gap: 2,
           fontFamily: "JetBrains Mono, monospace",
           zIndex: 3,
+          padding: "8px 12px 6px",
+          background: "linear-gradient(135deg, rgba(11,11,17,0.55) 0%, rgba(20,22,34,0.45) 50%, rgba(11,11,17,0.55) 100%)",
+          backdropFilter: "blur(12px) saturate(1.4)",
+          WebkitBackdropFilter: "blur(12px) saturate(1.4)",
+          border: "1px solid rgba(255,255,255,0.08)",
+          borderRadius: "6px",
+          boxShadow: "0 2px 12px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06)",
         }}>
           <div style={{ fontSize: 9, color: "rgba(180,180,200,0.55)", letterSpacing: "0.2em" }}>
             CIRCUIT VIEW · {
@@ -387,8 +395,13 @@ function App() {
             fontFamily: "JetBrains Mono, monospace",
             display: "flex", alignItems: "center", gap: 10,
             padding: "6px 10px",
-            background: "rgba(11,11,17,0.8)",
-            border: "1px solid rgba(255,30,0,0.3)",
+            background: "linear-gradient(135deg, rgba(11,11,17,0.6) 0%, rgba(20,22,34,0.5) 50%, rgba(11,11,17,0.6) 100%)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            borderTopColor: "rgba(255,255,255,0.12)",
+            borderRadius: "6px",
+            backdropFilter: "blur(12px) saturate(1.4)",
+            WebkitBackdropFilter: "blur(12px) saturate(1.4)",
+            boxShadow: "0 2px 12px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06), 0 0 0 1px rgba(255,30,0,0.2)",
             zIndex: 3,
           }}>
             <div style={{ width: 6, height: 6, background: "#FF1E00", boxShadow: "0 0 6px #FF1E00" }}/>
@@ -415,6 +428,14 @@ function App() {
           fontSize: 9, color: "rgba(180,180,200,0.55)",
           letterSpacing: "0.14em", zIndex: 3,
           display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2,
+          padding: "6px 10px",
+          background: "linear-gradient(135deg, rgba(11,11,17,0.55) 0%, rgba(20,22,34,0.45) 50%, rgba(11,11,17,0.55) 100%)",
+          border: "1px solid rgba(255,255,255,0.08)",
+          borderTopColor: "rgba(255,255,255,0.12)",
+          borderRadius: "6px",
+          backdropFilter: "blur(12px) saturate(1.4)",
+          WebkitBackdropFilter: "blur(12px) saturate(1.4)",
+          boxShadow: "0 2px 12px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.06)",
         }}>
           <div>TELEMETRY · 240Hz</div>
           <div style={{ color: "#1EFF6A" }}>● LIVE · SECTOR {t < 0.33 ? 1 : t < 0.66 ? 2 : 3}</div>

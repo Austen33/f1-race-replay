@@ -44,8 +44,6 @@ function TopBar({ session, lap, totalLaps, clock, weather, flagState, safetyCar,
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         {extras}
-        <LiveDot/>
-        <div style={{ fontSize: T.fs.xs, letterSpacing: T.ls.caps, color: "rgba(180,180,200,0.7)" }}>TELEMETRY STREAM</div>
       </div>
     </div>
   );

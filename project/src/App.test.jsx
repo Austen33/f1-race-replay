@@ -23,6 +23,7 @@ function makeMocks() {
     setShowLabels: vi.fn(),
     setViewMode: vi.fn(),
     toggleCameraControls: vi.fn(),
+    togglePovHud: vi.fn(),
   };
 }
 
@@ -36,6 +37,7 @@ function makeHandler(refs, mocks) {
     mocks.setShowLabels,
     mocks.setViewMode,
     mocks.toggleCameraControls,
+    mocks.togglePovHud,
   );
 }
 
@@ -208,6 +210,11 @@ describe("hotkeyHandler", () => {
     it("toggles camera controls on C", () => {
       handler(fakeKey("KeyC", { key: "c" }));
       expect(mocks.toggleCameraControls).toHaveBeenCalledTimes(1);
+    });
+
+    it("toggles POV HUD on H", () => {
+      handler(fakeKey("KeyH", { key: "h" }));
+      expect(mocks.togglePovHud).toHaveBeenCalledTimes(1);
     });
   });
 });
