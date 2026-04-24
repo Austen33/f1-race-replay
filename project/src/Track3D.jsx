@@ -990,6 +990,7 @@ function makeDriverMarker(team) {
   return g;
 }
 
+
 // Safety car marker — yellow GLB model scaled to match F1 car dimensions.
 // Uses same placement contract as driver markers (fraction → curve position).
 function makeSafetyCarMarker() {
@@ -1610,6 +1611,12 @@ function buildPovHud(mount) {
             <div data-hud="brk" style="height:100%;background:#ff1e00;width:0%;transition:width 60ms linear;"></div>
           </div>
         </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <div style="font-size:8px;color:rgba(180,180,200,0.55);letter-spacing:0.18em;width:24px;">RPM</div>
+          <div style="height:6px;background:rgba(255,255,255,0.08);flex:1;">
+            <div data-hud="rpm" style="height:100%;background:linear-gradient(90deg,#1eff6a 0%,#ffb400 60%,#ff1e00 100%);width:0%;transition:width 60ms linear;"></div>
+          </div>
+        </div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:center;gap:4px;">
         <div data-hud="drs" style="
@@ -1638,6 +1645,7 @@ function buildPovHud(mount) {
     gear: q("[data-hud=gear]"),
     thr: q("[data-hud=thr]"),
     brk: q("[data-hud=brk]"),
+    rpm: q("[data-hud=rpm]"),
     drs: q("[data-hud=drs]"),
     tyre: q("[data-hud=tyre]"),
   };
@@ -1655,6 +1663,10 @@ function updatePovHud(hud, standing, compoundInfo) {
   hud.gear.textContent = standing.status === "PIT" ? "P" : String(tel.gear ?? "—");
   hud.thr.style.width = `${Math.max(0, Math.min(100, tel.throttle || 0))}%`;
   hud.brk.style.width = `${Math.max(0, Math.min(100, tel.brake || 0))}%`;
+  if (hud.rpm) {
+    const rpmNorm = Math.max(0, Math.min(100, ((tel.rpm || 0) - 4000) / 110));
+    hud.rpm.style.width = `${rpmNorm}%`;
+  }
   const drsOn = !!tel.drs;
   hud.drs.style.background = drsOn ? "rgba(0,217,255,0.3)" : "rgba(0,217,255,0.08)";
   hud.drs.style.color = drsOn ? "#00d9ff" : "rgba(0,217,255,0.35)";
@@ -1666,6 +1678,7 @@ function updatePovHud(hud, standing, compoundInfo) {
     hud.tyre.style.borderColor = `${compoundInfo.color}66`;
   }
 }
+
 
 // ───────────────────────────────────────────────────────────────────────────
 // Main component.
@@ -2124,6 +2137,19 @@ function Track3D({
     const CHASE_SMOOTH_POS = 6.0;
     const CHASE_SMOOTH_LOOK = 9.0;
 
+    // --- POV (first-person / cockpit) state ---
+    const POV_EYE_HEIGHT  = 3.100;
+    const POV_EYE_FORWARD = 0.700;
+    const POV_LOOK_AHEAD  = 64.0;
+    const POV_LOOK_HEIGHT = 1.150;
+    const POV_FOV         = 89.0;
+    const POV_SMOOTH_ROT  = 12.0;
+    const pov = {
+      smoothedForward: null,
+      initialised: false,
+      attachedTo: null,
+    };
+
     // --- Animation loop ---
     let rafId;
     let lastT = performance.now();
@@ -2268,11 +2294,26 @@ function Track3D({
 
       // --- Camera modes ---
       const inFollow = live.cameraMode === "follow" && !!live.pinned;
+      const inPov = live.cameraMode === "pov" && !!live.pinned;
       // Target vignette state — settles by lerp at the bottom so the FX
       // doesn't snap when the camera mode changes.
       let targetVignetteStrength = preset.vignette.base;
       let targetVignetteRadius = 1.1;
       let chaseSpeedKph = 0;
+
+      // In POV, we deliberately keep the pinned car's body *visible* so the
+      // driver sees the halo, front wing, mirrors, and nose from inside the
+      // cockpit — same as a real onboard camera. Hide only the floating
+      // overhead indicators (compound bobble, ground halo, DRS/brake light
+      // geometry) which would read as HUD clutter in first-person.
+      for (const [code, entry] of driverMap) {
+        const isSelf = inPov && code === live.pinned;
+        if (isSelf) {
+          if (entry.group.userData.compound) entry.group.userData.compound.visible = false;
+          if (entry.group.userData.groundHalo) entry.group.userData.groundHalo.visible = false;
+        }
+      }
+
       if (inFollow) {
         const pinnedStanding = standings.find((s) => s.driver.code === live.pinned);
         if (pinnedStanding) {
@@ -2315,6 +2356,59 @@ function Track3D({
         } else {
           povHud.root.style.display = "none";
         }
+      } else if (inPov) {
+        const pinnedStanding = standings.find((s) => s.driver.code === live.pinned);
+        if (pinnedStanding) {
+          chaseSpeedKph = pinnedStanding.speedKph || 0;
+
+          const frac = pinnedStanding.fraction ?? 0;
+          const u = ((frac % 1) + 1) % 1;
+
+          if (camera.near !== 0.1) {
+            camera.near = 0.1;
+            camera.updateProjectionMatrix();
+          }
+
+          const carPosW = curve.getPointAt(u);
+          const tangent = curve.getTangentAt(u).normalize();
+          const worldUp = new THREE.Vector3(0, 1, 0);
+
+          // Reset smoothed forward when switching drivers.
+          if (!pov.initialised || pov.attachedTo !== live.pinned) {
+            pov.smoothedForward = tangent.clone();
+            pov.initialised = true;
+            pov.attachedTo = live.pinned;
+          } else {
+            if (!pov.smoothedForward) pov.smoothedForward = tangent.clone();
+            const kFwd = 1 - Math.exp(-POV_SMOOTH_ROT * dt);
+            pov.smoothedForward.lerp(tangent, kFwd).normalize();
+          }
+          const fwd = pov.smoothedForward;
+
+          const eyeWorld = carPosW.clone()
+            .addScaledVector(fwd, POV_EYE_FORWARD)
+            .addScaledVector(worldUp, POV_EYE_HEIGHT);
+          camera.position.copy(eyeWorld);
+
+          const lookWorld = carPosW.clone()
+            .addScaledVector(fwd, POV_LOOK_AHEAD)
+            .addScaledVector(worldUp, POV_LOOK_HEIGHT);
+          camera.lookAt(lookWorld);
+
+          controls.enabled = false;
+          updatePovHud(povHud, pinnedStanding,
+            window.APEX.COMPOUNDS[pinnedStanding.compound]);
+
+          const sNorm = Math.max(0, Math.min(1, (chaseSpeedKph - 80) / 240));
+          const sCurve = sNorm * sNorm * (3 - 2 * sNorm);
+          targetVignetteStrength = preset.vignette.base + sCurve * 0.3;
+          targetVignetteRadius = 1.0 - sCurve * 0.22;
+          const targetFov = POV_FOV + sCurve * 6;
+          camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-3 * dt));
+          camera.updateProjectionMatrix();
+        } else {
+          povHud.root.style.display = "none";
+        }
       } else {
         if (chase.initialised) {
           controls.target.copy(center);
@@ -2323,8 +2417,13 @@ function Track3D({
         controls.enabled = true;
         controls.update();
         povHud.root.style.display = "none";
-        // Reset chase-cam FOV when we leave follow.
+        // Reset chase-cam FOV when we leave follow/pov.
         camera.fov += (50 - camera.fov) * (1 - Math.exp(-3 * dt));
+        // Restore the default near plane when leaving POV so distant track
+        // geometry isn't over-precise-to-the-point-of-shimmering.
+        if (camera.near !== 1) {
+          camera.near = 1;
+        }
         camera.updateProjectionMatrix();
       }
 
@@ -2375,12 +2474,18 @@ function Track3D({
       vu.uRadius.value   += (targetVignetteRadius   - vu.uRadius.value)   * kV;
 
       // --- Driver labels overlay ---
+      // Labels stay on in POV so the driver can see who's around them; they
+      // naturally fade off-screen for the pinned driver (whose own body is
+      // behind/around the camera). Only the chase cam hides them since it
+      // already has its own nearest-rival treatment.
       if (live.showLabels && !inFollow) {
         labelLayer.style.display = "block";
         const w2 = renderer.domElement.clientWidth;
         const h2 = renderer.domElement.clientHeight;
         const vp = new THREE.Vector3();
-        for (const [, entry] of driverMap) {
+        for (const [code, entry] of driverMap) {
+          // Hide the pinned driver's own label in POV — they're the camera.
+          if (inPov && code === live.pinned) { entry.label.style.display = "none"; continue; }
           const firstBody = entry.group.userData.body[0];
           if (!firstBody || !firstBody.visible) { entry.label.style.display = "none"; continue; }
           vp.copy(entry.group.position);

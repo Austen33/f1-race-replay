@@ -386,13 +386,14 @@ function CameraControls({
           }}>RESET</button>
         </div>
       </div>
-      {/* View mode toggle — segmented WEBGL / 3D / FOLLOW / TOP */}
+      {/* View mode toggle — segmented GL / SVG / CHASE / POV / TOP */}
       {setViewMode && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 4, marginBottom: 2 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 4, marginBottom: 2 }}>
           {[
             { k: "webgl",  label: "GL" },
             { k: "iso",    label: "SVG" },
             { k: "follow", label: "CHASE" },
+            { k: "pov",    label: "POV" },
             { k: "top",    label: "TOP" },
           ].map(({ k, label }) => (
             <button key={k} onClick={() => setViewMode(k)} style={{
@@ -407,9 +408,9 @@ function CameraControls({
         </div>
       )}
       {/* Tilt/Rot/Zoom only meaningful for the legacy SVG view. */}
-      <Slider label="TILT" value={rotateX} onChange={setRotateX} min={0} max={85} suffix="°" disabled={isTop || viewMode === "webgl" || viewMode === "follow"}/>
-      <Slider label="ROT"  value={rotateZ} onChange={setRotateZ} min={-180} max={180} suffix="°" disabled={viewMode === "webgl" || viewMode === "follow"}/>
-      <Slider label="ZOOM" value={zoom*100} onChange={(v) => setZoom(v/100)} min={50} max={400} suffix="%" disabled={viewMode === "webgl" || viewMode === "follow"}/>
+      <Slider label="TILT" value={rotateX} onChange={setRotateX} min={0} max={85} suffix="°" disabled={isTop || viewMode === "webgl" || viewMode === "follow" || viewMode === "pov"}/>
+      <Slider label="ROT"  value={rotateZ} onChange={setRotateZ} min={-180} max={180} suffix="°" disabled={viewMode === "webgl" || viewMode === "follow" || viewMode === "pov"}/>
+      <Slider label="ZOOM" value={zoom*100} onChange={(v) => setZoom(v/100)} min={50} max={400} suffix="%" disabled={viewMode === "webgl" || viewMode === "follow" || viewMode === "pov"}/>
       <div style={{ height: 1, background: "rgba(255,255,255,0.05)", margin: "4px 0" }}/>
       <Toggle label="LABELS"       on={showLabels}   onChange={setShowLabels} hotkey="L"/>
     </div>

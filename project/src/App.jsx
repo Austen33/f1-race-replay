@@ -290,6 +290,7 @@ function App() {
             CIRCUIT VIEW · {
               viewMode === "top" ? "TOP" :
               viewMode === "follow" ? "CHASE" :
+              viewMode === "pov" ? "POV" :
               viewMode === "webgl" ? "WEBGL" : "SVG 3D"
             }
           </div>
@@ -336,7 +337,7 @@ function App() {
           }}/>
         ))}
 
-        {(viewMode === "webgl" || viewMode === "follow") ? (
+        {(viewMode === "webgl" || viewMode === "follow" || viewMode === "pov") ? (
           <window.Track3D
             standings={standings}
             pinned={pinned}
@@ -346,7 +347,10 @@ function App() {
               else onPick(code);
             }}
             showLabels={showLabels}
-            cameraMode={viewMode === "follow" ? "follow" : "orbit"}
+            cameraMode={
+              viewMode === "follow" ? "follow" :
+              viewMode === "pov" ? "pov" : "orbit"
+            }
             weather={weather}
             circuitName={ev?.circuit_name || ev?.event_name || ""}
             safetyCar={safetyCar}
