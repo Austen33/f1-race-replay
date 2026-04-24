@@ -24,3 +24,5 @@ project/assets/
 *.avif
 *.mp4
 REVIEW_REPORT.md
+WEBGL-upgrade.MD
+chrome-devs-trace.json
