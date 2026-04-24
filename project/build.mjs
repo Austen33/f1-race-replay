@@ -25,15 +25,6 @@ function copyAssets() {
   } else {
     console.warn("Warning: safety_car.glb not found at project root — safety car will use fallback primitives.");
   }
-  // Optional real F1 steering wheel GLB for the POV view. If missing, the
-  // cockpit rig renders a procedural wheel instead.
-  const swSrc = join(projectDir, "..", "steering_wheel.glb");
-  if (existsSync(swSrc)) {
-    cpSync(swSrc, join(assetsDir, "steering_wheel.glb"));
-    console.log("Copied steering_wheel.glb → assets/");
-  } else {
-    console.log("Note: steering_wheel.glb not found at project root — POV view uses procedural wheel.");
-  }
 }
 
 const ctx = await esbuild.context({

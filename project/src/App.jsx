@@ -87,6 +87,21 @@ function App() {
   const [showLabels, setShowLabels] = React.useState(true);
   const [compareChannel, setCompareChannel] = React.useState("speed");
 
+  // Arc-length cache for CIRCUIT so safety-car mapping doesn't rebuild O(n)
+  // cumulative lengths every render.
+  const circuitArc = React.useMemo(() => {
+    const n = CIRCUIT.length;
+    const cumLen = new Float64Array(n);
+    let totalLen = 0;
+    for (let i = 1; i < n; i++) {
+      const dx = CIRCUIT[i].x - CIRCUIT[i - 1].x;
+      const dy = CIRCUIT[i].y - CIRCUIT[i - 1].y;
+      totalLen += Math.sqrt(dx * dx + dy * dy);
+      cumLen[i] = totalLen;
+    }
+    return { cumLen, totalLen };
+  }, [CIRCUIT.length, snapshot?.geometry]);
+
   // Tweaks
   const [tweaksOn, setTweaksOn] = React.useState(false);
   const [accent, setAccent] = React.useState(TWEAK_DEFAULTS.accent);
@@ -189,15 +204,7 @@ function App() {
     // Track3D's arc-length-parameterised curve (getPointAt) gets the right u.
     let fraction = 0;
     if (n > 1) {
-      let totalLen = 0;
-      const cumLen = new Float64Array(n);
-      for (let i = 1; i < n; i++) {
-        const dx = CIRCUIT[i].x - CIRCUIT[i - 1].x;
-        const dy = CIRCUIT[i].y - CIRCUIT[i - 1].y;
-        totalLen += Math.sqrt(dx * dx + dy * dy);
-        cumLen[i] = totalLen;
-      }
-      fraction = totalLen > 0 ? cumLen[bestIdx] / totalLen : 0;
+      fraction = circuitArc.totalLen > 0 ? circuitArc.cumLen[bestIdx] / circuitArc.totalLen : 0;
     }
     safetyCar = { trackIdx: bestIdx, fraction, phase: scData.phase || "on_track", alpha: scData.alpha ?? 1, pulse: tSeconds * 60 };
   }

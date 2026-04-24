@@ -977,6 +977,7 @@ function loadBaseCarModel() {
       undefined,
       (err) => {
         console.warn("GLB car model failed to load, will use fallback:", err);
+        _baseModelPromise = null;
         reject(err);
       },
     );
@@ -1005,6 +1006,7 @@ function loadSafetyCarModel() {
       undefined,
       (err) => {
         console.warn("Safety car GLB failed to load, will use fallback:", err);
+        _safetyCarModelPromise = null;
         reject(err);
       },
     );
@@ -1150,6 +1152,13 @@ function makeDriverMarker(team) {
   // depends on.
   loadBaseCarModel().then((baseModel) => {
     const clone = baseModel.clone();
+    // Clone geometry so each spawned car owns and disposes its own buffers.
+    // The cached base model stays pristine for future clones/rebuilds.
+    clone.traverse((child) => {
+      if (child.isMesh && child.geometry) {
+        child.geometry = child.geometry.clone();
+      }
+    });
     // Deep-clone materials so each car gets its own instances. Without this,
     // Object3D.clone() shares materials and tinting one car tints all of them.
     const matMap = new Map();
@@ -1293,6 +1302,12 @@ function makeSafetyCarMarker() {
 
   loadSafetyCarModel().then((baseModel) => {
     const clone = baseModel.clone();
+    // Clone geometry so disposing the active scene doesn't poison cached base.
+    clone.traverse((child) => {
+      if (child.isMesh && child.geometry) {
+        child.geometry = child.geometry.clone();
+      }
+    });
     const matMap = new Map();
     clone.traverse((child) => {
       if (!child.isMesh) return;
