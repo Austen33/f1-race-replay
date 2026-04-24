@@ -136,6 +136,7 @@ async function _initAPEX() {
     );
   }
 
+  _refreshDriverCache();
   _dataResolved();
 }
 
@@ -189,6 +190,7 @@ function _installSnapshot(snap) {
       });
     }
   }
+  _refreshDriverCache();
   // Rebuild geometry from snapshot if present (mutate in-place)
   const geo = snap.geometry;
   if (geo) {
@@ -247,7 +249,7 @@ function computeStandings(t, lap, totalLaps) {
   if (!f?.standings) return [];
   const n = CIRCUIT.length;
   return f.standings.map((s) => {
-    const d = DRIVERS.find((x) => x.code === s.code) || { code: s.code, num: 0, name: s.code, team: "Unknown", country: "" };
+    const d = _driverFor(s.code);
     const perLap = _normalizedFraction(s, 0);
     const trackIdx = n > 1
       ? Math.min(n - 1, Math.max(0, Math.round(perLap * (n - 1))))
@@ -463,24 +465,39 @@ function lerpWrap(f0, f1, t) {
   return (((f0 + d * t) % 1) + 1) % 1;
 }
 
+// Cache: code → driver entry. Rebuilt on snapshot when DRIVERS changes.
+let _driverByCode = new Map();
+function _refreshDriverCache() {
+  _driverByCode.clear();
+  for (const d of DRIVERS) _driverByCode.set(d.code, d);
+}
+
+function _driverFor(code) {
+  let d = _driverByCode.get(code);
+  if (d) return d;
+  // Cache miss — DRIVERS may have grown since last refresh. Try once.
+  _refreshDriverCache();
+  d = _driverByCode.get(code);
+  if (d) return d;
+  // Sentinel for unknown codes; cache so we don't keep re-allocating.
+  d = { code, num: 0, name: code, team: "Unknown", country: "" };
+  _driverByCode.set(code, d);
+  return d;
+}
+
 function sampleStandingsAt(tRender) {
   const buf = window.__LIVE_BUFFER.frames;
   if (buf.length < 1) return null;
   if (buf.length === 1) {
-    const f = buf[0];
-    const standings = f.standings || [];
-    return enrichStandingsWithDrivers(standings);
+    return enrichStandingsWithDrivers(buf[0].standings || []);
   }
   const recv0 = buf[0]._recvT;
   const recvN = buf[buf.length - 1]._recvT;
-  const tSpan = recvN - recv0;
-  if (tSpan === 0 || tRender < recv0) {
-    const standings = buf[0].standings || [];
-    return enrichStandingsWithDrivers(standings);
+  if (recv0 === recvN || tRender < recv0) {
+    return enrichStandingsWithDrivers(buf[0].standings || []);
   }
   if (tRender >= recvN) {
-    const standings = buf[buf.length - 1].standings || [];
-    return enrichStandingsWithDrivers(standings);
+    return enrichStandingsWithDrivers(buf[buf.length - 1].standings || []);
   }
 
   let lo = 0, hi = buf.length;
@@ -492,8 +509,7 @@ function sampleStandingsAt(tRender) {
   lo = Math.max(0, lo - 1);
   const i0 = lo, i1 = Math.min(lo + 1, buf.length - 1);
   if (i0 === i1) {
-    const standings = buf[i0].standings || [];
-    return enrichStandingsWithDrivers(standings);
+    return enrichStandingsWithDrivers(buf[i0].standings || []);
   }
 
   const f0 = buf[i0];
@@ -501,51 +517,75 @@ function sampleStandingsAt(tRender) {
   const t0 = f0._recvT;
   const t1 = f1._recvT;
   const alpha = (tRender - t0) / (t1 - t0);
+  const inv = 1 - alpha;
 
   const s0 = f0.standings || [];
   const s1 = f1.standings || [];
-  const result = [];
-  const codeMap = new Map();
 
-  for (const s of s0) codeMap.set(s.code, s);
-  for (const s of s1) codeMap.set(s.code, s);
-
-  for (const [code, _] of codeMap) {
-    const ss0 = s0.find(x => x.code === code);
-    const ss1 = s1.find(x => x.code === code);
-    if (!ss0 || !ss1) {
-      result.push(ss0 || ss1);
-      continue;
-    }
-
+  // Index s1 once so we avoid an O(n^2) lookup pass. We use s0 as the primary
+  // ordering (positions are stable enough between adjacent frames) and only
+  // fall back to s1 entries that don't appear in s0.
+  const s1ByCode = new Map();
+  for (let i = 0; i < s1.length; i++) s1ByCode.set(s1[i].code, s1[i]);
+  const seen = new Set();
+  const result = new Array(s0.length);
+  let outIdx = 0;
+  for (let i = 0; i < s0.length; i++) {
+    const ss0 = s0[i];
+    const code = ss0.code;
+    seen.add(code);
+    const ss1 = s1ByCode.get(code);
+    if (!ss1) { result[outIdx++] = enrichOne(ss0); continue; }
     const f0Frac = _normalizedFraction(ss0, 0);
     const f1Frac = _normalizedFraction(ss1, 0);
-    const interpFrac = lerpWrap(f0Frac, f1Frac, alpha);
-
-    result.push({
-      ...ss0,
-      fraction: interpFrac,
-      speed_kph: ss0.speed_kph * (1 - alpha) + ss1.speed_kph * alpha,
-    });
+    result[outIdx++] = enrichInterpolated(ss0, ss1, alpha, inv,
+      lerpWrap(f0Frac, f1Frac, alpha));
   }
+  // Add s1-only entries (rare: a driver that appeared in the newer frame).
+  for (let i = 0; i < s1.length; i++) {
+    if (!seen.has(s1[i].code)) result[outIdx++] = enrichOne(s1[i]);
+  }
+  result.length = outIdx;
+  result.sort(_byPos);
+  return result;
+}
 
-  return enrichStandingsWithDrivers(result.sort((a, b) => (a.pos || 0) - (b.pos || 0)));
+function _byPos(a, b) { return (a.pos || 0) - (b.pos || 0); }
+
+// Build the enriched object directly without spreading twice. The hot path
+// in Track3D animates 20 cars at 60 fps — every allocation matters.
+function enrichOne(s) {
+  return {
+    ...s,
+    driver: s.driver || _driverFor(s.code),
+    speedKph: s.speedKph ?? s.speed_kph ?? 0,
+    compound: s.compound ?? COMPOUND_MAP[s.compound_int] ?? "M",
+    tyreAge: s.tyreAge ?? s.tyre_age_laps ?? 0,
+    status: s.status || "RUN",
+    pos: s.pos ?? 0,
+    fraction: _normalizedFraction(s, 0),
+  };
+}
+
+function enrichInterpolated(ss0, ss1, alpha, inv, interpFrac) {
+  return {
+    ...ss0,
+    driver: ss0.driver || _driverFor(ss0.code),
+    speedKph: (ss0.speed_kph || 0) * inv + (ss1.speed_kph || 0) * alpha,
+    speed_kph: (ss0.speed_kph || 0) * inv + (ss1.speed_kph || 0) * alpha,
+    compound: ss0.compound ?? COMPOUND_MAP[ss0.compound_int] ?? "M",
+    tyreAge: ss0.tyreAge ?? ss0.tyre_age_laps ?? 0,
+    status: ss0.status || "RUN",
+    pos: ss0.pos ?? 0,
+    fraction: interpFrac,
+  };
 }
 
 function enrichStandingsWithDrivers(standings) {
   if (!standings || standings.length === 0) return [];
-  return standings.map(s => {
-    const d = s.driver || DRIVERS.find(x => x.code === s.code) || { code: s.code, num: 0, name: s.code, team: "Unknown", country: "" };
-    return {
-      ...s,
-      driver: d,
-      speedKph: s.speedKph ?? s.speed_kph ?? 0,
-      compound: s.compound ?? COMPOUND_MAP[s.compound_int] ?? "M",
-      tyreAge: s.tyreAge ?? s.tyre_age_laps ?? 0,
-      status: s.status || "RUN",
-      pos: s.pos ?? 0,
-    };
-  });
+  const out = new Array(standings.length);
+  for (let i = 0; i < standings.length; i++) out[i] = enrichOne(standings[i]);
+  return out;
 }
 
 window.APEX = {

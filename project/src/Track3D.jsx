@@ -2022,18 +2022,20 @@ function updatePovHud(hud, standing, compoundInfo) {
   hud.pill.style.display = "none";
   hud.code.textContent = standing.driver.code;
   hud.speed.textContent = String(Math.round(standing.speedKph || 0)).padStart(3, "0");
-  hud.gear.textContent = String(standing.stint != null && standing.status === "PIT" ? "P" : (standing.driver && standing.driver.code ? "" : "—"))
-    || (standing.status === "PIT" ? "P" : "—");
-  // gear isn't in the standings mapping — we use telemetryFor instead.
-  const tel = window.APEX.telemetryFor(standing.driver.code, 0);
-  hud.gear.textContent = standing.status === "PIT" ? "P" : String(tel.gear ?? "—");
-  hud.thr.style.width = `${Math.max(0, Math.min(100, tel.throttle || 0))}%`;
-  hud.brk.style.width = `${Math.max(0, Math.min(100, tel.brake || 0))}%`;
+  // Read telemetry directly off the (enriched) standing object — it preserves
+  // the raw frame fields, so we skip an extra `.find()` per frame.
+  const gear = standing.gear ?? null;
+  const throttlePct = standing.throttle_pct ?? 0;
+  const brakePct = standing.brake_pct ?? 0;
+  const rpm = standing.rpm ?? 0;
+  const drsOn = !!standing.in_drs;
+  hud.gear.textContent = standing.status === "PIT" ? "P" : (gear == null ? "—" : String(gear));
+  hud.thr.style.width = `${Math.max(0, Math.min(100, throttlePct))}%`;
+  hud.brk.style.width = `${Math.max(0, Math.min(100, brakePct))}%`;
   if (hud.rpm) {
-    const rpmNorm = Math.max(0, Math.min(100, ((tel.rpm || 0) - 4000) / 110));
+    const rpmNorm = Math.max(0, Math.min(100, (rpm - 4000) / 110));
     hud.rpm.style.width = `${rpmNorm}%`;
   }
-  const drsOn = !!tel.drs;
   hud.drs.style.background = drsOn ? "rgba(0,217,255,0.3)" : "rgba(0,217,255,0.08)";
   hud.drs.style.color = drsOn ? "#00d9ff" : "rgba(0,217,255,0.35)";
   hud.drs.style.borderColor = drsOn ? "#00d9ff" : "rgba(0,217,255,0.2)";
@@ -2173,18 +2175,13 @@ function Track3D({
       center.z + sunDir.z * sunDistance,
     );
     sun.target.position.copy(center);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(qp.shadowSize, qp.shadowSize);
-    const shadowFrustum = extent * 1.1;
-    sun.shadow.camera.left = -shadowFrustum;
-    sun.shadow.camera.right = shadowFrustum;
-    sun.shadow.camera.top = shadowFrustum;
-    sun.shadow.camera.bottom = -shadowFrustum;
-    sun.shadow.camera.near = 1;
-    sun.shadow.camera.far = sunDistance * 3;
-    sun.shadow.bias = -0.0003;
-    sun.shadow.normalBias = 0.6;
-    sun.shadow.radius = 4; // soft PCF radius
+    // Shadows are off because no mesh in the scene has `castShadow = true` —
+    // the cars deliberately disable casting (the directional shadow map
+    // produced black spike artefacts at wide zoom levels). Keeping the shadow
+    // pass enabled would still render an empty depth map every frame at
+    // qp.shadowSize², which is pure waste. Re-enable here if you ever start
+    // casting from the cars or trackside objects.
+    sun.castShadow = false;
 
     const sky = buildSkyDome(extent * 4, sunDir, preset);
     sky.position.copy(center);
@@ -2521,19 +2518,33 @@ function Track3D({
     // unlit pipeline.
     renderer.toneMapping = disableToneMapping ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = disableToneMapping ? 1.0 : preset.exposure;
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.enabled = false;
     mount.appendChild(renderer.domElement);
     Object.assign(renderer.domElement.style, {
       position: "absolute", inset: "0", width: "100%", height: "100%",
       display: "block",
     });
 
+    // Bump every track-surface texture to the GPU's anisotropy ceiling now
+    // that the renderer exists. The procedural noise textures (asphalt, kerb,
+    // grass, gravel, runoff, armco) read at very glancing angles down the
+    // straights — without anisotropic filtering the texels smear into a
+    // featureless blur within ~50 m. Modern desktop GPUs report 16; mobile
+    // typically 4–8. Free quality on whatever the hardware supports.
+    const maxAniso = renderer.capabilities.getMaxAnisotropy();
+    for (const tex of [
+      asphaltTex, runoffTex, grassTex, gravelTex, kerbTex, vergeTex, barrierTex,
+    ]) {
+      if (tex && tex.anisotropy < maxAniso) {
+        tex.anisotropy = maxAniso;
+        tex.needsUpdate = true;
+      }
+    }
+
     // Image-based lighting from a procedural RoomEnvironment — gives the car
     // bodies real shoulder/cockpit reflections and lifts the metal kerb
     // accents without shipping an HDRI asset.
     const pmrem = new THREE.PMREMGenerator(renderer);
-    pmrem.compileEquirectangularShader();
     const envScene = new RoomEnvironment();
     const envTex = pmrem.fromScene(envScene, 0.04).texture;
     scene.environment = envTex;
@@ -2666,6 +2677,7 @@ function Track3D({
       initialised: false,
       attachedTo: null,
     };
+    const lastPovSelfRef = { code: null };
 
     // --- Animation loop ---
     let rafId;
@@ -2702,6 +2714,14 @@ function Track3D({
         standings = window.APEX.sampleStandingsAt(tRender) || live.standings || [];
       } else {
         standings = live.standings || [];
+      }
+
+      // Index standings by driver code so camera-mode code can look up the
+      // pinned/secondary driver in O(1) instead of scanning each frame.
+      const standingByCode = new Map();
+      for (let i = 0; i < standings.length; i++) {
+        const s = standings[i];
+        if (s?.driver?.code) standingByCode.set(s.driver.code, s);
       }
 
       // Reconcile drivers.
@@ -2747,11 +2767,13 @@ function Track3D({
         );
         ring.material.opacity = isPinned || isSecondary ? 0.75 : 0.32;
 
-        // Brake / DRS indicator lamps from telemetry.
-        const tel = window.APEX.telemetryFor(s.driver.code, 0);
+        // Brake / DRS indicators read directly from the standing record —
+        // the enriched object preserves the raw `brake_pct`/`in_drs` fields,
+        // so we avoid an extra `.find()` per car per frame.
+        const brakePct = s.brake_pct ?? 0;
         entry.group.userData.brakeMat.opacity =
-          Math.min(1, Math.max(0, (tel.brake || 0) / 60));
-        entry.group.userData.drsMat.opacity = tel.drs ? 0.95 : 0.0;
+          brakePct > 0 ? Math.min(1, brakePct / 60) : 0;
+        entry.group.userData.drsMat.opacity = s.in_drs ? 0.95 : 0.0;
 
         // Tyre compound colour on the small bobble above the car.
         const compInfo = window.APEX.COMPOUNDS[s.compound] || { color: "#ffd93a" };
@@ -2768,14 +2790,20 @@ function Track3D({
         }
 
         // Pit / out visibility on body only (keep halo for map legibility).
-        const outOfPlay = s.status === "OUT";
-        for (const m of entry.group.userData.body) m.visible = !outOfPlay;
-        for (const wh of entry.group.userData.wheels) wh.visible = !outOfPlay;
-        entry.group.userData.compound.visible = !outOfPlay;
-        const inPit = s.status === "PIT";
-        for (const mat of entry.group.userData.bodyMats) {
-          mat.transparent = true;
-          mat.opacity = inPit ? 0.45 : 1;
+        // Cache the last applied status so we only walk the body/wheel arrays
+        // when it actually changed — most frames are pure transform updates.
+        const status = s.status;
+        if (entry.lastStatus !== status) {
+          const outOfPlay = status === "OUT";
+          const inPit = status === "PIT";
+          for (const m of entry.group.userData.body) m.visible = !outOfPlay;
+          for (const wh of entry.group.userData.wheels) wh.visible = !outOfPlay;
+          if (entry.group.userData.compound) entry.group.userData.compound.visible = !outOfPlay;
+          for (const mat of entry.group.userData.bodyMats) {
+            mat.transparent = true;
+            mat.opacity = inPit ? 0.45 : 1;
+          }
+          entry.lastStatus = status;
         }
       }
       for (const [code, entry] of driverMap) {
@@ -2845,16 +2873,25 @@ function Track3D({
       // cockpit — same as a real onboard camera. Hide only the floating
       // overhead indicators (compound bobble, ground halo, DRS/brake light
       // geometry) which would read as HUD clutter in first-person.
-      for (const [code, entry] of driverMap) {
-        const isSelf = inPov && code === live.pinned;
-        if (isSelf) {
-          if (entry.group.userData.compound) entry.group.userData.compound.visible = false;
-          if (entry.group.userData.groundHalo) entry.group.userData.groundHalo.visible = false;
+      // Track the previous POV-self code so we can restore overhead indicators
+      // when the user switches drivers or leaves POV.
+      const povSelf = inPov ? live.pinned : null;
+      if (lastPovSelfRef.code !== povSelf) {
+        const prev = driverMap.get(lastPovSelfRef.code);
+        if (prev) {
+          if (prev.group.userData.compound) prev.group.userData.compound.visible = true;
+          if (prev.group.userData.groundHalo) prev.group.userData.groundHalo.visible = true;
         }
+        const cur = povSelf ? driverMap.get(povSelf) : null;
+        if (cur) {
+          if (cur.group.userData.compound) cur.group.userData.compound.visible = false;
+          if (cur.group.userData.groundHalo) cur.group.userData.groundHalo.visible = false;
+        }
+        lastPovSelfRef.code = povSelf;
       }
 
       if (inFollow) {
-        const pinnedStanding = standings.find((s) => s.driver.code === live.pinned);
+        const pinnedStanding = standingByCode.get(live.pinned);
         if (pinnedStanding) {
           chaseSpeedKph = pinnedStanding.speedKph || 0;
           const frac = pinnedStanding.fraction ?? 0;
@@ -2894,7 +2931,7 @@ function Track3D({
           povHud.root.style.display = "none"; povHud.pill.style.display = "none";
         }
       } else if (inPov) {
-        const pinnedStanding = standings.find((s) => s.driver.code === live.pinned);
+        const pinnedStanding = standingByCode.get(live.pinned);
         if (pinnedStanding) {
           chaseSpeedKph = pinnedStanding.speedKph || 0;
 
@@ -3008,22 +3045,32 @@ function Track3D({
       // behind/around the camera). Only the chase cam hides them since it
       // already has its own nearest-rival treatment.
       if (live.showLabels && !inFollow) {
-        labelLayer.style.display = "block";
+        if (labelLayer.style.display !== "block") labelLayer.style.display = "block";
         const w2 = renderer.domElement.clientWidth;
         const h2 = renderer.domElement.clientHeight;
         for (const [code, entry] of driverMap) {
+          const label = entry.label;
           // Hide the pinned driver's own label in POV — they're the camera.
-          if (inPov && code === live.pinned) { entry.label.style.display = "none"; continue; }
+          if (inPov && code === live.pinned) {
+            if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
+            continue;
+          }
           const firstBody = entry.group.userData.body[0];
-          if (!firstBody || !firstBody.visible) { entry.label.style.display = "none"; continue; }
+          if (!firstBody || !firstBody.visible) {
+            if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
+            continue;
+          }
           _vp.copy(entry.group.position);
           _vp.y += 3;
           _vp.project(camera);
-          if (_vp.z < -1 || _vp.z > 1) { entry.label.style.display = "none"; continue; }
+          if (_vp.z < -1 || _vp.z > 1) {
+            if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
+            continue;
+          }
           const px = (_vp.x * 0.5 + 0.5) * w2;
           const py = (-_vp.y * 0.5 + 0.5) * h2;
-          entry.label.style.display = "block";
-          entry.label.style.transform = `translate3d(${px | 0}px, ${py | 0}px, 0) translate(-50%, -130%)`;
+          if (label._shown !== true) { label.style.display = "block"; label._shown = true; }
+          label.style.transform = `translate3d(${px | 0}px, ${py | 0}px, 0) translate(-50%, -130%)`;
         }
         // SC label.
         if (scLabel && scGroup?.visible) {
@@ -3031,20 +3078,26 @@ function Track3D({
           _vp.y += 3;
           _vp.project(camera);
           if (_vp.z < -1 || _vp.z > 1) {
-            scLabel.style.display = "none";
+            if (scLabel._shown !== false) { scLabel.style.display = "none"; scLabel._shown = false; }
           } else {
             const scPx = (_vp.x * 0.5 + 0.5) * w2;
             const scPy = (-_vp.y * 0.5 + 0.5) * h2;
-            scLabel.style.display = "block";
+            if (scLabel._shown !== true) { scLabel.style.display = "block"; scLabel._shown = true; }
             scLabel.style.transform = `translate3d(${scPx | 0}px, ${scPy | 0}px, 0) translate(-50%, -100%)`;
           }
         }
       } else {
-        labelLayer.style.display = "none";
+        if (labelLayer.style.display !== "none") labelLayer.style.display = "none";
       }
 
       } catch (err) {
-        console.error('[Track3D animate]', err);
+        // Log only the first occurrence of a recurring error so a buggy frame
+        // doesn't flood the console (which used to push our DevTools timeline
+        // off the visible band and incidentally tank perf).
+        if (!animate._lastErr || animate._lastErr.message !== err.message) {
+          console.error('[Track3D animate]', err);
+          animate._lastErr = err;
+        }
       }
       composer.render();
       rafId = requestAnimationFrame(animate);

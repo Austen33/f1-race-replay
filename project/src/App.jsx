@@ -332,7 +332,7 @@ function App() {
             </div>
           </div>
           <div style={{ fontSize: 10, color: "rgba(180,180,200,0.55)", letterSpacing: "0.1em" }}>
-            {snapshot?.geometry?.total_length_m ? `${(snapshot.geometry.total_length_m / 1000).toFixed(3)}KM` : ""}
+            {snapshot?.geometry?.total_length_m ? `${((snapshot.geometry.total_length_m * window.APEX.UNIT_SCALE) / 1000).toFixed(3)}KM` : ""}
           </div>
         </div>
 
