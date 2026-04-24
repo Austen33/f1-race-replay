@@ -76,12 +76,26 @@ function App() {
 
   // View mode: "webgl" (Three.js 3D), "follow" (WebGL chase cam), "iso" (legacy SVG 3D),
   // or "top" (2D top-down). Persist across reloads. Default = webgl.
-  const [viewMode, setViewMode] = React.useState(() => {
+  const [viewMode, setViewModeRaw] = React.useState(() => {
     try { return localStorage.getItem("apex.viewMode") || "webgl"; } catch { return "webgl"; }
   });
+  const setViewMode = React.useCallback((mode) => {
+    setViewModeRaw(mode);
+    // POV/CHASE have no use for TILT/ROT/ZOOM — collapse the panel to clear the view.
+    // Switching away from those modes restores the panel.
+    if (mode === "pov" || mode === "follow") {
+      setCameraControlsCollapsed(true);
+    } else {
+      setCameraControlsCollapsed(false);
+    }
+  }, []);
   React.useEffect(() => {
     try { localStorage.setItem("apex.viewMode", viewMode); } catch {}
   }, [viewMode]);
+  // Sync initial collapse state on first load.
+  React.useEffect(() => {
+    if (viewMode === "pov" || viewMode === "follow") setCameraControlsCollapsed(true);
+  }, []);
 
   // Toggles
   const [showLabels, setShowLabels] = React.useState(true);

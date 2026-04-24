@@ -406,9 +406,11 @@ function CameraControls({
         </div>
       )}
       {/* Tilt/Rot/Zoom only meaningful for the legacy SVG view. */}
-      <Slider label="TILT" value={rotateX} onChange={setRotateX} min={0} max={85} suffix="°" disabled={isTop || viewMode === "webgl" || viewMode === "follow" || viewMode === "pov"}/>
-      <Slider label="ROT"  value={rotateZ} onChange={setRotateZ} min={-180} max={180} suffix="°" disabled={viewMode === "webgl" || viewMode === "follow" || viewMode === "pov"}/>
-      <Slider label="ZOOM" value={zoom*100} onChange={(v) => setZoom(v/100)} min={50} max={400} suffix="%" disabled={viewMode === "webgl" || viewMode === "follow" || viewMode === "pov"}/>
+      {viewMode === "iso" || viewMode === "top" ? (<>
+        <Slider label="TILT" value={rotateX} onChange={setRotateX} min={0} max={85} suffix="°" disabled={isTop}/>
+        <Slider label="ROT"  value={rotateZ} onChange={setRotateZ} min={-180} max={180} suffix="°"/>
+        <Slider label="ZOOM" value={zoom*100} onChange={(v) => setZoom(v/100)} min={50} max={400} suffix="%"/>
+      </>) : null}
       <div style={{ height: 1, background: "rgba(255,255,255,0.05)", margin: "4px 0" }}/>
       <Toggle label="LABELS"       on={showLabels}   onChange={setShowLabels} hotkey="L"/>
     </div>

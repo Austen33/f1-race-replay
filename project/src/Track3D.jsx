@@ -1866,8 +1866,7 @@ function buildPovHud(mount) {
   // Tiny pill shown when HUD is hidden — click to restore.
   const pill = document.createElement("div");
   Object.assign(pill.style, {
-    position: "absolute", left: "50%", bottom: "38px",
-    transform: "translateX(-50%)",
+    position: "absolute", right: "12px", bottom: "44px",
     display: "none",
     fontFamily: "JetBrains Mono, monospace",
     fontSize: "9px", fontWeight: 800, letterSpacing: "0.18em",
@@ -1889,7 +1888,7 @@ function buildPovHud(mount) {
 
   const root = document.createElement("div");
   Object.assign(root.style, {
-    position: "absolute", left: "50%", bottom: "38px",
+    position: "absolute", left: "50%", bottom: "54px",
     transform: "translateX(-50%)",
     display: "none",
     fontFamily: "JetBrains Mono, monospace",
