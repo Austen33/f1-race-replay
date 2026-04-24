@@ -2682,6 +2682,7 @@ function Track3D({
     // --- Animation loop ---
     let rafId;
     let lastT = performance.now();
+    const tmpPoint = new THREE.Vector3();
     const tmpTan = new THREE.Vector3();
     const _fwd = new THREE.Vector3();
     const _right = new THREE.Vector3();
@@ -2742,7 +2743,7 @@ function Track3D({
         }
         const frac = s.fraction != null ? s.fraction : 0;
         const u = ((frac % 1) + 1) % 1;
-        const p = curve.getPointAt(u);
+        const p = curve.getPointAt(u, tmpPoint);
         curve.getTangentAt(u, tmpTan);
         // Orient the car to follow the track surface in 3D (yaw + pitch)
         // so it doesn't sink into or float above the track on elevation changes.
@@ -2838,7 +2839,7 @@ function Track3D({
         }
         scGroup.visible = true;
         const u = ((sc.fraction % 1) + 1) % 1;
-        const p = curve.getPointAt(u);
+        const p = curve.getPointAt(u, tmpPoint);
         curve.getTangentAt(u, tmpTan);
         _fwd.copy(tmpTan).normalize();
         _right.crossVectors(_fwd, _worldUp).normalize();
@@ -2851,7 +2852,7 @@ function Track3D({
         const alpha = sc.alpha ?? 1;
         if (scGroup.userData.haloMat) {
           scGroup.userData.haloMat.opacity = sc.phase === "deploying"
-            ? 0.3 + 0.25 * Math.sin(performance.now() * 0.005)
+            ? 0.3 + 0.25 * Math.sin(now * 0.005)
             : 0.55 * alpha;
         }
       } else {
@@ -2896,7 +2897,7 @@ function Track3D({
           chaseSpeedKph = pinnedStanding.speedKph || 0;
           const frac = pinnedStanding.fraction ?? 0;
           const u = ((frac % 1) + 1) % 1;
-          const carPos = curve.getPointAt(u);
+          const carPos = curve.getPointAt(u, tmpPoint);
           curve.getTangentAt(u, tmpTan);
           _chasePos.copy(carPos).addScaledVector(tmpTan, -CHASE_BEHIND);
           _chasePos.y += CHASE_HEIGHT;
@@ -2943,8 +2944,9 @@ function Track3D({
             camera.updateProjectionMatrix();
           }
 
-          const carPosW = curve.getPointAt(u);
-          _povTangent.copy(curve.getTangentAt(u)).normalize();
+          const carPosW = curve.getPointAt(u, tmpPoint);
+          curve.getTangentAt(u, _povTangent);
+          _povTangent.normalize();
 
           // Reset smoothed forward when switching drivers.
           if (!pov.initialised || pov.attachedTo !== live.pinned) {
