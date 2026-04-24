@@ -329,6 +329,7 @@ function CameraControls({
   setCollapsed,
 }) {
   const T = window.THEME;
+  const [quality, setQuality] = React.useState(() => window.APEX?.QUALITY || "high");
   const isTop = viewMode === "top";
   if (collapsed) {
     return (
@@ -411,6 +412,26 @@ function CameraControls({
         <Slider label="ROT"  value={rotateZ} onChange={setRotateZ} min={-180} max={180} suffix="°"/>
         <Slider label="ZOOM" value={zoom*100} onChange={(v) => setZoom(v/100)} min={50} max={400} suffix="%"/>
       </>) : null}
+      {(viewMode === "webgl" || viewMode === "follow" || viewMode === "pov") && (
+        <div style={{ display: "grid", gridTemplateColumns: "50px 1fr", gap: 6, alignItems: "center" }}>
+          <div style={{ color: T.textDim, letterSpacing: T.ls.label }}>QUALITY</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4 }}>
+            {["low", "med", "high"].map((q) => (
+              <button key={q} onClick={() => {
+                window.APEX.setQuality?.(q);
+                setQuality(q);
+              }} style={{
+                padding: "4px 2px",
+                background: quality === q ? T.hot : "transparent",
+                color: quality === q ? "#FFFFFF" : "rgba(230,230,239,0.7)",
+                border: `1px solid ${quality === q ? T.hot : "rgba(255,255,255,0.1)"}`,
+                cursor: "pointer",
+                fontFamily: "inherit", fontSize: T.fs.xs, fontWeight: 700, letterSpacing: T.ls.caps,
+              }}>{q.toUpperCase()}</button>
+            ))}
+          </div>
+        </div>
+      )}
       <div style={{ height: 1, background: "rgba(255,255,255,0.05)", margin: "4px 0" }}/>
       <Toggle label="LABELS"       on={showLabels}   onChange={setShowLabels} hotkey="L"/>
     </div>
