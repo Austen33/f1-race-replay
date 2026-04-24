@@ -1090,6 +1090,7 @@ function makeFallbackMarker(team) {
     body: [floor, sidepods, nose, airbox, rearWingFlap, rearEndplateL, rearEndplateR, frontWing],
     bodyMats: [bodyMat, darkMat],
     wheels,
+    wheelMats: [tyreMat],
     baseColor: color.clone(),
   };
   return g;
@@ -1152,7 +1153,7 @@ function addIndicatorOverlays(g, color) {
 function makeDriverMarker(team) {
   const g = new THREE.Group();
   const color = new THREE.Color(team?.color || "#ff1e00");
-  g.userData = { baseColor: color.clone(), body: [], bodyMats: [], wheels: [] };
+  g.userData = { baseColor: color.clone(), body: [], bodyMats: [], wheels: [], wheelMats: [] };
 
   // Add indicator overlays right away (they work independently of the car body).
   addIndicatorOverlays(g, color);
@@ -1270,6 +1271,7 @@ function makeDriverMarker(team) {
     g.userData.body = body;
     g.userData.bodyMats = bodyMats;
     g.userData.wheels = wheels;
+    g.userData.wheelMats = wheelMats;
     g.userData.wheelsAreSeparateMeshes = wheelsAreSeparateMeshes;
   }).catch(() => {
     // GLB failed — use the primitive fallback.
@@ -1284,6 +1286,7 @@ function makeDriverMarker(team) {
     g.userData.body = fallback.userData.body;
     g.userData.bodyMats = fallback.userData.bodyMats;
     g.userData.wheels = fallback.userData.wheels;
+    g.userData.wheelMats = fallback.userData.wheelMats || [];
     g.userData.wheelsAreSeparateMeshes = true;
   });
 
@@ -1386,9 +1389,25 @@ function makeLabelLayer(mount) {
 
 function makeLabel(code, teamColor) {
   const el = document.createElement("div");
-  el.textContent = code;
+  const codeEl = document.createElement("span");
+  codeEl.textContent = code;
+  const statusEl = document.createElement("span");
+  statusEl.style.display = "none";
+  statusEl.style.padding = "0 4px";
+  statusEl.style.borderRadius = "999px";
+  statusEl.style.fontSize = "9px";
+  statusEl.style.fontWeight = "800";
+  statusEl.style.letterSpacing = "0.1em";
+  statusEl.style.textTransform = "uppercase";
+  el.appendChild(codeEl);
+  el.appendChild(statusEl);
+  el._codeEl = codeEl;
+  el._statusEl = statusEl;
   Object.assign(el.style, {
     position: "absolute",
+    display: "flex",
+    alignItems: "center",
+    gap: "4px",
     fontSize: "10px", fontWeight: "700", letterSpacing: "0.08em",
     color: "#f4f4f8",
     background: "rgba(11,11,17,0.85)",
@@ -1398,6 +1417,33 @@ function makeLabel(code, teamColor) {
     whiteSpace: "nowrap",
   });
   return el;
+}
+
+function setLabelStatus(label, status, reason) {
+  if (!label?._statusEl) return;
+  const badge = String(status || "").trim().toUpperCase();
+  label.title = reason || label._codeEl?.textContent || "";
+  if (!badge) {
+    label._statusEl.style.display = "none";
+    label._statusEl.textContent = "";
+    return;
+  }
+
+  label._statusEl.textContent = badge;
+  label._statusEl.style.display = "inline-flex";
+  label._statusEl.style.alignItems = "center";
+  label._statusEl.style.background = "rgba(11,11,17,0.92)";
+
+  if (badge === "DNS") {
+    label._statusEl.style.color = "#d7dbe6";
+    label._statusEl.style.border = "1px solid rgba(215,219,230,0.24)";
+    return;
+  }
+
+  label._statusEl.style.color = badge === "ACC" ? "#ffd6d1" : "#ffd9c2";
+  label._statusEl.style.border = badge === "ACC"
+    ? "1px solid rgba(255,30,0,0.45)"
+    : "1px solid rgba(255,122,26,0.4)";
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -2737,9 +2783,15 @@ function Track3D({
           driverGroup.add(g);
           const teamColor = window.APEX.TEAMS[s.driver.team]?.color || "#ff1e00";
           const label = makeLabel(s.driver.code, teamColor);
+          setLabelStatus(label, s.labelStatus ?? s.label_status, s.statusReason ?? s.status_reason);
           labelLayer.appendChild(label);
           entry = { group: g, label };
           driverMap.set(s.driver.code, entry);
+        }
+        if (entry.lastLabelStatus !== (s.labelStatus ?? s.label_status) || entry.lastStatusReason !== (s.statusReason ?? s.status_reason)) {
+          setLabelStatus(entry.label, s.labelStatus ?? s.label_status, s.statusReason ?? s.status_reason);
+          entry.lastLabelStatus = s.labelStatus ?? s.label_status;
+          entry.lastStatusReason = s.statusReason ?? s.status_reason;
         }
         const frac = s.fraction != null ? s.fraction : 0;
         const u = ((frac % 1) + 1) % 1;
@@ -2762,11 +2814,13 @@ function Track3D({
         const isPinned = live.pinned === s.driver.code;
         const isSecondary = live.secondary === s.driver.code;
         const ring = entry.group.userData.groundHalo;
+        const labelStatus = s.labelStatus ?? s.label_status ?? null;
+        const isDns = s.status === "OUT" && labelStatus === "DNS";
         ring.scale.setScalar(isPinned ? 1.35 : isSecondary ? 1.15 : 1);
         ring.material.color.set(
-          isPinned ? 0xff1e00 : isSecondary ? 0x00d9ff : entry.group.userData.baseColor,
+          isPinned ? 0xff1e00 : isSecondary ? 0x00d9ff : (isDns ? 0xa3abb8 : entry.group.userData.baseColor),
         );
-        ring.material.opacity = isPinned || isSecondary ? 0.75 : 0.32;
+        ring.material.opacity = isPinned || isSecondary ? 0.75 : (isDns ? 0.26 : 0.32);
 
         // Brake / DRS indicators read directly from the standing record —
         // the enriched object preserves the raw `brake_pct`/`in_drs` fields,
@@ -2794,17 +2848,29 @@ function Track3D({
         // Cache the last applied status so we only walk the body/wheel arrays
         // when it actually changed — most frames are pure transform updates.
         const status = s.status;
-        if (entry.lastStatus !== status) {
-          const outOfPlay = status === "OUT";
+        const renderKey = `${status}:${labelStatus || ""}`;
+        if (entry.lastRenderKey !== renderKey) {
+          const isDns = status === "OUT" && labelStatus === "DNS";
+          const outOfPlay = status === "OUT" && !isDns;
           const inPit = status === "PIT";
           for (const m of entry.group.userData.body) m.visible = !outOfPlay;
           for (const wh of entry.group.userData.wheels) wh.visible = !outOfPlay;
-          if (entry.group.userData.compound) entry.group.userData.compound.visible = !outOfPlay;
+          if (entry.group.userData.compound) entry.group.userData.compound.visible = !outOfPlay && !isDns;
+          if (entry.group.userData.groundHalo) {
+            entry.group.userData.groundHalo.material.color.set(
+              isDns ? 0xa3abb8 : entry.group.userData.baseColor
+            );
+            entry.group.userData.groundHalo.material.opacity = isDns ? 0.26 : 0.32;
+          }
           for (const mat of entry.group.userData.bodyMats) {
             mat.transparent = true;
-            mat.opacity = inPit ? 0.45 : 1;
+            mat.opacity = isDns ? 0.34 : inPit ? 0.45 : 1;
           }
-          entry.lastStatus = status;
+          for (const mat of entry.group.userData.wheelMats || []) {
+            mat.transparent = true;
+            mat.opacity = isDns ? 0.38 : inPit ? 0.5 : 1;
+          }
+          entry.lastRenderKey = renderKey;
         }
       }
       for (const [code, entry] of driverMap) {
@@ -3058,7 +3124,8 @@ function Track3D({
             continue;
           }
           const firstBody = entry.group.userData.body[0];
-          if (!firstBody || !firstBody.visible) {
+          const hasStatusBadge = !!entry.lastLabelStatus;
+          if ((!firstBody || !firstBody.visible) && !hasStatusBadge) {
             if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
             continue;
           }

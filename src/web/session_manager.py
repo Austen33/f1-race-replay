@@ -32,6 +32,7 @@ class SessionManager:
 
             geometry = _extract_geometry(race, session)
             driver_meta = _extract_driver_meta(session)
+            driver_results = _extract_driver_results(session)
             rotation = get_circuit_rotation(session)
 
             self._loaded = {
@@ -48,9 +49,14 @@ class SessionManager:
                 "race_control_messages": race["race_control_messages"],
                 "total_laps": race["total_laps"],
                 "max_tyre_life": race["max_tyre_life"],
+                "telemetry_ranges": race.get("telemetry_ranges", {}),
                 "circuit_rotation": rotation,
                 "geometry": geometry,
                 "driver_meta": driver_meta,
+                "driver_results": driver_results,
+                "driver_stop_windows": _compute_driver_stop_windows(
+                    race["frames"], driver_results
+                ),
                 "event": _event_info(session, year, round_number, race),
                 "lap_data": _precompute_lap_data(session),
                 "session_best": _compute_session_best(session),
@@ -202,6 +208,117 @@ def _extract_driver_meta(session):
             "team_color": "#" + d["TeamColor"] if d.get("TeamColor") else "",
             "country": d.get("CountryCode", ""),
         }
+    return out
+
+
+def _extract_driver_results(session):
+    out = {}
+    results = getattr(session, "results", None)
+    if results is None:
+        return out
+
+    def _clean_str(value):
+        try:
+            if value is None or np.isnan(value):
+                return ""
+        except TypeError:
+            pass
+        return str(value or "").strip()
+
+    for _, row in results.iterrows():
+        code = row.get("Abbreviation")
+        if not code:
+            continue
+        pos_raw = row.get("Position")
+        try:
+            position = int(pos_raw) if pos_raw is not None and not np.isnan(pos_raw) else None
+        except TypeError:
+            position = None
+        out[code] = {
+            "status": _clean_str(row.get("Status", "")),
+            "classified_position": _clean_str(row.get("ClassifiedPosition", "")),
+            "position": position,
+        }
+    return out
+
+
+def _normalise_result_status(status: str | None) -> str:
+    return " ".join(str(status or "").strip().lower().split())
+
+
+def _is_dns_status(status: str | None) -> bool:
+    norm = _normalise_result_status(status)
+    return "did not start" in norm or norm == "dns"
+
+
+def _is_finished_status(status: str | None) -> bool:
+    norm = _normalise_result_status(status)
+    if not norm:
+        return False
+    if norm == "finished":
+        return True
+    if norm.startswith("+") and "lap" in norm:
+        return True
+    if "classified" in norm and "not classified" not in norm:
+        return True
+    return False
+
+
+def _compute_driver_stop_windows(frames: list[dict], driver_results: dict[str, dict]) -> dict[str, dict]:
+    out = {}
+    if not frames:
+        return out
+
+    min_stop_duration_s = 3.0
+    move_threshold_m = 3.0
+    rel_dist_threshold = 0.002
+    speed_threshold_kph = 8.0
+
+    for code, result in driver_results.items():
+        status = result.get("status", "")
+        if _is_dns_status(status) or _is_finished_status(status):
+            continue
+
+        trailing_end_t = None
+        trailing_start_t = None
+        newer_driver = None
+
+        for frame in reversed(frames):
+            driver = frame.get("drivers", {}).get(code)
+            if driver is None:
+                continue
+
+            t = float(frame.get("t", 0.0))
+            if trailing_end_t is None:
+                trailing_end_t = t
+                trailing_start_t = t
+                newer_driver = driver
+                continue
+
+            dx = float(newer_driver.get("x", 0.0)) - float(driver.get("x", 0.0))
+            dy = float(newer_driver.get("y", 0.0)) - float(driver.get("y", 0.0))
+            moved_xy = np.hypot(dx, dy) > move_threshold_m
+            moved_progress = abs(float(newer_driver.get("rel_dist", 0.0)) - float(driver.get("rel_dist", 0.0))) > rel_dist_threshold
+            lap_changed = int(round(newer_driver.get("lap", 1))) != int(round(driver.get("lap", 1)))
+            moving_fast = max(float(newer_driver.get("speed", 0.0)), float(driver.get("speed", 0.0))) > speed_threshold_kph
+
+            if moved_xy or moved_progress or lap_changed or moving_fast:
+                break
+
+            trailing_start_t = t
+            newer_driver = driver
+
+        if trailing_start_t is None or trailing_end_t is None:
+            continue
+        if trailing_end_t - trailing_start_t < min_stop_duration_s:
+            continue
+
+        out[code] = {
+            "start_time": trailing_start_t,
+            "end_time": trailing_end_t,
+            "duration_s": trailing_end_t - trailing_start_t,
+        }
+
     return out
 
 

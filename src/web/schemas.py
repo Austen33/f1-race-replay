@@ -26,6 +26,8 @@ class StandingRow(BaseModel):
     throttle_pct: float
     brake_pct: float
     rpm: float
+    label_status: str | None = None
+    status_reason: str | None = None
 
 
 class FramePayload(BaseModel):

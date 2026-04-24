@@ -8,6 +8,67 @@ from src.web.serialization import safe_jsonable
 
 PUSH_HZ = 60
 MIN_PUSH_INTERVAL = 1.0 / PUSH_HZ
+INACTIVE_TELEMETRY_GRACE_S = 0.5
+
+
+def _normalise_result_status(status: str | None) -> str:
+    return " ".join(str(status or "").strip().lower().split())
+
+
+def _is_dns_status(status: str | None) -> bool:
+    norm = _normalise_result_status(status)
+    return "did not start" in norm or norm == "dns"
+
+
+def _is_finished_status(status: str | None) -> bool:
+    norm = _normalise_result_status(status)
+    if not norm:
+        return False
+    if norm == "finished":
+        return True
+    if norm.startswith("+") and "lap" in norm:
+        return True
+    if "classified" in norm and "not classified" not in norm:
+        return True
+    return False
+
+
+def _is_incident_status(status: str | None) -> bool:
+    norm = _normalise_result_status(status)
+    return any(word in norm for word in ("accident", "collision", "contact", "crash", "damage"))
+
+
+def _status_badge_for_driver(
+    result_info: dict | None,
+    telemetry_window: dict | None,
+    stop_window: dict | None,
+    frame_t: float,
+    total_duration_s: float,
+) -> tuple[str | None, str | None]:
+    status_text = (result_info or {}).get("status", "")
+    norm = _normalise_result_status(status_text)
+
+    if _is_dns_status(norm):
+        return "DNS", status_text or "Did not start"
+
+    if stop_window and frame_t >= float(stop_window.get("start_time", total_duration_s + 1)):
+        if _is_incident_status(norm):
+            return "ACC", status_text or "Accident"
+        if not _is_finished_status(norm):
+            return "RET", status_text or "Retired"
+
+    if telemetry_window:
+        end_time = telemetry_window.get("end_time")
+        if end_time is not None and frame_t > float(end_time) + INACTIVE_TELEMETRY_GRACE_S:
+            if _is_incident_status(norm):
+                return "ACC", status_text or "Accident"
+            if not _is_finished_status(norm):
+                if norm:
+                    return "RET", status_text
+                if frame_t < total_duration_s - 5.0:
+                    return "RET", "Retired"
+
+    return None, None
 
 
 class Playback:
@@ -324,10 +385,21 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
 
     lap_data = loaded.get("lap_data", {})
     driver_meta = loaded.get("driver_meta", {})
+    driver_results = loaded.get("driver_results", {})
+    telemetry_ranges = loaded.get("telemetry_ranges", {})
+    driver_stop_windows = loaded.get("driver_stop_windows", {})
+    total_duration_s = float(loaded["frames"][-1]["t"]) if loaded.get("frames") else float(frame.get("t", 0.0))
     all_codes = list(driver_meta.keys())
 
     standings = []
     for code in all_codes:
+        result_info = driver_results.get(code, {})
+        telemetry_window = telemetry_ranges.get(code)
+        stop_window = driver_stop_windows.get(code)
+        badge, badge_reason = _status_badge_for_driver(
+            result_info, telemetry_window, stop_window, float(frame.get("t", 0.0)), total_duration_s
+        )
+
         if code not in drivers:
             standings.append({
                 "pos": 99,
@@ -360,6 +432,8 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
                 "brake_pct": 0.0,
                 "rpm": 0.0,
                 "stint": 1,
+                "label_status": badge,
+                "status_reason": badge_reason,
             })
             continue
 
@@ -453,6 +527,8 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
             "brake_pct": _brake_intensity_pct(code, d, prev_drivers, dt, DECEL_FULL),
             "rpm": float(d.get("rpm", 0.0)),
             "stint": current_lap_info.get("stint", 1) if current_lap_info else 1,
+            "label_status": badge,
+            "status_reason": badge_reason,
         })
 
     standings.sort(key=lambda s: s.get("pos", 99))

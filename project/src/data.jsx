@@ -277,6 +277,8 @@ function computeStandings(t, lap, totalLaps) {
       inDRS: s.in_drs || false,
       speedKph: s.speed_kph ?? 0,
       fraction: perLap,
+      labelStatus: s.label_status ?? null,
+      statusReason: s.status_reason ?? null,
     };
   }).sort((a, b) => a.pos - b.pos);
 }
@@ -564,6 +566,8 @@ function enrichOne(s) {
     status: s.status || "RUN",
     pos: s.pos ?? 0,
     fraction: _normalizedFraction(s, 0),
+    labelStatus: s.labelStatus ?? s.label_status ?? null,
+    statusReason: s.statusReason ?? s.status_reason ?? null,
   };
 }
 
@@ -578,6 +582,8 @@ function enrichInterpolated(ss0, ss1, alpha, inv, interpFrac) {
     status: ss0.status || "RUN",
     pos: ss0.pos ?? 0,
     fraction: interpFrac,
+    labelStatus: ss0.labelStatus ?? ss0.label_status ?? null,
+    statusReason: ss0.statusReason ?? ss0.status_reason ?? null,
   };
 }
 

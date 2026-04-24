@@ -561,6 +561,9 @@ def get_race_telemetry(session, session_type="R"):
                 if "rpm" not in sample_driver:
                     print("Cache missing 'rpm' field — recomputing telemetry data.")
                     raise FileNotFoundError  # force recompute
+            if "telemetry_ranges" not in frames:
+                print("Cache missing 'telemetry_ranges' field — recomputing telemetry data.")
+                raise FileNotFoundError  # force recompute
             print(f"Loaded precomputed {cache_suffix} telemetry data.")
             print("The replay should begin in a new window shortly!")
             return frames
@@ -572,6 +575,7 @@ def get_race_telemetry(session, session_type="R"):
     driver_codes = {num: session.get_driver(num)["Abbreviation"] for num in drivers}
 
     driver_data = {}
+    telemetry_ranges = {}
 
     global_t_min = None
     global_t_max = None
@@ -597,6 +601,11 @@ def get_race_telemetry(session, session_type="R"):
 
         code = result["code"]
         driver_data[code] = result["data"]
+        telemetry_ranges[code] = {
+            "start_time": float(result["t_min"]),
+            "end_time": float(result["t_max"]),
+            "max_lap": int(result["max_lap"]),
+        }
 
         t_min = result["t_min"]
         t_max = result["t_max"]
@@ -608,6 +617,10 @@ def get_race_telemetry(session, session_type="R"):
     # Ensure we have valid time bounds
     if global_t_min is None or global_t_max is None:
         raise ValueError("No valid telemetry data found for any driver")
+
+    for code, info in telemetry_ranges.items():
+        info["start_time"] = float(info["start_time"] - global_t_min)
+        info["end_time"] = float(info["end_time"] - global_t_min)
 
     # 2. Create a timeline (start from zero)
     timeline = np.arange(global_t_min, global_t_max, DT) - global_t_min
@@ -903,6 +916,7 @@ def get_race_telemetry(session, session_type="R"):
             "race_control_messages": formatted_rc_messages,
             "total_laps": int(max_lap_number),
             "max_tyre_life": max_tyre_life_map,
+            "telemetry_ranges": telemetry_ranges,
         }, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     print("Saved Successfully!")
@@ -914,6 +928,7 @@ def get_race_telemetry(session, session_type="R"):
         "race_control_messages": formatted_rc_messages,
         "total_laps": int(max_lap_number),
         "max_tyre_life": max_tyre_life_map,
+        "telemetry_ranges": telemetry_ranges,
     }
 
 

@@ -96,6 +96,88 @@ function textColorFor(hex) {
   return Y > 140 ? "#0B0B11" : "#FFFFFF";
 }
 
+function statusBadgeStyle(status) {
+  const badge = String(status || "").trim().toUpperCase();
+  if (!badge) return null;
+  if (badge === "DNS") {
+    return {
+      text: "#D7DBE6",
+      border: "rgba(215,219,230,0.24)",
+      fill: "rgba(11,11,17,0.92)",
+      width: 26,
+    };
+  }
+  return {
+    text: badge === "ACC" ? "#FFD6D1" : "#FFD9C2",
+    border: badge === "ACC" ? "rgba(255,30,0,0.45)" : "rgba(255,122,26,0.4)",
+    fill: "rgba(11,11,17,0.92)",
+    width: 26,
+  };
+}
+
+function DriverLabel({ code, teamColor, labelStatus }) {
+  const badge = String(labelStatus || "").trim().toUpperCase();
+  const badgeStyle = statusBadgeStyle(badge);
+  const codeWidth = 34;
+  const gap = badgeStyle ? 4 : 0;
+  const badgeWidth = badgeStyle?.width || 0;
+  const totalWidth = codeWidth + gap + badgeWidth;
+  const x0 = -totalWidth / 2;
+
+  return (
+    <g>
+      <rect
+        x={x0}
+        y="-7"
+        width={codeWidth}
+        height="12"
+        rx="2"
+        fill="rgba(11,11,17,0.85)"
+        stroke={teamColor}
+        strokeWidth="0.6"
+      />
+      <text
+        x={x0 + codeWidth / 2}
+        y="2"
+        textAnchor="middle"
+        fontFamily="JetBrains Mono, monospace"
+        fontSize="8"
+        fontWeight="700"
+        fill="#F4F4F8"
+        letterSpacing="0.08em"
+      >
+        {code}
+      </text>
+      {badgeStyle && (
+        <g transform={`translate(${x0 + codeWidth + gap}, 0)`}>
+          <rect
+            x="0"
+            y="-7"
+            width={badgeWidth}
+            height="12"
+            rx="6"
+            fill={badgeStyle.fill}
+            stroke={badgeStyle.border}
+            strokeWidth="0.6"
+          />
+          <text
+            x={badgeWidth / 2}
+            y="2"
+            textAnchor="middle"
+            fontFamily="JetBrains Mono, monospace"
+            fontSize="8"
+            fontWeight="800"
+            fill={badgeStyle.text}
+            letterSpacing="0.08em"
+          >
+            {badge}
+          </text>
+        </g>
+      )}
+    </g>
+  );
+}
+
 function sliceRange(start, end, circuit) {
   const out = [];
   const n = circuit.length;
@@ -310,7 +392,7 @@ function IsoTrack({
           {(() => {
             const BUCKET = 6;
             const buckets = {};
-            const activeCars = standings.filter(s => s.status !== "OUT");
+            const activeCars = standings.filter(s => s.status !== "OUT" || s.labelStatus === "DNS");
             for (const s of activeCars) {
               const key = Math.floor(s.trackIdx / BUCKET);
               if (!buckets[key]) buckets[key] = [];
@@ -327,14 +409,21 @@ function IsoTrack({
                 spreadOffsets[group[i].driver.code] = { dx: nx * off, dy: ny * off };
               }
             }
-            const outCars = standings.filter(s => s.status === "OUT");
+            const outCars = standings.filter(s => s.status === "OUT" && s.labelStatus !== "DNS");
             return [
               ...outCars.map((s) => {
                 const p = CIRCUIT[s.trackIdx];
+                const showStatusLabel = showLabels && !!(s.labelStatus || s.statusReason);
+                const { nx: onx, ny: ony } = outwardNormal(s.trackIdx, CIRCUIT, CENTROID);
                 return (
                   <g key={s.driver.code} transform={`translate(${p.x + OX}, ${p.y + OY}) scale(${S})`} opacity="0.3">
                     <circle r="11" fill="none" stroke="#555" strokeWidth="1.5"/>
                     <text x="0" y="3.5" textAnchor="middle" fontFamily="JetBrains Mono, monospace" fontSize="9" fontWeight="700" fill="#555">{s.pos}</text>
+                    {showStatusLabel && (
+                      <g transform={`translate(${onx * 18}, ${ony * 18})`}>
+                        <DriverLabel code={s.driver.code} teamColor={TEAMS[s.driver.team]?.color || "#555"} labelStatus={s.labelStatus} />
+                      </g>
+                    )}
                   </g>
                 );
               }),
@@ -347,11 +436,13 @@ function IsoTrack({
                 const off = spreadOffsets[s.driver.code] || { dx: 0, dy: 0 };
                 const { nx: onx, ny: ony } = outwardNormal(s.trackIdx, CIRCUIT, CENTROID);
                 const isPit = s.status === "PIT" || s.pit;
+                const isDns = s.status === "OUT" && s.labelStatus === "DNS";
                 const cx = p.x + OX + off.dx;
                 const cy = p.y + OY + off.dy;
-                const txtFill = textColorFor(team.color);
+                const carColor = isDns ? "#7F8795" : team.color;
+                const txtFill = isDns ? "#F4F4F8" : textColorFor(team.color);
                 const speedFrac = Math.min(1, (s.speedKph || 0) / 350);
-                const haloOpacity = isPit ? 0 : 0.2 + 0.5 * speedFrac;
+                const haloOpacity = isDns ? 0.16 : isPit ? 0 : 0.2 + 0.5 * speedFrac;
                 // Heading angle (degrees) from tangent at this track index — used for top-down arrow.
                 const np = CIRCUIT[(s.trackIdx + 1) % CIRCUIT.length];
                 const headingDeg = Math.atan2(np.y - p.y, np.x - p.x) * 180 / Math.PI;
@@ -359,7 +450,7 @@ function IsoTrack({
                   <g
                     key={s.driver.code}
                     transform={`translate(${cx}, ${cy}) scale(${S})`}
-                    style={{ cursor: "pointer", opacity: isPit ? 0.5 : 1 }}
+                    style={{ cursor: "pointer", opacity: isDns ? 0.42 : isPit ? 0.5 : 1 }}
                     onMouseEnter={() => setHover(s.driver.code)}
                     onMouseLeave={() => setHover(null)}
                     onClick={(e) => onPickDriver && onPickDriver(s.driver.code, e)}
@@ -371,12 +462,12 @@ function IsoTrack({
                       <circle r="16" fill="none" stroke="#00D9FF" strokeWidth="2" strokeDasharray="4 3"/>
                     )}
                     {isHover && (
-                      <circle r="22" fill={isSecondary ? "#00D9FF" : team.color} opacity="0.22"/>
+                      <circle r="22" fill={isSecondary ? "#00D9FF" : carColor} opacity="0.22"/>
                     )}
-                    {!isPit && (
-                      <circle r="15" fill="none" stroke={team.color} strokeWidth="1" opacity={haloOpacity}/>
+                    {(!isPit || isDns) && (
+                      <circle r="15" fill="none" stroke={carColor} strokeWidth="1" opacity={haloOpacity}/>
                     )}
-                    <circle r="11" fill={team.color} stroke="#0B0B11" strokeWidth="1.5"/>
+                    <circle r="11" fill={carColor} stroke="#0B0B11" strokeWidth="1.5"/>
                     <circle r="11" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="0.5"/>
                     <text
                       x="0" y="3.5"
@@ -393,23 +484,12 @@ function IsoTrack({
                     )}
                     {isTop && !isPit && (
                       <g transform={`rotate(${headingDeg}) translate(14, 0)`}>
-                        <path d="M 0 -3 L 5 0 L 0 3 Z" fill={team.color} stroke="#0B0B11" strokeWidth="0.5"/>
+                        <path d="M 0 -3 L 5 0 L 0 3 Z" fill={carColor} stroke="#0B0B11" strokeWidth="0.5"/>
                       </g>
                     )}
                     {showLabels && (
                       <g transform={`translate(${onx * 18}, ${ony * 18})`}>
-                        <rect x="0" y="-7" width="34" height="12" rx="2" fill="rgba(11,11,17,0.85)" stroke={team.color} strokeWidth="0.6"/>
-                        <text
-                          x="17" y="2"
-                          textAnchor="middle"
-                          fontFamily="JetBrains Mono, monospace"
-                          fontSize="8"
-                          fontWeight="700"
-                          fill="#F4F4F8"
-                          letterSpacing="0.08em"
-                        >
-                          {s.driver.code}
-                        </text>
+                        <DriverLabel code={s.driver.code} teamColor={team.color} labelStatus={s.labelStatus} />
                       </g>
                     )}
                   </g>
