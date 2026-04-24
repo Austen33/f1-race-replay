@@ -76,12 +76,18 @@ All commits since the initial fork point (`6f473f2`) are frontend or backend add
 
 ```bash
 pip install -r requirements.txt
+cd project
+npm install
+npm run build
+cd ..
 python -m src.web.pit_wall_server --year 2026 --round 1
 ```
 
 Then open **[http://localhost:8000/app/Pit%20Wall.html](http://localhost:8000/app/Pit%20Wall.html)**.
 
 A loading overlay tracks FastF1 cache hydration + telemetry computation. Once `status: "ready"` arrives on the WebSocket, the full console renders.
+
+`npm install` is required once for the frontend bundle. After that, rerun `npm run build` whenever you change files under `project/src/`.
 
 ### CLI flags
 
