@@ -13,6 +13,8 @@ function LiveProvider({ children }) {
   React.useEffect(() => {
     let lastFrameT = null;
     let wasPaused = true;
+    let lastReactUpdateT = 0;
+    const REACT_FRAME_THROTTLE_MS = 50;
 
     const h = window.APEX_CLIENT.openSocket((msg) => {
       if (msg.type === "loading") {
@@ -74,7 +76,14 @@ function LiveProvider({ children }) {
         window.__LIVE_FRAME = msg;
         window.__LIVE_BUFFER?.push?.(msg);
         if (window.APEX?._accumulateFrame) window.APEX._accumulateFrame(msg);
-        setFrame(msg);
+
+        // Throttle React updates to ~20Hz except on pause/seek transitions
+        const now = performance.now();
+        if (shouldResetBuffer || now - lastReactUpdateT >= REACT_FRAME_THROTTLE_MS) {
+          setFrame(msg);
+          lastReactUpdateT = now;
+        }
+
         setPb((p) => ({ ...p, speed: msg.playback_speed, is_paused: msg.is_paused }));
         lastFrameT = currentT;
         wasPaused = isPaused;

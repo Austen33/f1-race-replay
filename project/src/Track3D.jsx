@@ -2654,6 +2654,14 @@ function Track3D({
     const _basis = new THREE.Matrix4();
     const _surf = new THREE.Vector3();
     const _vp = new THREE.Vector3();
+    // Chase/POV scratch vectors to avoid per-frame allocations
+    const _chasePos = new THREE.Vector3();
+    const _chaseLook = new THREE.Vector3();
+    const _eyeWorld = new THREE.Vector3();
+    const _lookWorld = new THREE.Vector3();
+    const _povTangent = new THREE.Vector3();
+    // Weather scratch vector
+    const _windVec = new THREE.Vector3();
 
     const animate = () => {
       try {
@@ -2829,21 +2837,19 @@ function Track3D({
           const u = ((frac % 1) + 1) % 1;
           const carPos = curve.getPointAt(u);
           curve.getTangentAt(u, tmpTan);
-          const targetPos = carPos.clone()
-            .addScaledVector(tmpTan, -CHASE_BEHIND)
-            .add(new THREE.Vector3(0, CHASE_HEIGHT, 0));
-          const targetLook = carPos.clone()
-            .addScaledVector(tmpTan, CHASE_LOOKAHEAD)
-            .add(new THREE.Vector3(0, 1.2, 0));
+          _chasePos.copy(carPos).addScaledVector(tmpTan, -CHASE_BEHIND);
+          _chasePos.y += CHASE_HEIGHT;
+          _chaseLook.copy(carPos).addScaledVector(tmpTan, CHASE_LOOKAHEAD);
+          _chaseLook.y += 1.2;
           const kPos = 1 - Math.exp(-CHASE_SMOOTH_POS * dt);
           const kLook = 1 - Math.exp(-CHASE_SMOOTH_LOOK * dt);
           if (!chase.initialised) {
-            chase.pos.copy(targetPos);
-            chase.look.copy(targetLook);
+            chase.pos.copy(_chasePos);
+            chase.look.copy(_chaseLook);
             chase.initialised = true;
           } else {
-            chase.pos.lerp(targetPos, kPos);
-            chase.look.lerp(targetLook, kLook);
+            chase.pos.lerp(_chasePos, kPos);
+            chase.look.lerp(_chaseLook, kLook);
           }
           camera.position.copy(chase.pos);
           camera.lookAt(chase.look);
@@ -2877,30 +2883,26 @@ function Track3D({
           }
 
           const carPosW = curve.getPointAt(u);
-          const tangent = curve.getTangentAt(u).normalize();
-          const worldUp = new THREE.Vector3(0, 1, 0);
+          _povTangent.copy(curve.getTangentAt(u)).normalize();
 
           // Reset smoothed forward when switching drivers.
           if (!pov.initialised || pov.attachedTo !== live.pinned) {
-            pov.smoothedForward = tangent.clone();
+            if (!pov.smoothedForward) pov.smoothedForward = new THREE.Vector3();
+            pov.smoothedForward.copy(_povTangent);
             pov.initialised = true;
             pov.attachedTo = live.pinned;
           } else {
-            if (!pov.smoothedForward) pov.smoothedForward = tangent.clone();
+            if (!pov.smoothedForward) pov.smoothedForward = new THREE.Vector3();
             const kFwd = 1 - Math.exp(-POV_SMOOTH_ROT * dt);
-            pov.smoothedForward.lerp(tangent, kFwd).normalize();
+            pov.smoothedForward.lerp(_povTangent, kFwd).normalize();
           }
           const fwd = pov.smoothedForward;
 
-          const eyeWorld = carPosW.clone()
-            .addScaledVector(fwd, POV_EYE_FORWARD)
-            .addScaledVector(worldUp, POV_EYE_HEIGHT);
-          camera.position.copy(eyeWorld);
+          _eyeWorld.copy(carPosW).addScaledVector(fwd, POV_EYE_FORWARD).addScaledVector(_worldUp, POV_EYE_HEIGHT);
+          camera.position.copy(_eyeWorld);
 
-          const lookWorld = carPosW.clone()
-            .addScaledVector(fwd, POV_LOOK_AHEAD)
-            .addScaledVector(worldUp, POV_LOOK_HEIGHT);
-          camera.lookAt(lookWorld);
+          _lookWorld.copy(carPosW).addScaledVector(fwd, POV_LOOK_AHEAD).addScaledVector(_worldUp, POV_LOOK_HEIGHT);
+          camera.lookAt(_lookWorld);
 
           controls.enabled = false;
           updatePovHud(povHud, pinnedStanding,
@@ -2944,8 +2946,8 @@ function Track3D({
         const wDeg = (w.windDirection || 0) + 180;
         const wRad = wDeg * Math.PI / 180;
         const wSpeed = (w.windSpeed || 0) * 0.2778;
-        const windVec = new THREE.Vector3(Math.sin(wRad) * wSpeed, 0, -Math.cos(wRad) * wSpeed);
-        advanceRain(rain, dt, windVec);
+        _windVec.set(Math.sin(wRad) * wSpeed, 0, -Math.cos(wRad) * wSpeed);
+        advanceRain(rain, dt, _windVec);
         trackMat.color.setHex(trackWetColor);
         runoffMat.color.setHex(runoffWetColor);
         groundMat.color.setHex(groundWetColor);
@@ -2993,8 +2995,7 @@ function Track3D({
           const px = (_vp.x * 0.5 + 0.5) * w2;
           const py = (-_vp.y * 0.5 + 0.5) * h2;
           entry.label.style.display = "block";
-          entry.label.style.left = `${px}px`;
-          entry.label.style.top = `${py}px`;
+          entry.label.style.transform = `translate3d(${px | 0}px, ${py | 0}px, 0)`;
         }
         // SC label.
         if (scLabel && scGroup?.visible) {
@@ -3004,9 +3005,10 @@ function Track3D({
           if (_vp.z < -1 || _vp.z > 1) {
             scLabel.style.display = "none";
           } else {
+            const scPx = (_vp.x * 0.5 + 0.5) * w2;
+            const scPy = (-_vp.y * 0.5 + 0.5) * h2;
             scLabel.style.display = "block";
-            scLabel.style.left = `${(_vp.x * 0.5 + 0.5) * w2}px`;
-            scLabel.style.top = `${(-_vp.y * 0.5 + 0.5) * h2}px`;
+            scLabel.style.transform = `translate3d(${scPx | 0}px, ${scPy | 0}px, 0)`;
           }
         }
       } else {
