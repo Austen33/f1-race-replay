@@ -2592,7 +2592,8 @@ function Track3D({
     const setAniso = (tex, target) => {
       if (tex && tex.anisotropy < target) {
         tex.anisotropy = target;
-        tex.needsUpdate = true;
+        // anisotropy is sampler state — no needsUpdate required, and setting
+        // it would force a full texture re-upload to the GPU for no benefit.
       }
     };
     setAniso(asphaltTex,    maxAniso);
@@ -2859,21 +2860,17 @@ function Track3D({
         // Pit / out visibility on body only (keep halo for map legibility).
         // Cache the last applied status so we only walk the body/wheel arrays
         // when it actually changed — most frames are pure transform updates.
+        // Note: halo colour/opacity is NOT set here — the per-frame selection
+        // block above is the authoritative writer so pinned/secondary/DNS state
+        // always wins regardless of status transitions.
         const status = s.status;
         const renderKey = `${status}:${labelStatus || ""}`;
         if (entry.lastRenderKey !== renderKey) {
-          const isDns = status === "OUT" && labelStatus === "DNS";
-          const outOfPlay = status === "OUT" && !isDns;
+          const outOfPlay = isDns ? false : status === "OUT";
           const inPit = status === "PIT";
           for (const m of entry.group.userData.body) m.visible = !outOfPlay;
           for (const wh of entry.group.userData.wheels) wh.visible = !outOfPlay;
           if (entry.group.userData.compound) entry.group.userData.compound.visible = !outOfPlay && !isDns;
-          if (entry.group.userData.groundHalo) {
-            entry.group.userData.groundHalo.material.color.set(
-              isDns ? 0xa3abb8 : entry.group.userData.baseColor
-            );
-            entry.group.userData.groundHalo.material.opacity = isDns ? 0.26 : 0.32;
-          }
           for (const mat of entry.group.userData.bodyMats) {
             mat.transparent = true;
             mat.opacity = isDns ? 0.34 : inPit ? 0.45 : 1;
@@ -2935,7 +2932,10 @@ function Track3D({
         }
       } else {
         if (scGroup) scGroup.visible = false;
-        if (scLabel) scLabel.style.display = "none";
+        if (scLabel && scLabel._shown !== false) {
+          scLabel.style.display = "none";
+          scLabel._shown = false;
+        }
       }
 
       // --- Camera modes ---
@@ -2947,13 +2947,11 @@ function Track3D({
       let targetVignetteRadius = 1.1;
       let chaseSpeedKph = 0;
 
-      // In POV, we deliberately keep the pinned car's body *visible* so the
-      // driver sees the halo, front wing, mirrors, and nose from inside the
-      // cockpit — same as a real onboard camera. Hide only the floating
-      // overhead indicators (compound bobble, ground halo, DRS/brake light
-      // geometry) which would read as HUD clutter in first-person.
-      // Track the previous POV-self code so we can restore overhead indicators
-      // when the user switches drivers or leaves POV.
+      // In POV, hide the pinned car's floating overhead indicators (compound
+      // bobble, ground halo) which read as HUD clutter from inside the cockpit.
+      // Applied every frame so a status change (which re-enables compound.visible
+      // via the renderKey block) doesn't leak the overlay back into POV view.
+      // On driver-switch or mode-exit, restore the previous car's indicators.
       const povSelf = inPov ? live.pinned : null;
       if (lastPovSelfRef.code !== povSelf) {
         const prev = driverMap.get(lastPovSelfRef.code);
@@ -2961,12 +2959,14 @@ function Track3D({
           if (prev.group.userData.compound) prev.group.userData.compound.visible = true;
           if (prev.group.userData.groundHalo) prev.group.userData.groundHalo.visible = true;
         }
-        const cur = povSelf ? driverMap.get(povSelf) : null;
+        lastPovSelfRef.code = povSelf;
+      }
+      if (povSelf) {
+        const cur = driverMap.get(povSelf);
         if (cur) {
           if (cur.group.userData.compound) cur.group.userData.compound.visible = false;
           if (cur.group.userData.groundHalo) cur.group.userData.groundHalo.visible = false;
         }
-        lastPovSelfRef.code = povSelf;
       }
 
       // Linear scan is faster than a per-frame Map for ~20 drivers.
@@ -3185,13 +3185,17 @@ function Track3D({
       animate._lastErr = null;
       } catch (err) {
         // Log only the first occurrence of a recurring error so a buggy frame
-        // doesn't flood the console. Cleared on the next clean frame above.
+        // doesn't flood the console. Re-armed above on a clean frame.
         if (!animate._lastErr || animate._lastErr.message !== err.message) {
           console.error('[Track3D animate]', err);
           animate._lastErr = err;
         }
+      } finally {
+        // composer.render() runs unconditionally so a buggy frame doesn't
+        // freeze the canvas. _lastErr is only cleared by a fully-clean frame
+        // (the assignment above the catch), never here.
+        composer.render();
       }
-      composer.render();
       rafId = requestAnimationFrame(animate);
     };
     rafId = requestAnimationFrame(animate);
