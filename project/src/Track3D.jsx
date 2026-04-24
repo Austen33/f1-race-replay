@@ -29,9 +29,10 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 // med:  moderate drop for mid-range devices
 // low:  minimum cost for weak/mobile hardware
 const QUALITY_PRESETS = {
-  low:  { dprCap: 1.0, shadowSize: 512,  msaa: 0, bloom: false },
-  med:  { dprCap: 1.5, shadowSize: 1024, msaa: 2, bloom: true  },
-  high: { dprCap: 2.0, shadowSize: 2048, msaa: 4, bloom: true  },
+  low:   { dprCap: 1.0, shadowSize: 512,  msaa: 0, bloom: false, cityCount: 0   },
+  med:   { dprCap: 1.5, shadowSize: 1024, msaa: 2, bloom: true,  cityCount: 180 },
+  high:  { dprCap: 2.0, shadowSize: 2048, msaa: 4, bloom: true,  cityCount: 300 },
+  ultra: { dprCap: 2.5, shadowSize: 2048, msaa: 8, bloom: true,  cityCount: 450 },
 };
 
 // Track dimensions (metres).
@@ -998,6 +999,31 @@ function loadBaseCarModel() {
 const SAFETY_CAR_MODEL_PATH = "assets/safety_car.glb";
 let _safetyCarModelPromise = null;
 
+const CITY_PACK_PATH = "assets/city-pack.glb";
+const CITY_INSTANCE_COUNT_DEFAULT = 300;
+let cityGltfCache = null;
+let cityBuiltCache = new Map();
+if (import.meta?.env?.DEV) {
+  cityGltfCache = null;
+  cityBuiltCache = new Map();
+}
+
+function isDayCityEnabled(todKey) {
+  return todKey === "day";
+}
+
+function startCancelableCityLoad(loader, onResolve, onReject) {
+  let cancelled = false;
+  loader.loadAsync(CITY_PACK_PATH).then((gltf) => {
+    if (cancelled) return;
+    onResolve(gltf);
+  }).catch((err) => {
+    if (cancelled) return;
+    if (onReject) onReject(err);
+  });
+  return () => { cancelled = true; };
+}
+
 function loadSafetyCarModel() {
   if (_safetyCarModelPromise) return _safetyCarModelPromise;
   _safetyCarModelPromise = new Promise((resolve, reject) => {
@@ -1819,6 +1845,140 @@ function buildGrandstands(center, extent, yBase) {
   return g;
 }
 
+function buildCitySkyline(center, extent, yBase, preset, gltfScene, instanceCount) {
+  const INNER_RADIUS_FACTOR = 1.35;
+  const OUTER_RADIUS_FACTOR = 3.0;
+  const INSTANCE_COUNT_DEFAULT = CITY_INSTANCE_COUNT_DEFAULT;
+  const SCALE = 0.018;
+  const group = new THREE.Group();
+  const builtGeometries = [];
+  const builtMaterials = [];
+  const instancePositionsXZ = [];
+  let insideExpandedTrackBBoxCount = 0;
+  let tallestWorldY = -Infinity;
+
+  const dispose = () => {
+    if (group.parent) group.parent.remove(group);
+    for (const geom of builtGeometries) geom.dispose();
+    for (const mat of builtMaterials) mat.dispose();
+  };
+
+  const totalInstances = Math.max(0, Math.floor(Number(instanceCount) || INSTANCE_COUNT_DEFAULT));
+  if (!gltfScene || totalInstances <= 0) return { group, dispose };
+
+  let extentX = 100;
+  let extentZ = 100;
+  if (Number.isFinite(extent)) {
+    extentX = Math.max(Number(extent), 1);
+    extentZ = Math.max(Number(extent), 1);
+  } else if (extent && extent.isBox3) {
+    const s = extent.getSize(new THREE.Vector3());
+    extentX = Math.max(s.x, 1);
+    extentZ = Math.max(s.z, 1);
+  } else if (extent && typeof extent === "object") {
+    const ex = Number(extent.x ?? extent.sx);
+    const ez = Number(extent.z ?? extent.sz);
+    if (Number.isFinite(ex)) extentX = Math.max(ex, 1);
+    if (Number.isFinite(ez)) extentZ = Math.max(ez, 1);
+  }
+
+  const basis = Math.max(extentX, extentZ);
+  const innerRadius = basis * INNER_RADIUS_FACTOR;
+  const outerRadius = basis * OUTER_RADIUS_FACTOR;
+  // Source city meshes are authored at a small unit size; scale them up to
+  // circuit/world scale so they remain visible through the horizon fog band.
+  const skylineScaleBase = Math.max(10, basis * SCALE);
+  const expandedTrackMinX = center.x - extentX * 0.5 * 1.05;
+  const expandedTrackMaxX = center.x + extentX * 0.5 * 1.05;
+  const expandedTrackMinZ = center.z - extentZ * 0.5 * 1.05;
+  const expandedTrackMaxZ = center.z + extentZ * 0.5 * 1.05;
+
+  const templates = [];
+  gltfScene.traverse((obj) => {
+    if (!obj?.isMesh || !obj.geometry) return;
+    obj.geometry.computeBoundingBox();
+    const bb = obj.geometry.boundingBox;
+    if (!bb) return;
+    const sourceMaterial = Array.isArray(obj.material) ? obj.material[0] : obj.material;
+    if (!sourceMaterial) return;
+    templates.push({
+      mesh: obj,
+      height: bb.max.y - bb.min.y,
+      minY: bb.min.y,
+      maxY: bb.max.y,
+      sourceMaterial,
+    });
+  });
+  // Prefer tallest templates so skyline silhouette is driven by landmarks.
+  templates.sort((a, b) => b.height - a.height);
+  const selected = templates.slice(0, Math.min(8, templates.length, totalInstances));
+  if (!selected.length) return { group, dispose };
+
+  const skyColor = new THREE.Color(preset?.hemi?.sky ?? 0xffffff);
+  const tintColor = skyColor.clone().lerp(new THREE.Color(0xffffff), 0.65);
+  const basePerTemplate = Math.floor(totalInstances / selected.length);
+  const remainder = totalInstances % selected.length;
+  const matrix = new THREE.Matrix4();
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+
+  selected.forEach((tpl, tplIdx) => {
+    const count = basePerTemplate + (tplIdx < remainder ? 1 : 0);
+    if (count <= 0) return;
+
+    const geometry = tpl.mesh.geometry.clone();
+    const material = tpl.sourceMaterial.clone();
+    if (material.color) material.color.multiply(tintColor);
+    builtGeometries.push(geometry);
+    builtMaterials.push(material);
+
+    const instanced = new THREE.InstancedMesh(geometry, material, count);
+    instanced.castShadow = false;
+    instanced.receiveShadow = false;
+
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const radialT = Math.random() * Math.random();
+      const r = innerRadius + radialT * (outerRadius - innerRadius);
+      const s = (0.85 + Math.random() * 0.9) * skylineScaleBase;
+      position.set(
+        center.x + Math.cos(a) * r,
+        yBase - tpl.minY * s,
+        center.z + Math.sin(a) * r,
+      );
+      if (
+        position.x >= expandedTrackMinX && position.x <= expandedTrackMaxX &&
+        position.z >= expandedTrackMinZ && position.z <= expandedTrackMaxZ
+      ) insideExpandedTrackBBoxCount += 1;
+      instancePositionsXZ.push({ x: position.x, z: position.z });
+      const candidateTopY = position.y + tpl.maxY * s;
+      if (candidateTopY > tallestWorldY) tallestWorldY = candidateTopY;
+      quaternion.setFromEuler(new THREE.Euler(0, Math.random() * Math.PI * 2, 0));
+      scale.set(s, s, s);
+      matrix.compose(position, quaternion, scale);
+      instanced.setMatrixAt(i, matrix);
+    }
+    instanced.instanceMatrix.needsUpdate = true;
+    // Instanced meshes need explicit bounds recomputation after setMatrixAt;
+    // otherwise frustum culling can incorrectly drop the whole skyline.
+    instanced.computeBoundingBox();
+    instanced.computeBoundingSphere();
+    group.add(instanced);
+  });
+
+  const stats = {
+    instanceCount: instancePositionsXZ.length,
+    tallestWorldY,
+    insideExpandedTrackBBoxCount,
+    instancePositionsXZ,
+    innerRadius,
+    outerRadius,
+  };
+
+  return { group, dispose, stats };
+}
+
 function buildRain(bbox) {
   const COUNT = 3000;
   const positions = new Float32Array(COUNT * 3);
@@ -2065,6 +2225,7 @@ function Track3D({
 }) {
   const mountRef = React.useRef(null);
   const hudToggleRef = React.useRef(null);
+  const activeCityBuiltRef = React.useRef(null);
   const liveRef = React.useRef({ standings, pinned, secondary, cameraMode, weather, showLabels, safetyCar });
   liveRef.current = { standings, pinned, secondary, cameraMode, weather, showLabels, safetyCar };
   // Expose HUD toggle on window so the hotkey handler can reach it.
@@ -2100,10 +2261,25 @@ function Track3D({
   }, []);
 
   React.useEffect(() => {
+    if (typeof window.APEX.BUILDINGS !== "boolean") window.APEX.BUILDINGS = true;
+    window.APEX.setBuildings = (on) => {
+      window.APEX.BUILDINGS = !!on;
+      const built = activeCityBuiltRef.current;
+      if (built?.group) {
+        built.group.visible = !!built.group.userData?.shouldShow && !!on;
+      }
+    };
+    return () => { delete window.APEX.setBuildings; };
+  }, []);
+
+  React.useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
     const circuit = window.APEX.CIRCUIT;
     if (circuit.length < 2) return;
+    let cancelled = false;
+    let cancelCityLoad = () => {};
+    let activeCityBuilt = null;
 
     // --- Quality preset ---
     const qp = QUALITY_PRESETS[window.APEX.QUALITY] || QUALITY_PRESETS.high;
@@ -2202,6 +2378,133 @@ function Track3D({
     const standsY = bb.min.y - 0.4;
     scene.add(buildHorizonHills(center, extent, standsY));
     scene.add(buildGrandstands(center, extent, standsY));
+
+    const runCityCalibrationChecks = (built) => {
+      if (!built?.stats) return;
+      const stats = built.stats;
+      const heightCriterion = stats.tallestWorldY < sun.position.y;
+      const bboxCriterion = stats.insideExpandedTrackBBoxCount === 0;
+
+      const start = curve.getPointAt(0, new THREE.Vector3());
+      const tan = curve.getTangentAt(0, new THREE.Vector3()).normalize();
+      const outwardA = new THREE.Vector2(-tan.z, tan.x).normalize();
+      const outwardB = new THREE.Vector2(tan.z, -tan.x).normalize();
+      const toCenter = new THREE.Vector2(center.x - start.x, center.z - start.z).normalize();
+      const outward = outwardA.dot(toCenter) < outwardB.dot(toCenter) ? outwardA : outwardB;
+      let minAngle = Infinity;
+      let maxAngle = -Infinity;
+      for (const p of stats.instancePositionsXZ) {
+        const v = new THREE.Vector2(p.x - start.x, p.z - start.z);
+        const len = v.length();
+        if (len < 1e-6) continue;
+        v.multiplyScalar(1 / len);
+        const facing = outward.dot(v);
+        if (facing <= 0) continue;
+        const cross = outward.x * v.y - outward.y * v.x;
+        const dot = Math.max(-1, Math.min(1, facing));
+        const a = Math.atan2(cross, dot);
+        if (a < minAngle) minAngle = a;
+        if (a > maxAngle) maxAngle = a;
+      }
+      const skylineFovDeg = Number.isFinite(minAngle) && Number.isFinite(maxAngle)
+        ? THREE.MathUtils.radToDeg(maxAngle - minAngle)
+        : 0;
+      const fovCriterion = skylineFovDeg >= 20;
+
+      const report = {
+        circuit: circuitName || "unknown",
+        heightCriterion,
+        bboxCriterion,
+        fovCriterion,
+        tallestBuildingWorldY: Number(stats.tallestWorldY.toFixed(3)),
+        sunLightY: Number(sun.position.y.toFixed(3)),
+        instancesInsideTrackBBoxExpanded5Pct: stats.insideExpandedTrackBBoxCount,
+        skylineFovDeg: Number(skylineFovDeg.toFixed(3)),
+        thresholdFovDeg: 20,
+      };
+      window.APEX_CITY_CALIBRATION = report;
+      const allPass = heightCriterion && bboxCriterion && fovCriterion;
+      if (allPass) console.info("[city-calibration] PASS", report);
+      else console.warn("[city-calibration] FAIL", report);
+    };
+
+    const setupCitySkyline = () => {
+      if (!isDayCityEnabled(todKey)) return;
+      const cityInstanceCount = Math.max(0, Math.floor(Number(qp.cityCount ?? CITY_INSTANCE_COUNT_DEFAULT)));
+      const cityPresetId = todKey;
+      const cityCircuitId = circuitName || "unknown";
+      // Circuit identity must be in the key — a skyline built against one
+      // circuit's bbox/center is positioned in world space and cannot be
+      // reused on a differently-sized or differently-located circuit.
+      const cityCacheKey = `${cityCircuitId}|${cityInstanceCount}|${cityPresetId}`;
+      const attachBuilt = (built, shouldShow) => {
+        if (cancelled || !built?.group) return;
+        activeCityBuilt = built;
+        activeCityBuiltRef.current = built;
+        built.group.userData.shouldShow = !!shouldShow;
+        const buildingsOn = window.APEX?.BUILDINGS !== false;
+        built.group.visible = !!shouldShow && buildingsOn;
+        scene.add(built.group);
+        runCityCalibrationChecks(built);
+      };
+      const buildAndCache = (gltfScene) => {
+        const built = buildCitySkyline(center, bb, standsY, preset, gltfScene, cityInstanceCount);
+        cityBuiltCache.set(cityCacheKey, built);
+        return built;
+      };
+
+      // Low quality hides an already-built city group but does not dispose it.
+      if (cityInstanceCount === 0) {
+        const cachedHidden = [...cityBuiltCache.entries()].find(([key, built]) => {
+          const parts = key.split("|");
+          return parts[0] === cityCircuitId
+            && parts[1] !== "0"
+            && parts[2] === cityPresetId
+            && !!built?.group;
+        });
+        if (cachedHidden) {
+          attachBuilt(cachedHidden[1], false);
+          if (typeof window !== "undefined") {
+            window.APEX_CITY_CACHE_LAST = { key: cachedHidden[0], action: "hide" };
+          }
+        }
+        return;
+      }
+
+      const cachedBuilt = cityBuiltCache.get(cityCacheKey);
+      if (cachedBuilt) {
+        attachBuilt(cachedBuilt, true);
+        if (typeof window !== "undefined") {
+          window.APEX_CITY_CACHE_LAST = { key: cityCacheKey, action: "hit" };
+        }
+        return;
+      }
+
+      if (cityGltfCache) {
+        attachBuilt(buildAndCache(cityGltfCache), true);
+        if (typeof window !== "undefined") {
+          window.APEX_CITY_CACHE_LAST = { key: cityCacheKey, action: "build_from_gltf_cache" };
+        }
+        return;
+      }
+
+      cancelCityLoad = startCancelableCityLoad(
+        gltfLoader,
+        (gltf) => {
+          if (cancelled) return;
+          cityGltfCache = gltf.scene;
+          const freshBuilt = cityBuiltCache.get(cityCacheKey) || buildAndCache(cityGltfCache);
+          attachBuilt(freshBuilt, true);
+          if (typeof window !== "undefined") {
+            window.APEX_CITY_CACHE_LAST = { key: cityCacheKey, action: "build_from_network_or_parse" };
+          }
+        },
+        (err) => {
+          if (!cancelled) console.warn("City GLB failed to load, continuing without skyline:", err);
+        },
+      );
+    };
+    setupCitySkyline();
 
     // Stadium lights ring (night only) — 8 floodlight pylons around the bbox.
     if (preset.stadiumLights) {
@@ -2524,6 +2827,9 @@ function Track3D({
       position: "absolute", inset: "0", width: "100%", height: "100%",
       display: "block",
     });
+    if (typeof window !== "undefined") {
+      window.APEX_CITY_GEOMETRY_COUNT = () => renderer.info.memory.geometries;
+    }
 
     // Bump every track-surface texture to the GPU's anisotropy ceiling now
     // that the renderer exists. The procedural noise textures (asphalt, kerb,
@@ -3107,9 +3413,26 @@ function Track3D({
     rafId = requestAnimationFrame(animate);
 
     return () => {
+      cancelCityLoad();
+      cancelled = true;
+      if (activeCityBuiltRef.current === activeCityBuilt) activeCityBuiltRef.current = null;
+      if (activeCityBuilt?.group?.parent) activeCityBuilt.group.parent.remove(activeCityBuilt.group);
+      let cityBuiltStillCached = false;
+      if (activeCityBuilt) {
+        for (const built of cityBuiltCache.values()) {
+          if (built === activeCityBuilt) {
+            cityBuiltStillCached = true;
+            break;
+          }
+        }
+      }
+      if (activeCityBuilt && !cityBuiltStillCached) activeCityBuilt.dispose();
       cancelAnimationFrame(rafId);
       ro.disconnect();
       controls.dispose();
+      if (typeof window !== "undefined") {
+        delete window.APEX_CITY_GEOMETRY_COUNT;
+      }
       renderer.domElement.removeEventListener("click", onClick);
       for (const [, entry] of driverMap) entry.label.remove();
       if (scLabel) scLabel.remove();
@@ -3139,3 +3462,9 @@ function Track3D({
 }
 
 window.Track3D = Track3D;
+window.APEX_CITY_TEST = {
+  buildCitySkyline,
+  detectTimeOfDay,
+  isDayCityEnabled,
+  startCancelableCityLoad,
+};

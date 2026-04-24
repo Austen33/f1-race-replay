@@ -3,12 +3,15 @@
   "private": true,
   "scripts": {
     "build": "node build.mjs",
-    "watch": "node build.mjs --watch"
+    "watch": "node build.mjs --watch",
+    "test": "vitest run --environment jsdom"
   },
   "dependencies": {
     "three": "^0.160.1"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.25.0",
+    "vitest": "^3.2.4",
+    "jsdom": "^26.1.0"
   }
 }

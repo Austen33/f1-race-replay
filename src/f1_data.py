@@ -6,7 +6,6 @@ from datetime import timedelta, date
 from multiprocessing import Pool, cpu_count
 
 import fastf1
-import fastf1.plotting
 import numpy as np
 import pandas as pd
 
@@ -161,6 +160,10 @@ def load_session(year, round_number, session_type="R"):
 
 
 def get_driver_colors(session):
+    # Lazy import to avoid matplotlib/font-cache startup cost when importing
+    # web modules. This keeps the API server responsive during cold start.
+    import fastf1.plotting
+
     color_mapping = fastf1.plotting.get_driver_color_mapping(session)
 
     # Convert hex colors to RGB tuples
