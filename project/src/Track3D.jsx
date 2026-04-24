@@ -24,6 +24,16 @@ import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
+// Quality presets — control the rendering cost/quality trade-off.
+// high: current visual baseline (dprCap 2, shadowSize 2048, msaa 4, bloom on)
+// med:  moderate drop for mid-range devices
+// low:  minimum cost for weak/mobile hardware
+const QUALITY_PRESETS = {
+  low:  { dprCap: 1.0, shadowSize: 512,  msaa: 0, bloom: false },
+  med:  { dprCap: 1.5, shadowSize: 1024, msaa: 2, bloom: true  },
+  high: { dprCap: 2.0, shadowSize: 2048, msaa: 4, bloom: true  },
+};
+
 // Track dimensions (metres).
 const TRACK_WIDTH = 14;
 const RUNOFF_WIDTH = 32;
@@ -2076,11 +2086,25 @@ function Track3D({
     return () => clearInterval(id);
   }, []);
 
+  const [qualityVersion, setQualityVersion] = React.useState(0);
+  React.useEffect(() => {
+    if (!window.APEX.QUALITY) window.APEX.QUALITY = "high";
+    window.APEX.setQuality = (name) => {
+      if (!QUALITY_PRESETS[name]) return;
+      window.APEX.QUALITY = name;
+      setQualityVersion((v) => v + 1);
+    };
+    return () => { delete window.APEX.setQuality; };
+  }, []);
+
   React.useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
     const circuit = window.APEX.CIRCUIT;
     if (circuit.length < 2) return;
+
+    // --- Quality preset ---
+    const qp = QUALITY_PRESETS[window.APEX.QUALITY] || QUALITY_PRESETS.high;
 
     // --- Scene + lights ---
     const preset = TOD_PRESETS[todKey] || TOD_PRESETS.day;
@@ -2150,7 +2174,7 @@ function Track3D({
     );
     sun.target.position.copy(center);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.mapSize.set(qp.shadowSize, qp.shadowSize);
     const shadowFrustum = extent * 1.1;
     sun.shadow.camera.left = -shadowFrustum;
     sun.shadow.camera.right = shadowFrustum;
@@ -2489,8 +2513,8 @@ function Track3D({
     camera.position.set(center.x + framing, framing * 0.65, center.z + framing);
     camera.lookAt(center);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const renderer = new THREE.WebGLRenderer({ antialias: qp.msaa > 0, alpha: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, qp.dprCap));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     // Filmic tonemap + slight overshoot exposure makes the bloom pass + the
     // emissive lights/sun read like a TV broadcast feed instead of a flat
@@ -2522,20 +2546,20 @@ function Track3D({
     // chain (the renderer's tonemap is bypassed once we go through composer).
     const renderTarget = new THREE.WebGLRenderTarget(1, 1, {
       type: THREE.HalfFloatType, // HDR pipeline so bloom has dynamic range
-      samples: 4,                // multisample = free SMAA-quality edges
+      samples: qp.msaa,
       colorSpace: THREE.LinearSRGBColorSpace,
     });
     const composer = new EffectComposer(renderer, renderTarget);
-    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    composer.setPixelRatio(Math.min(window.devicePixelRatio, qp.dprCap));
     const renderPass = new RenderPass(scene, camera);
     composer.addPass(renderPass);
-    const bloomPass = new UnrealBloomPass(
+    const bloomPass = qp.bloom ? new UnrealBloomPass(
       new THREE.Vector2(1, 1),
       preset.bloom.strength,
       preset.bloom.radius,
       preset.bloom.threshold,
-    );
-    composer.addPass(bloomPass);
+    ) : null;
+    if (bloomPass) composer.addPass(bloomPass);
     const vignettePass = new ShaderPass({
       uniforms: {
         tDiffuse: { value: null },
@@ -2612,7 +2636,7 @@ function Track3D({
       const h = mount.clientHeight || 1;
       renderer.setSize(w, h, false);
       composer.setSize(w, h);
-      bloomPass.setSize(w, h);
+      if (bloomPass) bloomPass.setSize(w, h);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
     };
@@ -2953,16 +2977,20 @@ function Track3D({
         groundMat.color.setHex(groundWetColor);
         scene.fog.color.setHex(fogWetColor);
         scene.fog.density = (preset.fog.densityScale * WET_OVERLAY.fogDensityMult) / extent;
-        bloomPass.strength = preset.bloom.strength + WET_OVERLAY.bloomStrengthAdd;
-        bloomPass.threshold = Math.max(0.7, preset.bloom.threshold - WET_OVERLAY.bloomThresholdDrop);
+        if (bloomPass) {
+          bloomPass.strength = preset.bloom.strength + WET_OVERLAY.bloomStrengthAdd;
+          bloomPass.threshold = Math.max(0.7, preset.bloom.threshold - WET_OVERLAY.bloomThresholdDrop);
+        }
       } else {
         trackMat.color.setHex(trackDryColor);
         runoffMat.color.setHex(runoffDryColor);
         groundMat.color.setHex(groundBaseColor);
         scene.fog.color.setHex(fogDryColor);
         scene.fog.density = preset.fog.densityScale / extent;
-        bloomPass.strength = preset.bloom.strength;
-        bloomPass.threshold = preset.bloom.threshold;
+        if (bloomPass) {
+          bloomPass.strength = preset.bloom.strength;
+          bloomPass.threshold = preset.bloom.threshold;
+        }
       }
 
       // Tick star twinkle.
@@ -3046,7 +3074,7 @@ function Track3D({
         }
       });
     };
-  }, [geoVersion, todKey]);
+  }, [geoVersion, todKey, qualityVersion]);
 
   return (
     <div ref={mountRef} style={{
