@@ -2995,7 +2995,7 @@ function Track3D({
           const px = (_vp.x * 0.5 + 0.5) * w2;
           const py = (-_vp.y * 0.5 + 0.5) * h2;
           entry.label.style.display = "block";
-          entry.label.style.transform = `translate3d(${px | 0}px, ${py | 0}px, 0)`;
+          entry.label.style.transform = `translate3d(${px | 0}px, ${py | 0}px, 0) translate(-50%, -130%)`;
         }
         // SC label.
         if (scLabel && scGroup?.visible) {
@@ -3008,7 +3008,7 @@ function Track3D({
             const scPx = (_vp.x * 0.5 + 0.5) * w2;
             const scPy = (-_vp.y * 0.5 + 0.5) * h2;
             scLabel.style.display = "block";
-            scLabel.style.transform = `translate3d(${scPx | 0}px, ${scPy | 0}px, 0)`;
+            scLabel.style.transform = `translate3d(${scPx | 0}px, ${scPy | 0}px, 0) translate(-50%, -100%)`;
           }
         }
       } else {
