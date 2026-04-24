@@ -4,6 +4,30 @@ A browser-based F1 race engineer console built on top of the forked [4f4d/f1-rac
 
 This document enumerates, in detail, **every feature the new frontend adds**.
 
+## Since 2026-04-23 update (`cf926bc` → `HEAD`)
+
+The frontend changed significantly after the last docs pass. Based on git history and tree diff in this range, major updates are:
+
+- **WebGL renderer now first-class** via [Track3D.jsx](project/src/Track3D.jsx) (new file, large addition) with physically richer track/car rendering and retained fallback support for legacy SVG rendering.
+- **New camera/view workflow** in [App.jsx](project/src/App.jsx) and [Controls.jsx](project/src/Controls.jsx): `GL`, `SVG`, `CHASE`, `POV`, `TOP`, plus mode-specific UI behavior.
+- **Quality presets** (`low` / `med` / `high`) for WebGL modes with scalable DPR, shadows, MSAA, and bloom.
+- **POV/follow polish**: cockpit HUD improvements, HUD hide/show toggle, speed-reactive cinematic effects, and better label behavior/placement.
+- **Data-path and frame-loop performance updates** in [data.jsx](project/src/data.jsx), [live_state.jsx](project/src/live_state.jsx), and [Track3D.jsx](project/src/Track3D.jsx): render-time interpolation, enriched standings payload, and allocation/caching cleanups.
+- **3D assets integrated**: `car_model.glb` and `safety_car.glb` now part of the frontend rendering stack.
+
+Frontend files changed in this range include:
+
+- [project/src/Track3D.jsx](project/src/Track3D.jsx)
+- [project/src/App.jsx](project/src/App.jsx)
+- [project/src/Controls.jsx](project/src/Controls.jsx)
+- [project/src/data.jsx](project/src/data.jsx)
+- [project/src/live_state.jsx](project/src/live_state.jsx)
+- [project/src/hotkeyHandler.js](project/src/hotkeyHandler.js)
+- [project/src/App.test.jsx](project/src/App.test.jsx)
+- [project/src/index.jsx](project/src/index.jsx)
+- [project/build.mjs](project/build.mjs)
+- [project/package.json](project/package.json)
+
 ---
 
 ## Table of Contents
@@ -13,7 +37,7 @@ This document enumerates, in detail, **every feature the new frontend adds**.
 3. [Architecture](#architecture)
 4. [The Pit Wall UI](#the-pit-wall-ui)
 5. [Panel system](#panel-system)
-6. [Track rendering (IsoTrack)](#track-rendering-isotrack)
+6. [Track rendering (Track3D + IsoTrack)](#track-rendering-track3d--isotrack)
 7. [Classification / leaderboard](#classification--leaderboard)
 8. [Telemetry panels](#telemetry-panels)
 9. [Strategy, gaps, race control](#strategy-gaps-race-control)
@@ -36,7 +60,9 @@ The upstream project had **no browser frontend**. This fork adds:
 - A new [project/](project/) directory containing a **React 18** app bundled by **esbuild** into a single IIFE (`project/dist/bundle.js`), served at `http://localhost:8000/app/Pit%20Wall.html`.
 - A new [src/web/](src/web/) FastAPI server that exposes the FastF1 pipeline over HTTP + WebSocket, in parallel with the legacy TCP-9999 insight-window stream.
 - **9 dockable panels** with hide / collapse / maximize / pop-out-to-new-window behavior, persisted to `localStorage`.
-- A **3D isometric SVG track** with a top-down toggle, tilt/rotate/zoom camera sliders, kerbs, pit lane, sector dividers, corner numbering, and a simulated Safety Car.
+- A **dual track renderer**: default **Three.js WebGL** scene ([Track3D.jsx](project/src/Track3D.jsx)) plus legacy **SVG IsoTrack** fallback.
+- WebGL-specific camera modes: **orbit**, **follow/chase**, and **POV**; plus retained **TOP** and **SVG** modes.
+- **Scalable quality presets** (`low`/`med`/`high`) for WebGL rendering to trade visual fidelity vs performance.
 - Primary + secondary driver selection with **side-by-side compare traces** (SPD / THR / BRK / GEAR / RPM) and a live delta strip.
 - A **race-engineer-styled HUD**: JetBrains Mono typography, flag-glow overlays, scanlines, pulsing live dot, sector-tinted progress bars.
 - **Strategy strip**, **gap visualisation**, **sector times**, **driver cards**, and a **Race Control feed** with FIA message tagging.
@@ -170,9 +196,23 @@ The nine registered panels ([PanelRegistry.jsx](project/src/PanelRegistry.jsx)):
 
 ---
 
-## Track rendering (IsoTrack)
+## Track rendering (Track3D + IsoTrack)
 
-[IsoTrack.jsx](project/src/IsoTrack.jsx) (663 lines) is a bespoke SVG renderer with a CSS-3D-transformed container. It replaces the upstream Arcade track renderer.
+[Track3D.jsx](project/src/Track3D.jsx) is now the primary renderer for the circuit panel (`viewMode: webgl/follow/pov`). It adds a Three.js scene with dynamic lighting/post, 3D car/safety-car models, weather-aware material shifts, and camera-mode-specific UX.
+
+[IsoTrack.jsx](project/src/IsoTrack.jsx) remains available as the legacy SVG renderer (`viewMode: iso/top`) and is still useful as a lightweight fallback/debug view.
+
+### Track3D (default WebGL path)
+
+- Three.js renderer with ACES tone mapping, post-processing chain (bloom + vignette + output), and quality presets.
+- 3D track layers and surface treatment (track, runoff, kerbs, grass/verges, barriers, gravel pockets) with weather-aware color/material modulation.
+- GLB-based **driver car model** and **safety car model**, including orientation and placement on the 3D curve.
+- Camera modes: orbit, follow/chase, and POV; speed-reactive vignette/FOV behavior in dynamic modes.
+- In-scene overlays: floating labels, selection/compare halos, and POV HUD integration.
+
+### IsoTrack (legacy SVG path)
+
+Legacy notes below apply to the SVG renderer path:
 
 **View modes:**
 
@@ -337,10 +377,9 @@ Messages are time-stamped `MM:SS.sss`, newest at top, binary-searched against th
 
 Top-right floating overlay, collapsible with `C`.
 
-- **View mode** — segmented toggle `3D [D]` / `TOP [M]`.
-- **TILT** slider — 0–85° (disabled in TOP mode).
-- **ROT** slider — ±180°.
-- **ZOOM** slider — 50 %–400 %.
+- **View mode** — segmented toggle `GL` / `SVG` / `CHASE` / `POV` / `TOP`.
+- **QUALITY** selector (`LOW` / `MED` / `HIGH`) for WebGL-based modes (`GL`, `CHASE`, `POV`).
+- **TILT / ROT / ZOOM** sliders for legacy SVG modes (`SVG`, `TOP`).
 - **LABELS** toggle — driver codes on/off (`L`).
 - **HIDE [C]** button (collapse) and **RESET** (back to broadcast preset).
 
@@ -360,8 +399,10 @@ From [hotkeyHandler.js](project/src/hotkeyHandler.js) (ref-based to avoid stale 
 | `1` / `2` / `3` / `4` | Set speed directly |
 | `R` | Restart (seek to 0) |
 | `L` | Toggle driver labels |
-| `M` | Toggle view mode (ISO ↔ TOP) |
-| `D` | Force ISO (3D) view |
+| `M` | Toggle view mode (`TOP` ↔ `WEBGL`) |
+| `D` | Force WebGL (`WEBGL`) view |
+| `F` | Toggle chase camera (`FOLLOW` ↔ `WEBGL`) |
+| `H` | Toggle POV HUD visibility |
 | `C` | Collapse / expand camera controls |
 | `Esc` | Exit panel maximize |
 
@@ -499,7 +540,8 @@ project/                                # NEW — React frontend
     ├── loading_gate.jsx                # Cold-load progress overlay
     ├── data.jsx                        # window.APEX live-data shim
     ├── App.jsx                         # Root component; rail grid; state
-    ├── IsoTrack.jsx                    # 3D/2D SVG track, cars, safety car
+    ├── Track3D.jsx                     # Three.js WebGL track renderer (default)
+    ├── IsoTrack.jsx                    # Legacy 3D/2D SVG renderer (fallback modes)
     ├── Leaderboard.jsx                 # Classification panel
     ├── Telemetry.jsx                   # DriverCard, CompareTraces, SectorTimes
     ├── Panels.jsx                      # StrategyStrip, GapViz, RaceFeed
@@ -520,6 +562,9 @@ src/web/                                # NEW — FastAPI backend
 ├── serialization.py                    # NumPy/Pandas → JSON
 ├── flags.py                            # Track status → flag state
 └── schemas.py                          # Pydantic v2 models
+
+car_model.glb                           # 3D F1 car asset used by Track3D
+safety_car.glb                          # 3D safety car asset used by Track3D
 ```
 
 **Build specifics** ([project/build.mjs](project/build.mjs)):
@@ -557,4 +602,4 @@ Add it to the registry, wrap it in a `<PanelFrame>` inside `App.jsx`, and it inh
 
 ---
 
-*Last updated 2026-04-22 — fork `Austen33/f1-race-replay`, branch `feat/race_window`.*
+*Last updated 2026-04-24 — fork `Austen33/f1-race-replay`, branch `feat/web_gl_track`.*
