@@ -554,9 +554,16 @@ def get_race_telemetry(session, session_type="R"):
                 f"computed_data/{event_name}_{cache_suffix}_telemetry.pkl", "rb"
             ) as f:
                 frames = pickle.load(f)
-                print(f"Loaded precomputed {cache_suffix} telemetry data.")
-                print("The replay should begin in a new window shortly!")
-                return frames
+            # Validate cache has required fields (rpm was added after initial release)
+            sample_frame = next((fr for fr in frames.get("frames", []) if fr.get("drivers")), None)
+            if sample_frame:
+                sample_driver = next(iter(sample_frame["drivers"].values()))
+                if "rpm" not in sample_driver:
+                    print("Cache missing 'rpm' field — recomputing telemetry data.")
+                    raise FileNotFoundError  # force recompute
+            print(f"Loaded precomputed {cache_suffix} telemetry data.")
+            print("The replay should begin in a new window shortly!")
+            return frames
     except FileNotFoundError:
         pass  # Need to compute from scratch
 
