@@ -123,19 +123,148 @@ function makeAsphaltTexture() {
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
   }
-  // (c) Racing line wear — subtle darker polish down the middle of the
-  // ribbon (UV-Y runs length-wise in buildRibbonGeometry).
+  // (c) Racing line wear + edge marbles.
+  // Stronger center groove plus dirty off-line shoulders near UV edges.
   const rl = ctx.createLinearGradient(0, 0, size, 0);
-  rl.addColorStop(0.00, "rgba(0,0,0,0.0)");
-  rl.addColorStop(0.45, "rgba(0,0,0,0.08)");
-  rl.addColorStop(0.50, "rgba(0,0,0,0.12)");
-  rl.addColorStop(0.55, "rgba(0,0,0,0.08)");
-  rl.addColorStop(1.00, "rgba(0,0,0,0.0)");
+  rl.addColorStop(0.00, "rgba(0,0,0,0.00)");
+  rl.addColorStop(0.05, "rgba(0,0,0,0.17)");
+  rl.addColorStop(0.12, "rgba(0,0,0,0.08)");
+  rl.addColorStop(0.43, "rgba(0,0,0,0.18)");
+  rl.addColorStop(0.50, "rgba(0,0,0,0.28)");
+  rl.addColorStop(0.57, "rgba(0,0,0,0.18)");
+  rl.addColorStop(0.88, "rgba(0,0,0,0.08)");
+  rl.addColorStop(0.95, "rgba(0,0,0,0.17)");
+  rl.addColorStop(1.00, "rgba(0,0,0,0.00)");
   ctx.fillStyle = rl;
   ctx.fillRect(0, 0, size, size);
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.anisotropy = 8;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makeRunoffAsphaltTexture() {
+  const size = 512;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#333640";
+  ctx.fillRect(0, 0, size, size);
+  const img = ctx.getImageData(0, 0, size, size);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const n = (Math.random() - 0.5) * 12;
+    d[i] = Math.max(0, Math.min(255, d[i] + n));
+    d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + n));
+    d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + n));
+  }
+  ctx.putImageData(img, 0, 0);
+  for (let i = 0; i < 420; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const r = 0.4 + Math.random() * 1.0;
+    const l = 64 + Math.random() * 34;
+    ctx.fillStyle = `rgba(${l},${l},${l + 2},${0.32 + Math.random() * 0.24})`;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const groove = ctx.createLinearGradient(0, 0, size, 0);
+  groove.addColorStop(0.00, "rgba(0,0,0,0.00)");
+  groove.addColorStop(0.07, "rgba(0,0,0,0.12)");
+  groove.addColorStop(0.45, "rgba(0,0,0,0.07)");
+  groove.addColorStop(0.50, "rgba(0,0,0,0.14)");
+  groove.addColorStop(0.55, "rgba(0,0,0,0.07)");
+  groove.addColorStop(0.93, "rgba(0,0,0,0.12)");
+  groove.addColorStop(1.00, "rgba(0,0,0,0.00)");
+  ctx.fillStyle = groove;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 8;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makeGrassTexture() {
+  const size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#5b874b";
+  ctx.fillRect(0, 0, size, size);
+  const img = ctx.getImageData(0, 0, size, size);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const n = (Math.random() - 0.5) * 18;
+    d[i] = Math.max(0, Math.min(255, d[i] + n * 0.4 + 5));
+    d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + n * 0.7 + 8));
+    d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + n * 0.35 + 3));
+  }
+  ctx.putImageData(img, 0, 0);
+  for (let i = 0; i < 680; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const w = 0.7 + Math.random() * 0.9;
+    const h = 2.2 + Math.random() * 3.8;
+    ctx.fillStyle = `rgba(72,130,62,${0.12 + Math.random() * 0.16})`;
+    ctx.fillRect(x, y, w, h);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 8;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makeGravelTexture() {
+  const size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#b79d6d";
+  ctx.fillRect(0, 0, size, size);
+  const img = ctx.getImageData(0, 0, size, size);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const n = (Math.random() - 0.5) * 24;
+    d[i] = Math.max(0, Math.min(255, d[i] + n));
+    d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + n * 0.9));
+    d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + n * 0.65));
+  }
+  ctx.putImageData(img, 0, 0);
+  for (let i = 0; i < 500; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const r = 0.45 + Math.random() * 1.0;
+    const shade = 130 + Math.random() * 45;
+    ctx.fillStyle = `rgba(${shade},${shade - 10},${shade - 34},${0.25 + Math.random() * 0.3})`;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 4;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function makeArmcoTexture() {
+  const w = 128;
+  const h = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#f4f4f6";
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = "#d61d1d";
+  ctx.fillRect(0, 22, w, 18);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 16;
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
@@ -330,6 +459,158 @@ function buildRibbonGeometry(curve, segments, halfWidth, yLift, uvRepeat = 80) {
   geom.setIndex(indices);
   geom.computeVertexNormals();
   return geom;
+}
+
+function buildPartialEdgeLineGeometry(curve, segments, uStart, uEnd, offset, width, yLift, uvRepeat = 1) {
+  const span = uEnd >= uStart ? (uEnd - uStart) : (1 - uStart + uEnd);
+  const partSegs = Math.max(4, Math.floor(segments * span));
+  const positions = new Float32Array((partSegs + 1) * 2 * 3);
+  const uvs = new Float32Array((partSegs + 1) * 2 * 2);
+  const indices = [];
+  const up = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3();
+  const prevRight = new THREE.Vector3();
+  const tan = new THREE.Vector3();
+  let havePrevRight = false;
+  const half = width * 0.5;
+  for (let i = 0; i <= partSegs; i++) {
+    const t = i / partSegs;
+    const u = (uStart + t * span) % 1;
+    const p = curve.getPointAt(u);
+    curve.getTangentAt(u, tan);
+    havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
+    const inner = offset - half;
+    const outer = offset + half;
+    positions[i * 6 + 0] = p.x + right.x * inner;
+    positions[i * 6 + 1] = p.y + yLift;
+    positions[i * 6 + 2] = p.z + right.z * inner;
+    positions[i * 6 + 3] = p.x + right.x * outer;
+    positions[i * 6 + 4] = p.y + yLift;
+    positions[i * 6 + 5] = p.z + right.z * outer;
+    uvs[i * 4 + 0] = 0; uvs[i * 4 + 1] = t * uvRepeat;
+    uvs[i * 4 + 2] = 1; uvs[i * 4 + 3] = t * uvRepeat;
+    if (i < partSegs) {
+      const a = i * 2;
+      const b = i * 2 + 1;
+      const c = (i + 1) * 2;
+      const d = (i + 1) * 2 + 1;
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
+}
+
+function buildVerticalRibbonGeometry(curve, segments, offset, width, yLift, height, uvRepeat = 1) {
+  const positions = new Float32Array((segments + 1) * 4 * 3);
+  const uvs = new Float32Array((segments + 1) * 4 * 2);
+  const indices = [];
+  const up = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3();
+  const prevRight = new THREE.Vector3();
+  const tan = new THREE.Vector3();
+  let havePrevRight = false;
+  const half = width * 0.5;
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const p = curve.getPoint(t);
+    curve.getTangent(t, tan);
+    havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
+    const inner = offset - half;
+    const outer = offset + half;
+    const base = i * 12;
+    positions[base + 0] = p.x + right.x * inner;
+    positions[base + 1] = p.y + yLift;
+    positions[base + 2] = p.z + right.z * inner;
+    positions[base + 3] = p.x + right.x * outer;
+    positions[base + 4] = p.y + yLift;
+    positions[base + 5] = p.z + right.z * outer;
+    positions[base + 6] = p.x + right.x * inner;
+    positions[base + 7] = p.y + yLift + height;
+    positions[base + 8] = p.z + right.z * inner;
+    positions[base + 9] = p.x + right.x * outer;
+    positions[base + 10] = p.y + yLift + height;
+    positions[base + 11] = p.z + right.z * outer;
+
+    const uvBase = i * 8;
+    uvs[uvBase + 0] = 0; uvs[uvBase + 1] = t * uvRepeat;
+    uvs[uvBase + 2] = 1; uvs[uvBase + 3] = t * uvRepeat;
+    uvs[uvBase + 4] = 0; uvs[uvBase + 5] = t * uvRepeat;
+    uvs[uvBase + 6] = 1; uvs[uvBase + 7] = t * uvRepeat;
+    if (i < segments) {
+      const a = i * 4;
+      const b = (i + 1) * 4;
+      indices.push(a + 0, b + 0, a + 2, a + 2, b + 0, b + 2);
+      indices.push(a + 1, a + 3, b + 1, a + 3, b + 3, b + 1);
+      indices.push(a + 2, b + 2, a + 3, a + 3, b + 2, b + 3);
+    }
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
+}
+
+function buildCornerRanges(curve, sampleCount = 720) {
+  const tangents = new Array(sampleCount + 1);
+  for (let i = 0; i <= sampleCount; i++) {
+    tangents[i] = curve.getTangentAt(i / sampleCount).clone().normalize();
+  }
+  const values = [];
+  let maxAbs = 0;
+  for (let i = 0; i < sampleCount; i++) {
+    const a = tangents[i];
+    const b = tangents[(i + 1) % sampleCount];
+    const dot = Math.max(-1, Math.min(1, a.dot(b)));
+    const angle = Math.acos(dot);
+    const sign = Math.sign(a.clone().cross(b).y || 0);
+    const signedCurvature = angle * (sign === 0 ? 1 : sign);
+    values.push(signedCurvature);
+    const absK = Math.abs(signedCurvature);
+    if (absK > maxAbs) maxAbs = absK;
+  }
+  const threshold = Math.max(0.008, maxAbs * 0.35);
+  const active = values.map((v) => Math.abs(v) >= threshold);
+  const ranges = [];
+  let i = 0;
+  while (i < sampleCount) {
+    if (!active[i]) {
+      i++;
+      continue;
+    }
+    const start = i;
+    while (i < sampleCount && active[i]) i++;
+    const end = i - 1;
+    if (end - start + 1 < 6) continue;
+    let apex = start;
+    for (let j = start + 1; j <= end; j++) {
+      if (Math.abs(values[j]) > Math.abs(values[apex])) apex = j;
+    }
+    ranges.push({
+      startU: start / sampleCount,
+      endU: (end + 1) / sampleCount,
+      apexU: apex / sampleCount,
+      sign: Math.sign(values[apex]) || 1,
+    });
+  }
+  if (ranges.length >= 2 && active[0] && active[sampleCount - 1]) {
+    const first = ranges[0];
+    const last = ranges[ranges.length - 1];
+    ranges[0] = {
+      startU: last.startU,
+      endU: first.endU,
+      apexU: Math.abs(last.sign) >= Math.abs(first.sign) ? last.apexU : first.apexU,
+      sign: Math.abs(last.sign) >= Math.abs(first.sign) ? last.sign : first.sign,
+    };
+    ranges.pop();
+  }
+  return ranges;
 }
 
 // Extruded ribbon — a top surface + outer side walls (no bottom cap, it's
@@ -1115,8 +1396,8 @@ const TOD_PRESETS = {
     sun: { dir: [0.55, 0.65, -0.45], color: 0xfff0cc, intensity: 2.1 },
     hemi: { sky: 0xbcd4ff, ground: 0x6a6d78, intensity: 0.9 },
     fog: { color: 0xbdcedd, densityScale: 0.5 },
-    ground: { color: 0xa8adb6 },
-    runoff: { color: 0x6a6d76 },
+    ground: { color: 0x6c9b58 },
+    runoff: { color: 0x3a3a42 },
     trackTint: 0xf2f3fa,
     exposure: 0.95,
     bloom: { strength: 0.22, threshold: 0.95, radius: 0.55 },
@@ -1134,8 +1415,8 @@ const TOD_PRESETS = {
     sun: { dir: [0.45, 0.55, -0.7], color: 0xffc194, intensity: 1.6 },
     hemi: { sky: 0xa39abb, ground: 0x3b2f3a, intensity: 0.55 },
     fog: { color: 0x23202c, densityScale: 0.9 },
-    ground: { color: 0x262530 },
-    runoff: { color: 0x2b2b36 },
+    ground: { color: 0x4f6f3f },
+    runoff: { color: 0x2a2a31 },
     trackTint: 0xe8eaf2,
     exposure: 0.98,
     bloom: { strength: 0.32, threshold: 0.88, radius: 0.55 },
@@ -1156,8 +1437,8 @@ const TOD_PRESETS = {
     sun: { dir: [0.25, 0.95, -0.15], color: 0xe8ecff, intensity: 1.1 },
     hemi: { sky: 0x2c395a, ground: 0x0a0a10, intensity: 0.4 },
     fog: { color: 0x08090e, densityScale: 1.0 },
-    ground: { color: 0x16161e },
-    runoff: { color: 0x1e1e28 },
+    ground: { color: 0x3c5832 },
+    runoff: { color: 0x1f1f25 },
     trackTint: 0xd8dbe6,
     exposure: 1.0,
     bloom: { strength: 0.4, threshold: 0.78, radius: 0.6 },
@@ -1825,17 +2106,14 @@ function Track3D({
       scene.add(buildStadiumLights(center, extent, standsY, preset.stadiumLights));
     }
 
-    // Ground plane with concrete noise texture. Tile count scales with the
-    // ground extent so individual noise cells stay roughly 120 m across —
-    // dense enough to kill visible tiling, loose enough that the ground
-    // reads as a calm surface rather than a bubbling sea under fog.
+    // Ground plane — broad grass field around the circuit.
     const groundSize = extent * 6;
-    const concreteTex = makeConcreteTexture();
-    concreteTex.repeat.set(groundSize / 120, groundSize / 120);
+    const grassTex = makeGrassTexture();
+    grassTex.repeat.set(groundSize / 120, groundSize / 120);
     const groundGeom = new THREE.PlaneGeometry(groundSize, groundSize, 1, 1);
     groundGeom.rotateX(-Math.PI / 2);
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: groundBaseColor, map: concreteTex, roughness: 0.95, metalness: 0,
+    const groundMat = new THREE.MeshLambertMaterial({
+      color: groundBaseColor, map: grassTex,
       polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 4,
     });
     const ground = new THREE.Mesh(groundGeom, groundMat);
@@ -1851,13 +2129,33 @@ function Track3D({
     // the central strip — making the track look translucent / missing its
     // material. Two parallel strips outside the kerbs eliminate the overlap
     // entirely: each side spans from kerb-outer to runoff-outer.
-    const RUNOFF_INNER = TRACK_WIDTH + KERB_WIDTH;
+    const GRASS_STRIP_WIDTH = 7.5;
+    const VERGE_INNER = TRACK_WIDTH + KERB_WIDTH;
+    const VERGE_CENTER = VERGE_INNER + GRASS_STRIP_WIDTH * 0.5;
+    const vergeTex = makeGrassTexture();
+    vergeTex.repeat.set(1, 90);
+    const vergeMat = new THREE.MeshBasicMaterial({
+      color: 0x2d7a3a, map: vergeTex, toneMapped: false,
+    });
+    const vergeL = new THREE.Mesh(
+      buildEdgeLineGeometry(curve, segments, -VERGE_CENTER, GRASS_STRIP_WIDTH, 0.06, 90),
+      vergeMat,
+    );
+    const vergeR = new THREE.Mesh(
+      buildEdgeLineGeometry(curve, segments, +VERGE_CENTER, GRASS_STRIP_WIDTH, 0.06, 90),
+      vergeMat,
+    );
+    vergeL.receiveShadow = false; vergeR.receiveShadow = false;
+    vergeL.renderOrder = 1; vergeR.renderOrder = 1;
+    scene.add(vergeL); scene.add(vergeR);
+
+    const RUNOFF_INNER = VERGE_INNER + GRASS_STRIP_WIDTH;
     const RUNOFF_STRIP_WIDTH = RUNOFF_WIDTH - RUNOFF_INNER;
     const RUNOFF_STRIP_CENTER = RUNOFF_INNER + RUNOFF_STRIP_WIDTH * 0.5;
-    const runoffTex = makeConcreteTexture();
+    const runoffTex = makeRunoffAsphaltTexture();
     runoffTex.repeat.set(2, 80);
-    const runoffMat = new THREE.MeshStandardMaterial({
-      color: runoffDryColor, map: runoffTex, roughness: 0.92, metalness: 0,
+    const runoffMat = new THREE.MeshBasicMaterial({
+      color: runoffDryColor, map: runoffTex, toneMapped: false,
     });
     const runoffL = new THREE.Mesh(
       buildEdgeLineGeometry(curve, segments, -RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, 0.05, 80),
@@ -1918,15 +2216,16 @@ function Track3D({
     const ABOVE_TRACK = (base, clearance = 0.02) => TRACK_TOP_Y - base + clearance;
 
     // White edge lines just inside each kerb.
+    const EDGE_LINE_WIDTH = 0.2;
     const edgeMat = new THREE.MeshBasicMaterial({
-      color: 0xdcdce4, transparent: true, opacity: 0.75,
+      color: 0xffffff, transparent: false, opacity: 1,
     });
     const edgeL = new THREE.Mesh(
-      buildEdgeLineGeometry(curve, segments, -(TRACK_WIDTH - 0.25), 0.25, 0.38),
+      buildEdgeLineGeometry(curve, segments, -(TRACK_WIDTH + EDGE_LINE_WIDTH * 0.5), EDGE_LINE_WIDTH, 0.38),
       edgeMat,
     );
     const edgeR = new THREE.Mesh(
-      buildEdgeLineGeometry(curve, segments, +(TRACK_WIDTH - 0.25), 0.25, 0.38),
+      buildEdgeLineGeometry(curve, segments, +(TRACK_WIDTH + EDGE_LINE_WIDTH * 0.5), EDGE_LINE_WIDTH, 0.38),
       edgeMat,
     );
     edgeL.position.y = ABOVE_TRACK(0.38, 0.01);
@@ -1937,7 +2236,7 @@ function Track3D({
     // Kerbs rendered as flat striped ribbons. This avoids long spike artifacts
     // from side-face triangulation while preserving clear red/white boundaries.
     const kerbTex = makeKerbStripeTexture();
-    const kerbUv = Math.max(120, curveLenApprox / 5);
+    const kerbUv = Math.max(80, curveLenApprox / 8);
     const kerbMat = new THREE.MeshBasicMaterial({
       map: kerbTex,
       side: THREE.DoubleSide,
@@ -1956,6 +2255,118 @@ function Track3D({
     kerbL.renderOrder = 4;
     kerbR.renderOrder = 4;
     scene.add(kerbL); scene.add(kerbR);
+
+    const aoWidth = 0.42;
+    const aoMat = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      transparent: true,
+      opacity: 0.36,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const aoL = new THREE.Mesh(
+      buildEdgeLineGeometry(curve, segments, -(TRACK_WIDTH - aoWidth * 0.5), aoWidth, 0.381, 80),
+      aoMat,
+    );
+    const aoR = new THREE.Mesh(
+      buildEdgeLineGeometry(curve, segments, +(TRACK_WIDTH - aoWidth * 0.5), aoWidth, 0.381, 80),
+      aoMat,
+    );
+    aoL.position.y = ABOVE_TRACK(0.381, 0.006);
+    aoR.position.y = ABOVE_TRACK(0.381, 0.006);
+    aoL.renderOrder = 3;
+    aoR.renderOrder = 3;
+    scene.add(aoL);
+    scene.add(aoR);
+
+    const barrierOffset = Math.max(18, RUNOFF_INNER + RUNOFF_STRIP_WIDTH + 2.8);
+    const barrierTex = makeArmcoTexture();
+    barrierTex.repeat.set(1, 20);
+    const barrierMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      map: barrierTex,
+      toneMapped: false,
+      side: THREE.DoubleSide,
+    });
+    const armcoHeight = 1.2;
+    const armcoWidth = 0.35;
+    const barrierL = new THREE.Mesh(
+      buildVerticalRibbonGeometry(curve, segments, -barrierOffset, armcoWidth, 0.06, armcoHeight, 20),
+      barrierMat,
+    );
+    const barrierR = new THREE.Mesh(
+      buildVerticalRibbonGeometry(curve, segments, +barrierOffset, armcoWidth, 0.06, armcoHeight, 20),
+      barrierMat,
+    );
+    barrierL.renderOrder = 2;
+    barrierR.renderOrder = 2;
+    scene.add(barrierL);
+    scene.add(barrierR);
+
+    const cornerRanges = buildCornerRanges(curve, 720);
+    const gravelTex = makeGravelTexture();
+    gravelTex.repeat.set(1, 45);
+    const gravelMat = new THREE.MeshBasicMaterial({
+      color: 0xc2a974,
+      map: gravelTex,
+      toneMapped: false,
+      side: THREE.DoubleSide,
+    });
+    const gravelInner = RUNOFF_INNER + RUNOFF_STRIP_WIDTH + 1.3;
+    const gravelWidth = 5.5;
+    for (const c of cornerRanges) {
+      const side = c.sign >= 0 ? 1 : -1;
+      const gravelOffset = side * (gravelInner + gravelWidth * 0.5);
+      const gravelGeom = buildPartialEdgeLineGeometry(
+        curve,
+        segments,
+        c.startU,
+        c.endU,
+        gravelOffset,
+        gravelWidth,
+        0.045,
+        28,
+      );
+      const gravel = new THREE.Mesh(gravelGeom, gravelMat);
+      gravel.renderOrder = 1;
+      scene.add(gravel);
+    }
+
+    const skidMat = new THREE.MeshBasicMaterial({
+      color: 0x050506,
+      transparent: true,
+      opacity: 0.34,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    for (const c of cornerRanges) {
+      const sideBias = c.sign >= 0 ? 0.35 : -0.35;
+      const baseStart = c.apexU;
+      const end = c.endU;
+      const span = end >= baseStart ? (end - baseStart) : (1 - baseStart + end);
+      if (span < 0.01) continue;
+      const s1 = baseStart + span * 0.18;
+      const s2 = baseStart + span * 0.56;
+      const e1 = Math.min(1, s1 + Math.min(0.018, span * 0.35));
+      const e2 = Math.min(1, s2 + Math.min(0.016, span * 0.3));
+      for (const tyreOffset of [-1.85, 1.85]) {
+        const o = tyreOffset + sideBias;
+        const skid1 = new THREE.Mesh(
+          buildPartialEdgeLineGeometry(curve, segments, s1 % 1, e1 % 1, o, 0.22, 0.39, 5),
+          skidMat,
+        );
+        const skid2 = new THREE.Mesh(
+          buildPartialEdgeLineGeometry(curve, segments, s2 % 1, e2 % 1, o * 0.92, 0.2, 0.39, 4),
+          skidMat,
+        );
+        skid1.position.y = ABOVE_TRACK(0.39, 0.01);
+        skid2.position.y = ABOVE_TRACK(0.39, 0.012);
+        skid1.renderOrder = 3;
+        skid2.renderOrder = 3;
+        scene.add(skid1);
+        scene.add(skid2);
+      }
+    }
 
     // DRS zones — green stripes on the outer side of each zone.
     for (const z of window.APEX.DRS_ZONES || []) {
@@ -2441,11 +2852,7 @@ function Track3D({
         advanceRain(rain, dt, windVec);
         trackMat.color.setHex(trackWetColor);
         runoffMat.color.setHex(runoffWetColor);
-        runoffMat.roughness = 0.45;
-        runoffMat.metalness = 0.25;
         groundMat.color.setHex(groundWetColor);
-        groundMat.roughness = 0.6;
-        groundMat.metalness = 0.15;
         scene.fog.color.setHex(fogWetColor);
         scene.fog.density = (preset.fog.densityScale * WET_OVERLAY.fogDensityMult) / extent;
         bloomPass.strength = preset.bloom.strength + WET_OVERLAY.bloomStrengthAdd;
@@ -2453,11 +2860,7 @@ function Track3D({
       } else {
         trackMat.color.setHex(trackDryColor);
         runoffMat.color.setHex(runoffDryColor);
-        runoffMat.roughness = 0.92;
-        runoffMat.metalness = 0;
         groundMat.color.setHex(groundBaseColor);
-        groundMat.roughness = 0.95;
-        groundMat.metalness = 0;
         scene.fog.color.setHex(fogDryColor);
         scene.fog.density = preset.fog.densityScale / extent;
         bloomPass.strength = preset.bloom.strength;
