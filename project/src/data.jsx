@@ -439,6 +439,89 @@ function getPitStops(code) {
   return window.__LIVE_SNAPSHOT?.pit_stops?.[code] || [];
 }
 
+// --- Interpolation buffer for smooth temporal motion ---
+const RENDER_DELAY_MS = 80;
+const MAX_EXTRAPOLATE_MS = 150;
+const LIVE_BUFFER_MAX = 6;
+
+window.__LIVE_BUFFER = {
+  frames: [],
+  push(msg) {
+    msg._recvT = performance.now();
+    this.frames.push(msg);
+    if (this.frames.length > LIVE_BUFFER_MAX) this.frames.shift();
+  },
+  clear() {
+    this.frames.length = 0;
+  },
+};
+
+function lerpWrap(f0, f1, t) {
+  let d = f1 - f0;
+  if (d > 0.5) d -= 1;
+  else if (d < -0.5) d += 1;
+  return (((f0 + d * t) % 1) + 1) % 1;
+}
+
+function sampleStandingsAt(tRender) {
+  const buf = window.__LIVE_BUFFER.frames;
+  if (buf.length < 1) return null;
+  if (buf.length === 1) {
+    const f = buf[0];
+    return f.standings || null;
+  }
+  const recv0 = buf[0]._recvT;
+  const recvN = buf[buf.length - 1]._recvT;
+  const tSpan = recvN - recv0;
+  if (tSpan === 0 || tRender < recv0) return buf[0].standings || null;
+  if (tRender >= recvN) return buf[buf.length - 1].standings || null;
+
+  let lo = 0, hi = buf.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (buf[mid]._recvT <= tRender) lo = mid + 1;
+    else hi = mid;
+  }
+  lo = Math.max(0, lo - 1);
+  const i0 = lo, i1 = Math.min(lo + 1, buf.length - 1);
+  if (i0 === i1) return buf[i0].standings || null;
+
+  const f0 = buf[i0];
+  const f1 = buf[i1];
+  const t0 = f0._recvT;
+  const t1 = f1._recvT;
+  const alpha = (tRender - t0) / (t1 - t0);
+
+  const s0 = f0.standings || [];
+  const s1 = f1.standings || [];
+  const result = [];
+  const codeMap = new Map();
+
+  for (const s of s0) codeMap.set(s.code, s);
+  for (const s of s1) codeMap.set(s.code, s);
+
+  for (const [code, _] of codeMap) {
+    const ss0 = s0.find(x => x.code === code);
+    const ss1 = s1.find(x => x.code === code);
+    if (!ss0 || !ss1) {
+      result.push(ss0 || ss1);
+      continue;
+    }
+
+    const f0Frac = _normalizedFraction(ss0, 0);
+    const f1Frac = _normalizedFraction(ss1, 0);
+    const interpFrac = lerpWrap(f0Frac, f1Frac, alpha);
+
+    result.push({
+      ...ss0,
+      fraction: interpFrac,
+      speed_kph: ss0.speed_kph * (1 - alpha) + ss1.speed_kph * alpha,
+    });
+  }
+
+  return result.sort((a, b) => (a.pos || 0) - (b.pos || 0));
+}
+
 window.APEX = {
   TEAMS, DRIVERS, COMPOUNDS, CIRCUIT, SECTORS, DRS_ZONES,
   get UNIT_SCALE() { return UNIT_SCALE; },
@@ -446,5 +529,7 @@ window.APEX = {
   fetchLapTrace, getCachedLapTrace, clearLapTelemetry,
   _installSnapshot, _accumulateFrame,
   getSessionBest, getStints, getPitStops,
+  sampleStandingsAt,
+  INTERPOLATE: true,
 };
 window.APEX_DATA_READY = APEX_DATA_READY;

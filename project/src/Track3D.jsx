@@ -2647,17 +2647,29 @@ function Track3D({
     let rafId;
     let lastT = performance.now();
     const tmpTan = new THREE.Vector3();
+    const _fwd = new THREE.Vector3();
+    const _right = new THREE.Vector3();
+    const _up = new THREE.Vector3();
+    const _worldUp = new THREE.Vector3(0, 1, 0);
+    const _basis = new THREE.Matrix4();
+    const _surf = new THREE.Vector3();
+    const _vp = new THREE.Vector3();
 
     const animate = () => {
       try {
       const now = performance.now();
-      const dt = Math.min(0.1, (now - lastT) / 1000);
+      const rawDt = (now - lastT) / 1000;
+      const dt = Math.min(rawDt, 1 / 30);
       lastT = now;
       const live = liveRef.current;
 
+      // Sample interpolated standings if available and enabled
+      const tRender = now - 80;
+      let standings = (window.APEX?.INTERPOLATE !== false && window.APEX.sampleStandingsAt?.(tRender)) ||
+                      live.standings || [];
+
       // Reconcile drivers.
       const seen = new Set();
-      const standings = live.standings || [];
       for (const s of standings) {
         if (!s?.driver?.code) continue;
         seen.add(s.driver.code);
@@ -2678,17 +2690,16 @@ function Track3D({
         curve.getTangentAt(u, tmpTan);
         // Orient the car to follow the track surface in 3D (yaw + pitch)
         // so it doesn't sink into or float above the track on elevation changes.
-        const fwd = tmpTan.clone().normalize();
-        const worldUp = new THREE.Vector3(0, 1, 0);
-        const right = new THREE.Vector3().crossVectors(fwd, worldUp).normalize();
-        const up = new THREE.Vector3().crossVectors(right, fwd).normalize();
+        _fwd.copy(tmpTan).normalize();
+        _right.crossVectors(_fwd, _worldUp).normalize();
+        _up.crossVectors(_right, _fwd).normalize();
         // Car local frame: +X forward, +Y up, +Z right
-        const m = new THREE.Matrix4().makeBasis(fwd, up, right);
-        entry.group.quaternion.setFromRotationMatrix(m);
+        _basis.makeBasis(_fwd, _up, _right);
+        entry.group.quaternion.setFromRotationMatrix(_basis);
         // Position on track surface, offset along the surface normal (up)
         // so the car sits on top of the track even on slopes.
-        const surfaceOffset = up.clone().multiplyScalar(TRACK_TOP_Y + CAR_SURFACE_CLEARANCE);
-        entry.group.position.set(p.x + surfaceOffset.x, p.y + surfaceOffset.y, p.z + surfaceOffset.z);
+        _surf.copy(_up).multiplyScalar(TRACK_TOP_Y + CAR_SURFACE_CLEARANCE);
+        entry.group.position.set(p.x + _surf.x, p.y + _surf.y, p.z + _surf.z);
 
         // Selection halo + ring scale.
         const isPinned = live.pinned === s.driver.code;
@@ -2765,14 +2776,13 @@ function Track3D({
         const u = ((sc.fraction % 1) + 1) % 1;
         const p = curve.getPointAt(u);
         curve.getTangentAt(u, tmpTan);
-        const fwd = tmpTan.clone().normalize();
-        const worldUp = new THREE.Vector3(0, 1, 0);
-        const right = new THREE.Vector3().crossVectors(fwd, worldUp).normalize();
-        const up = new THREE.Vector3().crossVectors(right, fwd).normalize();
-        const m = new THREE.Matrix4().makeBasis(fwd, up, right);
-        scGroup.quaternion.setFromRotationMatrix(m);
-        const surfaceOffset = up.clone().multiplyScalar(TRACK_TOP_Y + CAR_SURFACE_CLEARANCE);
-        scGroup.position.set(p.x + surfaceOffset.x, p.y + surfaceOffset.y, p.z + surfaceOffset.z);
+        _fwd.copy(tmpTan).normalize();
+        _right.crossVectors(_fwd, _worldUp).normalize();
+        _up.crossVectors(_right, _fwd).normalize();
+        _basis.makeBasis(_fwd, _up, _right);
+        scGroup.quaternion.setFromRotationMatrix(_basis);
+        _surf.copy(_up).multiplyScalar(TRACK_TOP_Y + CAR_SURFACE_CLEARANCE);
+        scGroup.position.set(p.x + _surf.x, p.y + _surf.y, p.z + _surf.z);
         // Pulse the halo opacity during "deploying" phase.
         const alpha = sc.alpha ?? 1;
         if (scGroup.userData.haloMat) {
@@ -2967,33 +2977,32 @@ function Track3D({
         labelLayer.style.display = "block";
         const w2 = renderer.domElement.clientWidth;
         const h2 = renderer.domElement.clientHeight;
-        const vp = new THREE.Vector3();
         for (const [code, entry] of driverMap) {
           // Hide the pinned driver's own label in POV — they're the camera.
           if (inPov && code === live.pinned) { entry.label.style.display = "none"; continue; }
           const firstBody = entry.group.userData.body[0];
           if (!firstBody || !firstBody.visible) { entry.label.style.display = "none"; continue; }
-          vp.copy(entry.group.position);
-          vp.y += 3;
-          vp.project(camera);
-          if (vp.z < -1 || vp.z > 1) { entry.label.style.display = "none"; continue; }
-          const px = (vp.x * 0.5 + 0.5) * w2;
-          const py = (-vp.y * 0.5 + 0.5) * h2;
+          _vp.copy(entry.group.position);
+          _vp.y += 3;
+          _vp.project(camera);
+          if (_vp.z < -1 || _vp.z > 1) { entry.label.style.display = "none"; continue; }
+          const px = (_vp.x * 0.5 + 0.5) * w2;
+          const py = (-_vp.y * 0.5 + 0.5) * h2;
           entry.label.style.display = "block";
           entry.label.style.left = `${px}px`;
           entry.label.style.top = `${py}px`;
         }
         // SC label.
         if (scLabel && scGroup?.visible) {
-          vp.copy(scGroup.position);
-          vp.y += 3;
-          vp.project(camera);
-          if (vp.z < -1 || vp.z > 1) {
+          _vp.copy(scGroup.position);
+          _vp.y += 3;
+          _vp.project(camera);
+          if (_vp.z < -1 || _vp.z > 1) {
             scLabel.style.display = "none";
           } else {
             scLabel.style.display = "block";
-            scLabel.style.left = `${(vp.x * 0.5 + 0.5) * w2}px`;
-            scLabel.style.top = `${(-vp.y * 0.5 + 0.5) * h2}px`;
+            scLabel.style.left = `${(_vp.x * 0.5 + 0.5) * w2}px`;
+            scLabel.style.top = `${(-_vp.y * 0.5 + 0.5) * h2}px`;
           }
         }
       } else {

@@ -11,12 +11,17 @@ function LiveProvider({ children }) {
   const [trackStatuses, setTrackStatuses] = React.useState([]);
 
   React.useEffect(() => {
+    let lastFrameT = null;
+    let wasPaused = true;
+
     const h = window.APEX_CLIENT.openSocket((msg) => {
       if (msg.type === "loading") {
         setLoading({ status: msg.status || "loading", progress: msg.progress || 0, message: msg.message });
       } else if (msg.type === "snapshot" || msg.type === "reset") {
         setLoading({ status: "ready", progress: 100 });
         if (window.APEX?.clearLapTelemetry) window.APEX.clearLapTelemetry();
+        window.__LIVE_BUFFER?.clear?.();
+        lastFrameT = null;
         setSnap(msg);
         window.__LIVE_SNAPSHOT = msg;
         setRcHistory([...(msg.race_control_history || [])].sort((a, b) => (a.time || 0) - (b.time || 0)));
@@ -50,16 +55,29 @@ function LiveProvider({ children }) {
             new_rc_events: [],
           };
           window.__LIVE_FRAME = snapFrame;
+          window.__LIVE_BUFFER?.push?.(snapFrame);
           if (window.APEX?._accumulateFrame) window.APEX._accumulateFrame(snapFrame);
+          lastFrameT = snapT;
+          wasPaused = true;
           setFrame(snapFrame);
         }
       } else if (msg.type === "frame") {
+        const currentT = msg.t_seconds ?? msg.t ?? 0;
+        const isPaused = msg.is_paused ?? false;
+        const timeDelta = lastFrameT != null ? Math.abs(currentT - lastFrameT) : 0;
+        const shouldResetBuffer = isPaused !== wasPaused || timeDelta > 0.5;
+
+        if (shouldResetBuffer) {
+          window.__LIVE_BUFFER?.clear?.();
+        }
+
         window.__LIVE_FRAME = msg;
+        window.__LIVE_BUFFER?.push?.(msg);
         if (window.APEX?._accumulateFrame) window.APEX._accumulateFrame(msg);
         setFrame(msg);
         setPb((p) => ({ ...p, speed: msg.playback_speed, is_paused: msg.is_paused }));
-        // new_rc_events are already in rcHistory from the snapshot; ignore them
-        // here to keep history immutable and the feed derived from playback time.
+        lastFrameT = currentT;
+        wasPaused = isPaused;
       }
     });
     return () => h.close();
