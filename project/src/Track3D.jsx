@@ -2665,8 +2665,12 @@ function Track3D({
 
       // Sample interpolated standings if available and enabled
       const tRender = now - 80;
-      let standings = (window.APEX?.INTERPOLATE !== false && window.APEX.sampleStandingsAt?.(tRender)) ||
-                      live.standings || [];
+      let standings;
+      if (window.APEX?.INTERPOLATE !== false && window.APEX.sampleStandingsAt) {
+        standings = window.APEX.sampleStandingsAt(tRender) || live.standings || [];
+      } else {
+        standings = live.standings || [];
+      }
 
       // Reconcile drivers.
       const seen = new Set();

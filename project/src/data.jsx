@@ -468,13 +468,20 @@ function sampleStandingsAt(tRender) {
   if (buf.length < 1) return null;
   if (buf.length === 1) {
     const f = buf[0];
-    return f.standings || null;
+    const standings = f.standings || [];
+    return enrichStandingsWithDrivers(standings);
   }
   const recv0 = buf[0]._recvT;
   const recvN = buf[buf.length - 1]._recvT;
   const tSpan = recvN - recv0;
-  if (tSpan === 0 || tRender < recv0) return buf[0].standings || null;
-  if (tRender >= recvN) return buf[buf.length - 1].standings || null;
+  if (tSpan === 0 || tRender < recv0) {
+    const standings = buf[0].standings || [];
+    return enrichStandingsWithDrivers(standings);
+  }
+  if (tRender >= recvN) {
+    const standings = buf[buf.length - 1].standings || [];
+    return enrichStandingsWithDrivers(standings);
+  }
 
   let lo = 0, hi = buf.length;
   while (lo < hi) {
@@ -484,7 +491,10 @@ function sampleStandingsAt(tRender) {
   }
   lo = Math.max(0, lo - 1);
   const i0 = lo, i1 = Math.min(lo + 1, buf.length - 1);
-  if (i0 === i1) return buf[i0].standings || null;
+  if (i0 === i1) {
+    const standings = buf[i0].standings || [];
+    return enrichStandingsWithDrivers(standings);
+  }
 
   const f0 = buf[i0];
   const f1 = buf[i1];
@@ -519,7 +529,16 @@ function sampleStandingsAt(tRender) {
     });
   }
 
-  return result.sort((a, b) => (a.pos || 0) - (b.pos || 0));
+  return enrichStandingsWithDrivers(result.sort((a, b) => (a.pos || 0) - (b.pos || 0)));
+}
+
+function enrichStandingsWithDrivers(standings) {
+  if (!standings || standings.length === 0) return [];
+  return standings.map(s => {
+    if (s.driver) return s;
+    const d = DRIVERS.find(x => x.code === s.code) || { code: s.code, num: 0, name: s.code, team: "Unknown", country: "" };
+    return { ...s, driver: d };
+  });
 }
 
 window.APEX = {
