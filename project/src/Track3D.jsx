@@ -22,6 +22,7 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { SMAAPass } from "three/examples/jsm/postprocessing/SMAAPass.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 // Quality presets — control the rendering cost/quality trade-off.
@@ -35,10 +36,13 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 // run — the multisample resolve cost scales linearly with samples and is the
 // largest fixed-cost pass after bloom. samples=4 is left available but no
 // longer the default at "high".
+// `smaa` adds a post-tonemap SMAA pass (3 cheap fullscreen passes, ~0.3-1 ms
+// on desktop GPUs). Catches the shader/spec-edge crawl that geometry-only
+// MSAA can't see; complements rather than replaces MSAA.
 const QUALITY_PRESETS = {
-  low:  { dprCap: 1.0, shadowSize: 512,  msaa: 0, bloom: false, bloomScale: 0    },
-  med:  { dprCap: 1.5, shadowSize: 1024, msaa: 2, bloom: false, bloomScale: 0    },
-  high: { dprCap: 2.0, shadowSize: 2048, msaa: 2, bloom: true,  bloomScale: 0.35 },
+  low:  { dprCap: 1.0, shadowSize: 512,  msaa: 0, bloom: false, bloomScale: 0,    smaa: false },
+  med:  { dprCap: 1.5, shadowSize: 1024, msaa: 2, bloom: false, bloomScale: 0,    smaa: true  },
+  high: { dprCap: 2.0, shadowSize: 2048, msaa: 2, bloom: true,  bloomScale: 0.35, smaa: true  },
 };
 
 // Track dimensions (metres).
@@ -3158,6 +3162,11 @@ function Track3D({
     });
     composer.addPass(vignettePass);
     composer.addPass(new OutputPass());
+    // SMAA runs last (post-tonemap) so it operates in display space where
+    // the algorithm's edge detector is calibrated. composer.setSize cascades
+    // to the pass automatically on resize.
+    const smaaPass = qp.smaa ? new SMAAPass(1, 1) : null;
+    if (smaaPass) composer.addPass(smaaPass);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
