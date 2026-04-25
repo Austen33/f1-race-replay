@@ -26,13 +26,19 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 // Quality presets — control the rendering cost/quality trade-off.
 // `bloomScale` downsamples the bloom pyramid render target (1.0 = full screen,
-// 0.5 = quarter-area). UnrealBloomPass is the single most expensive pass; on
-// mid GPUs even a 0.5 scale is visually indistinguishable from 1.0 because
-// bloom is heavily blurred anyway.
+// 0.5 = quarter-area, 0.35 ≈ eighth-area). UnrealBloomPass is the single most
+// expensive pass; on mid GPUs even a 0.35 scale is visually indistinguishable
+// from 1.0 because bloom is heavily blurred anyway.
+//
+// MSAA: on a HalfFloat HDR target at DPR ≥ 1.5, samples=2 is visually
+// indistinguishable from samples=4 once post-fx (bloom + vignette + ACES) has
+// run — the multisample resolve cost scales linearly with samples and is the
+// largest fixed-cost pass after bloom. samples=4 is left available but no
+// longer the default at "high".
 const QUALITY_PRESETS = {
-  low:  { dprCap: 1.0, shadowSize: 512,  msaa: 0, bloom: false, bloomScale: 0   },
-  med:  { dprCap: 1.5, shadowSize: 1024, msaa: 2, bloom: false, bloomScale: 0   },
-  high: { dprCap: 2.0, shadowSize: 2048, msaa: 4, bloom: true,  bloomScale: 0.5 },
+  low:  { dprCap: 1.0, shadowSize: 512,  msaa: 0, bloom: false, bloomScale: 0    },
+  med:  { dprCap: 1.5, shadowSize: 1024, msaa: 2, bloom: false, bloomScale: 0    },
+  high: { dprCap: 2.0, shadowSize: 2048, msaa: 2, bloom: true,  bloomScale: 0.35 },
 };
 
 // Track dimensions (metres).
@@ -394,6 +400,45 @@ function makeKerbStripeTexture() {
   return tex;
 }
 
+// Module-scope texture cache. The procedural textures are deterministic and
+// circuit-independent, so regenerating the canvas pixel data on every scene
+// rebuild (geoVersion/qualityVersion/todKey change) was wasted work. We cache
+// the produced THREE.CanvasTexture and return a lightweight Texture wrapping
+// the same `image` (canvas) for each scene — that lets each consumer set its
+// own `repeat` / `wrapS` / `colorSpace` without invalidating the GPU upload
+// on the shared instance.
+const TEX_CACHE = {
+  asphalt: null, asphaltNormal: null, runoff: null, grass: null,
+  gravel: null, armco: null, concrete: null, kerb: null,
+};
+function cachedTex(key, factory) {
+  if (!TEX_CACHE[key]) TEX_CACHE[key] = factory();
+  // Wrap the cached canvas in a fresh Texture so repeat/wrap can be tuned
+  // per-mesh. The image data is shared so the GPU upload (the expensive part)
+  // is reused across all scenes built since module load.
+  const src = TEX_CACHE[key];
+  const tex = new THREE.CanvasTexture(src.image);
+  tex.wrapS = src.wrapS;
+  tex.wrapT = src.wrapT;
+  tex.anisotropy = src.anisotropy;
+  tex.colorSpace = src.colorSpace;
+  return tex;
+}
+
+// Module-scope PMREM environment cache. RoomEnvironment is a fixed neutral
+// studio — keyed only on the renderer's existence, not on circuit/quality.
+let _pmremEnv = null;
+let _pmremRendererRef = null;
+function getRoomEnvironment(renderer) {
+  if (_pmremEnv && _pmremRendererRef === renderer) return _pmremEnv;
+  if (_pmremEnv) _pmremEnv.dispose();
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  _pmremEnv = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  _pmremRendererRef = renderer;
+  pmrem.dispose();
+  return _pmremEnv;
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Curve + ribbon geometry.
 // ───────────────────────────────────────────────────────────────────────────
@@ -416,7 +461,65 @@ function buildCenterlineCurve(circuit, zBase, scale) {
     pts.pop();
   }
   const closed = pts.length >= 3;
-  return new THREE.CatmullRomCurve3(pts, closed, "centripetal", 0.5);
+  const curve = new THREE.CatmullRomCurve3(pts, closed, "centripetal", 0.5);
+  // Arc-length divisions drive the accuracy of `getPointAt`/`getTangentAt`,
+  // which sample uniformly along the curve's arc length rather than its
+  // parameter t. Default (200) is too coarse for tracks up to ~7 km — bump
+  // to ~`pts.length` so kerb stripes / racing-line dashes stay evenly
+  // spaced through tight hairpins and long straights alike.
+  curve.arcLengthDivisions = Math.max(400, pts.length * 2);
+  return curve;
+}
+
+// Per-curve frame cache. Each ribbon helper used to walk the curve from
+// scratch — for ~12 ribbons × 2000 segments, that's ~24k getPointAt +
+// getTangentAt calls during scene build, plus the "stable right" rolling
+// frame computation duplicated each time. We sample once per (curve,
+// segments) and reuse the Float32 arrays for every consumer.
+//
+// Returns interleaved buffers:
+//   points:   [x0,y0,z0, x1,y1,z1, ...]                — `(N+1) * 3`
+//   tangents: [tx,ty,tz, ...]                          — `(N+1) * 3`
+//   rights:   [rx,ry,rz, ...] (in track plane, world-up biased) — `(N+1) * 3`
+const _frameCache = new WeakMap(); // curve → Map<segments, frames>
+function sampleCurveFrames(curve, segments) {
+  let bySeg = _frameCache.get(curve);
+  if (!bySeg) {
+    bySeg = new Map();
+    _frameCache.set(curve, bySeg);
+  }
+  const cached = bySeg.get(segments);
+  if (cached) return cached;
+
+  const N = segments + 1;
+  const points = new Float32Array(N * 3);
+  const tangents = new Float32Array(N * 3);
+  const rights = new Float32Array(N * 3);
+  const up = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3();
+  const prevRight = new THREE.Vector3();
+  const tan = new THREE.Vector3();
+  let havePrevRight = false;
+
+  for (let i = 0; i < N; i++) {
+    const t = i / segments;
+    const p = curve.getPointAt(t);
+    curve.getTangentAt(t, tan);
+    havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
+    points[i * 3 + 0] = p.x;
+    points[i * 3 + 1] = p.y;
+    points[i * 3 + 2] = p.z;
+    tangents[i * 3 + 0] = tan.x;
+    tangents[i * 3 + 1] = tan.y;
+    tangents[i * 3 + 2] = tan.z;
+    rights[i * 3 + 0] = right.x;
+    rights[i * 3 + 1] = right.y;
+    rights[i * 3 + 2] = right.z;
+  }
+
+  const frames = { points, tangents, rights, count: N };
+  bySeg.set(segments, frames);
+  return frames;
 }
 
 function updateStableRight(tan, up, right, prevRight, havePrevRight) {
@@ -436,6 +539,10 @@ function updateStableRight(tan, up, right, prevRight, havePrevRight) {
 // Ribbon of constant half-width along the curve. `yLift` puts layered ribbons
 // (runoff, track, kerbs) on separate tiny y-planes to avoid z-fighting.
 // `uvRepeat` controls how many times the texture tiles along the length.
+//
+// Uses arc-length-uniform sampling (`getPointAt`/`getTangentAt`) so segments
+// represent equal real-world distance — kerb stripes stay evenly spaced
+// through hairpins instead of bunching where the parametric `t` compresses.
 function buildRibbonGeometry(curve, segments, halfWidth, yLift, uvRepeat = 80) {
   const positions = new Float32Array((segments + 1) * 2 * 3);
   const uvs = new Float32Array((segments + 1) * 2 * 2);
@@ -448,8 +555,8 @@ function buildRibbonGeometry(curve, segments, halfWidth, yLift, uvRepeat = 80) {
 
   for (let i = 0; i <= segments; i++) {
     const t = i / segments;
-    const p = curve.getPoint(t);
-    curve.getTangent(t, tan);
+    const p = curve.getPointAt(t);
+    curve.getTangentAt(t, tan);
     havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
     positions[i * 6 + 0] = p.x - right.x * halfWidth;
     positions[i * 6 + 1] = p.y + yLift;
@@ -520,32 +627,28 @@ function buildVerticalRibbonGeometry(curve, segments, offset, width, yLift, heig
   const positions = new Float32Array((segments + 1) * 4 * 3);
   const uvs = new Float32Array((segments + 1) * 4 * 2);
   const indices = [];
-  const up = new THREE.Vector3(0, 1, 0);
-  const right = new THREE.Vector3();
-  const prevRight = new THREE.Vector3();
-  const tan = new THREE.Vector3();
-  let havePrevRight = false;
   const half = width * 0.5;
+  const frames = sampleCurveFrames(curve, segments);
+  const fp = frames.points, fr = frames.rights;
   for (let i = 0; i <= segments; i++) {
     const t = i / segments;
-    const p = curve.getPoint(t);
-    curve.getTangent(t, tan);
-    havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
+    const px = fp[i * 3], py = fp[i * 3 + 1], pz = fp[i * 3 + 2];
+    const rx = fr[i * 3], rz = fr[i * 3 + 2];
     const inner = offset - half;
     const outer = offset + half;
     const base = i * 12;
-    positions[base + 0] = p.x + right.x * inner;
-    positions[base + 1] = p.y + yLift;
-    positions[base + 2] = p.z + right.z * inner;
-    positions[base + 3] = p.x + right.x * outer;
-    positions[base + 4] = p.y + yLift;
-    positions[base + 5] = p.z + right.z * outer;
-    positions[base + 6] = p.x + right.x * inner;
-    positions[base + 7] = p.y + yLift + height;
-    positions[base + 8] = p.z + right.z * inner;
-    positions[base + 9] = p.x + right.x * outer;
-    positions[base + 10] = p.y + yLift + height;
-    positions[base + 11] = p.z + right.z * outer;
+    positions[base + 0] = px + rx * inner;
+    positions[base + 1] = py + yLift;
+    positions[base + 2] = pz + rz * inner;
+    positions[base + 3] = px + rx * outer;
+    positions[base + 4] = py + yLift;
+    positions[base + 5] = pz + rz * outer;
+    positions[base + 6] = px + rx * inner;
+    positions[base + 7] = py + yLift + height;
+    positions[base + 8] = pz + rz * inner;
+    positions[base + 9] = px + rx * outer;
+    positions[base + 10] = py + yLift + height;
+    positions[base + 11] = pz + rz * outer;
 
     const uvBase = i * 8;
     uvs[uvBase + 0] = 0; uvs[uvBase + 1] = t * uvRepeat;
@@ -637,35 +740,31 @@ function buildExtrudedRibbonGeometry(curve, segments, halfWidth, baseY, thicknes
   const positions = new Float32Array((segments + 1) * vertsPerRing * 3);
   const uvs = new Float32Array((segments + 1) * vertsPerRing * 2);
   const indices = [];
-  const up = new THREE.Vector3(0, 1, 0);
-  const right = new THREE.Vector3();
-  const prevRight = new THREE.Vector3();
-  const tan = new THREE.Vector3();
-  let havePrevRight = false;
+  const frames = sampleCurveFrames(curve, segments);
+  const fp = frames.points, fr = frames.rights;
   for (let i = 0; i <= segments; i++) {
     const t = i / segments;
-    const p = curve.getPoint(t);
-    curve.getTangent(t, tan);
-    havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
-    const yTop = p.y + baseY + thickness;
-    const yBot = p.y + baseY;
+    const px = fp[i * 3], py = fp[i * 3 + 1], pz = fp[i * 3 + 2];
+    const rx = fr[i * 3], rz = fr[i * 3 + 2];
+    const yTop = py + baseY + thickness;
+    const yBot = py + baseY;
     const base = i * vertsPerRing * 3;
     // top-left
-    positions[base + 0] = p.x - right.x * halfWidth;
+    positions[base + 0] = px - rx * halfWidth;
     positions[base + 1] = yTop;
-    positions[base + 2] = p.z - right.z * halfWidth;
+    positions[base + 2] = pz - rz * halfWidth;
     // top-right
-    positions[base + 3] = p.x + right.x * halfWidth;
+    positions[base + 3] = px + rx * halfWidth;
     positions[base + 4] = yTop;
-    positions[base + 5] = p.z + right.z * halfWidth;
+    positions[base + 5] = pz + rz * halfWidth;
     // bot-left
-    positions[base + 6] = p.x - right.x * halfWidth;
+    positions[base + 6] = px - rx * halfWidth;
     positions[base + 7] = yBot;
-    positions[base + 8] = p.z - right.z * halfWidth;
+    positions[base + 8] = pz - rz * halfWidth;
     // bot-right
-    positions[base + 9]  = p.x + right.x * halfWidth;
+    positions[base + 9]  = px + rx * halfWidth;
     positions[base + 10] = yBot;
-    positions[base + 11] = p.z + right.z * halfWidth;
+    positions[base + 11] = pz + rz * halfWidth;
     // UVs: top face uses (0..1, t*repeat). Side walls reuse u=0/1 plus the
     // same length coord so texturing is continuous.
     const uvBase = i * vertsPerRing * 2;
@@ -700,24 +799,20 @@ function buildEdgeLineGeometry(curve, segments, offset, width, yLift, uvRepeat =
   const positions = new Float32Array((segments + 1) * 2 * 3);
   const uvs = new Float32Array((segments + 1) * 2 * 2);
   const indices = [];
-  const up = new THREE.Vector3(0, 1, 0);
-  const right = new THREE.Vector3();
-  const prevRight = new THREE.Vector3();
-  const tan = new THREE.Vector3();
-  let havePrevRight = false;
   const half = width * 0.5;
+  const frames = sampleCurveFrames(curve, segments);
+  const fp = frames.points, fr = frames.rights;
   for (let i = 0; i <= segments; i++) {
     const t = i / segments;
-    const p = curve.getPoint(t);
-    curve.getTangent(t, tan);
-    havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
+    const px = fp[i * 3], py = fp[i * 3 + 1], pz = fp[i * 3 + 2];
+    const rx = fr[i * 3], rz = fr[i * 3 + 2];
     const inner = offset - half, outer = offset + half;
-    positions[i * 6 + 0] = p.x + right.x * inner;
-    positions[i * 6 + 1] = p.y + yLift;
-    positions[i * 6 + 2] = p.z + right.z * inner;
-    positions[i * 6 + 3] = p.x + right.x * outer;
-    positions[i * 6 + 4] = p.y + yLift;
-    positions[i * 6 + 5] = p.z + right.z * outer;
+    positions[i * 6 + 0] = px + rx * inner;
+    positions[i * 6 + 1] = py + yLift;
+    positions[i * 6 + 2] = pz + rz * inner;
+    positions[i * 6 + 3] = px + rx * outer;
+    positions[i * 6 + 4] = py + yLift;
+    positions[i * 6 + 5] = pz + rz * outer;
     uvs[i * 4 + 0] = 0; uvs[i * 4 + 1] = t * uvRepeat;
     uvs[i * 4 + 2] = 1; uvs[i * 4 + 3] = t * uvRepeat;
     if (i < segments) {
@@ -759,8 +854,8 @@ function buildKerbGeometry(curve, segments, innerOffset, outerOffset, side, kerb
   // Stripe boundaries split the ring so each band has its own pair.
   let lastBand = -1;
   const pushRing = (t, band) => {
-    const p = curve.getPoint(t);
-    curve.getTangent(t, tan);
+    const p = curve.getPointAt(t);
+    curve.getTangentAt(t, tan);
     havePrevRight = updateStableRight(tan, up, right, prevRight, havePrevRight);
     const inner = side * innerOffset;
     const outer = side * outerOffset;
@@ -938,7 +1033,7 @@ function buildStartFinishMesh(curve, halfWidth) {
 function buildRacingLineMesh(curve, segments) {
   const pts = [];
   for (let i = 0; i <= segments; i++) {
-    const p = curve.getPoint(i / segments);
+    const p = curve.getPointAt(i / segments);
     pts.push(new THREE.Vector3(p.x, p.y + 0.39, p.z));
   }
   const geom = new THREE.BufferGeometry().setFromPoints(pts);
@@ -966,6 +1061,22 @@ const gltfLoader = new GLTFLoader();
 // The model path is relative to the HTML page (served from dist/assets/).
 const CAR_MODEL_PATH = "assets/f1-car.glb";
 let _baseModelPromise = null;
+
+// Per-team material cache: each team's coloured body material is built once
+// and reused for every driver on that team. Two drivers per team × 10 teams
+// → 10 materials total instead of 20 deep-cloned ones. Wheels share a single
+// black material across all teams. Materials must remain unique per
+// transparent state because we toggle opacity for PIT/DNS — but the bulk of
+// the grid stays opaque, so the cache pays off.
+const _teamBodyMatCache = new Map(); // key: team color hex string → material[]
+const _wheelMatCache = { mat: null };
+function getWheelMaterial(template) {
+  if (_wheelMatCache.mat) return _wheelMatCache.mat;
+  const m = template.clone();
+  if (m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) m.color.set(0x0a0a0a);
+  _wheelMatCache.mat = m;
+  return m;
+}
 
 function loadBaseCarModel() {
   if (_baseModelPromise) return _baseModelPromise;
@@ -1097,9 +1208,62 @@ function makeFallbackMarker(team) {
   return g;
 }
 
+// Soft round shadow under each car. Cheap fake of a contact shadow — sells
+// "the car is touching the ground" without paying for a real shadow map. A
+// single radial-gradient texture is built once and shared as a sprite-style
+// PlaneGeometry under every car. Shared geometry + material → near-zero cost.
+let _blobShadowTex = null;
+let _blobShadowGeom = null;
+let _blobShadowMat = null;
+function getBlobShadowAssets() {
+  if (!_blobShadowTex) {
+    const size = 128;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    grad.addColorStop(0.0, "rgba(0,0,0,0.55)");
+    grad.addColorStop(0.5, "rgba(0,0,0,0.28)");
+    grad.addColorStop(1.0, "rgba(0,0,0,0.0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+    _blobShadowTex = new THREE.CanvasTexture(canvas);
+    _blobShadowTex.colorSpace = THREE.SRGBColorSpace;
+  }
+  if (!_blobShadowGeom) {
+    // Slightly elongated along X (car forward) so the blob reads as a body
+    // shadow rather than a perfect circle. Lifted just above the track top.
+    _blobShadowGeom = new THREE.PlaneGeometry(CAR_LENGTH * 0.95, CAR_WIDTH * 1.6);
+    _blobShadowGeom.rotateX(-Math.PI / 2);
+  }
+  if (!_blobShadowMat) {
+    _blobShadowMat = new THREE.MeshBasicMaterial({
+      map: _blobShadowTex,
+      transparent: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+      toneMapped: false,
+    });
+  }
+  return { geom: _blobShadowGeom, mat: _blobShadowMat };
+}
+
 // Add indicator overlays (ground halo, brake/DRS lamps, compound dot) to a
 // car group. These are functional indicators that sit on top of any car model.
 function addIndicatorOverlays(g, color) {
+  // Soft contact shadow blob — shared geometry + material across all cars.
+  const blob = getBlobShadowAssets();
+  const blobMesh = new THREE.Mesh(blob.geom, blob.mat);
+  // Sit just above the track top (track top sits at the car group's local Y=0
+  // by virtue of the surface offset applied in the animate loop). A small
+  // positive Y prevents z-fighting with kerb/edge lines.
+  blobMesh.position.y = 0.012;
+  blobMesh.renderOrder = 2;
+  g.add(blobMesh);
+  g.userData.blobShadow = blobMesh;
+
   // DRS indicator — a thin strip on the top of the rear that lights up blue.
   const drsMat = new THREE.MeshBasicMaterial({
     color: 0x00d9ff, transparent: true, opacity: 0.0,
@@ -1164,23 +1328,47 @@ function makeDriverMarker(team) {
   // depends on.
   loadBaseCarModel().then((baseModel) => {
     const clone = baseModel.clone();
-    // Clone geometry so each spawned car owns and disposes its own buffers.
-    // The cached base model stays pristine for future clones/rebuilds.
-    clone.traverse((child) => {
-      if (child.isMesh && child.geometry) {
-        child.geometry = child.geometry.clone();
-      }
-    });
-    // Deep-clone materials so each car gets its own instances. Without this,
-    // Object3D.clone() shares materials and tinting one car tints all of them.
+    // Geometry is shared across all cars (it's identical — only colour
+    // differs). Object3D.clone() already shares the underlying BufferGeometry
+    // by default; we deliberately do NOT call geometry.clone() here. The
+    // module-level cleanup walks the scene graph and disposes geometry once,
+    // so individual scene rebuilds don't poison the shared buffers.
+    //
+    // Materials are shared per team via _teamBodyMatCache: each team colour
+    // owns one MeshStandardMaterial reused for every driver on that team,
+    // plus one global wheel material. Cars that need transparency (PIT, DNS)
+    // get a fresh per-car clone the first time that state is hit.
+    const teamKey = `#${color.getHexString()}`;
+    let cachedBodyMats = _teamBodyMatCache.get(teamKey);
     const matMap = new Map();
     clone.traverse((child) => {
       if (!child.isMesh) return;
-      if (child.material && !matMap.has(child.material)) {
-        matMap.set(child.material, child.material.clone());
+      if (!child.material) return;
+      const matName = (child.material.name || "").toLowerCase();
+      const isWheelMat = matName.includes("wheel") || matName.includes("tire") || matName.includes("tyre");
+      if (isWheelMat) {
+        child.material = getWheelMaterial(child.material);
+        return;
       }
-      child.material = matMap.get(child.material);
+      // Body material: reuse the team-cached version if we have one.
+      if (cachedBodyMats && cachedBodyMats.has(child.material.uuid)) {
+        child.material = cachedBodyMats.get(child.material.uuid);
+        return;
+      }
+      // Fresh team — clone and tint the material once, store in the cache.
+      if (!matMap.has(child.material.uuid)) {
+        const cloned = child.material.clone();
+        if (cloned.isMeshStandardMaterial || cloned.isMeshPhysicalMaterial) {
+          cloned.color.copy(color);
+        }
+        matMap.set(child.material.uuid, cloned);
+      }
+      child.material = matMap.get(child.material.uuid);
     });
+    if (!cachedBodyMats && matMap.size > 0) {
+      _teamBodyMatCache.set(teamKey, matMap);
+      cachedBodyMats = matMap;
+    }
     // Collect all meshes in the clone for the animation loop hooks.
     // Separate wheels from body parts so team colour is applied to the
     // body only, not the wheels. Use material name as the primary heuristic
@@ -1221,21 +1409,8 @@ function makeDriverMarker(team) {
     // wheels together — rotating those meshes would tumble the whole set
     // like a helicopter rather than spinning each wheel individually.
     if (wheels.length < 4) wheelsAreSeparateMeshes = false;
-    // Apply team livery colour to body materials only (not wheels).
-    // The GLB model uses plain #000000 materials — tint them with the team
-    // colour so each car is visually distinct. Only override the albedo
-    // colour; leave roughness, metalness, emissive etc. intact.
-    for (const mat of bodyMats) {
-      if (mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial) {
-        mat.color.copy(color);
-      }
-    }
-    // Force wheel/tyre materials to black — they should never be coloured.
-    for (const mat of wheelMats) {
-      if (mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial) {
-        mat.color.set(0x0a0a0a);
-      }
-    }
+    // Body/wheel materials are already team-tinted / wheel-blackened by the
+    // cache resolver above — no per-instance recolouring needed.
     // Scale the GLB model to match the scene's car dimensions. The model's
     // native size is unknown until loaded, so we normalise it to fit within
     // the CAR_LENGTH × CAR_WIDTH bounding box.
@@ -1760,27 +1935,41 @@ function buildStadiumLights(center, extent, yBase, config) {
   const lights = [];
   const height = extent * config.heightFactor;
   const radius = extent * config.radiusFactor;
+  // Pylons + caps batched into one InstancedMesh each so the whole ring is
+  // 2 draw calls (plus the PointLights, which can't be instanced).
   const pylonGeom = new THREE.BoxGeometry(4, height, 4);
   const pylonMat = new THREE.MeshBasicMaterial({ color: 0x181a20 });
+  const pylonInst = new THREE.InstancedMesh(pylonGeom, pylonMat, config.count);
   const capGeom = new THREE.BoxGeometry(18, 3, 6);
   const capMat = new THREE.MeshBasicMaterial({ color: 0xf4f7ff, toneMapped: false });
+  const capInst = new THREE.InstancedMesh(capGeom, capMat, config.count);
+  const dummy = new THREE.Object3D();
   const lightRange = extent * 1.4;
   for (let i = 0; i < config.count; i++) {
     const a = (i / config.count) * Math.PI * 2 + 0.15;
     const px = center.x + Math.cos(a) * radius;
     const pz = center.z + Math.sin(a) * radius;
-    const pylon = new THREE.Mesh(pylonGeom, pylonMat);
-    pylon.position.set(px, yBase + height * 0.5, pz);
-    g.add(pylon);
-    const cap = new THREE.Mesh(capGeom, capMat);
-    cap.position.set(px, yBase + height, pz);
-    cap.lookAt(center.x, yBase + height, center.z);
-    g.add(cap);
+    // Pylon: vertical box at the perimeter.
+    dummy.position.set(px, yBase + height * 0.5, pz);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    pylonInst.setMatrixAt(i, dummy.matrix);
+    // Cap: oriented to face the centre.
+    const capPos = new THREE.Vector3(px, yBase + height, pz);
+    dummy.position.copy(capPos);
+    dummy.lookAt(center.x, yBase + height, center.z);
+    dummy.updateMatrix();
+    capInst.setMatrixAt(i, dummy.matrix);
     const pl = new THREE.PointLight(config.color, config.intensity, lightRange, 1.6);
     pl.position.set(px, yBase + height * 0.95, pz);
     g.add(pl);
     lights.push(pl);
   }
+  pylonInst.instanceMatrix.needsUpdate = true;
+  capInst.instanceMatrix.needsUpdate = true;
+  g.add(pylonInst);
+  g.add(capInst);
   g.userData.lights = lights;
   return g;
 }
@@ -1838,32 +2027,40 @@ function buildHorizonHills(center, extent, yBase) {
 
 // Closer-in grandstand silhouette: low boxes scattered on the inner ring.
 // Only ~24 of them so they read as accents, not a fence.
+//
+// Single InstancedMesh: 22 boxes batched into one draw call instead of 22.
+// Per-instance matrix carries position/rotation/scale; per-instance colour
+// gives the accent mix without unique materials.
 function buildGrandstands(center, extent, yBase) {
-  const g = new THREE.Group();
   const radius = extent * 1.15;
   const count = 22;
   const baseColor = new THREE.Color(0x1c1d28);
   const accentColor = new THREE.Color(0x322438);
+  // Unit box; each instance scales it to (w, h, d).
+  const geom = new THREE.BoxGeometry(1, 1, 1);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const inst = new THREE.InstancedMesh(geom, mat, count);
+  const dummy = new THREE.Object3D();
   for (let i = 0; i < count; i++) {
     const a = (i / count) * Math.PI * 2 + Math.random() * 0.1;
     const r = radius * (0.92 + Math.random() * 0.18);
     const h = 8 + Math.random() * 14;
     const w = 50 + Math.random() * 90;
     const d = 22 + Math.random() * 30;
-    const col = Math.random() > 0.7 ? accentColor : baseColor;
-    const m = new THREE.Mesh(
-      new THREE.BoxGeometry(w, h, d),
-      new THREE.MeshBasicMaterial({ color: col }),
-    );
-    m.position.set(
+    dummy.position.set(
       center.x + Math.cos(a) * r,
       yBase + h * 0.5,
       center.z + Math.sin(a) * r,
     );
-    m.rotation.y = -a + Math.PI * 0.5 + (Math.random() - 0.5) * 0.4;
-    g.add(m);
+    dummy.rotation.set(0, -a + Math.PI * 0.5 + (Math.random() - 0.5) * 0.4, 0);
+    dummy.scale.set(w, h, d);
+    dummy.updateMatrix();
+    inst.setMatrixAt(i, dummy.matrix);
+    inst.setColorAt(i, Math.random() > 0.7 ? accentColor : baseColor);
   }
-  return g;
+  inst.instanceMatrix.needsUpdate = true;
+  if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+  return inst;
 }
 
 function buildRain(bbox) {
@@ -2257,7 +2454,7 @@ function Track3D({
 
     // Ground plane — broad grass field around the circuit.
     const groundSize = extent * 6;
-    const grassTex = makeGrassTexture();
+    const grassTex = cachedTex("grass", makeGrassTexture);
     grassTex.repeat.set(groundSize / 120, groundSize / 120);
     const groundGeom = new THREE.PlaneGeometry(groundSize, groundSize, 1, 1);
     groundGeom.rotateX(-Math.PI / 2);
@@ -2281,7 +2478,7 @@ function Track3D({
     const GRASS_STRIP_WIDTH = 7.5;
     const VERGE_INNER = TRACK_WIDTH + KERB_WIDTH;
     const VERGE_CENTER = VERGE_INNER + GRASS_STRIP_WIDTH * 0.5;
-    const vergeTex = makeGrassTexture();
+    const vergeTex = cachedTex("grass", makeGrassTexture);
     vergeTex.repeat.set(1, 90);
     const vergeMat = new THREE.MeshBasicMaterial({
       color: 0x2d7a3a, map: vergeTex, toneMapped: false,
@@ -2301,7 +2498,7 @@ function Track3D({
     const RUNOFF_INNER = VERGE_INNER + GRASS_STRIP_WIDTH;
     const RUNOFF_STRIP_WIDTH = RUNOFF_WIDTH - RUNOFF_INNER;
     const RUNOFF_STRIP_CENTER = RUNOFF_INNER + RUNOFF_STRIP_WIDTH * 0.5;
-    const runoffTex = makeRunoffAsphaltTexture();
+    const runoffTex = cachedTex("runoff", makeRunoffAsphaltTexture);
     runoffTex.repeat.set(2, 80);
     const runoffMat = new THREE.MeshBasicMaterial({
       color: runoffDryColor, map: runoffTex, toneMapped: false,
@@ -2336,9 +2533,9 @@ function Track3D({
     const TRACK_TOP_Y = TRACK_BASE_Y + TRACK_THICKNESS;
     const curveLenApprox = extent * Math.PI;
     const trackUv = Math.max(60, curveLenApprox / 40);
-    const asphaltTex = makeAsphaltTexture();
+    const asphaltTex = cachedTex("asphalt", makeAsphaltTexture);
     asphaltTex.repeat.set(1, trackUv);
-    const asphaltNormal = makeAsphaltNormalMap();
+    const asphaltNormal = cachedTex("asphaltNormal", makeAsphaltNormalMap);
     asphaltNormal.wrapS = asphaltNormal.wrapT = THREE.RepeatWrapping;
     asphaltNormal.repeat.set(1, trackUv);
     const trackGeom = buildExtrudedRibbonGeometry(
@@ -2392,7 +2589,7 @@ function Track3D({
 
     // Kerbs rendered as flat striped ribbons. This avoids long spike artifacts
     // from side-face triangulation while preserving clear red/white boundaries.
-    const kerbTex = makeKerbStripeTexture();
+    const kerbTex = cachedTex("kerb", makeKerbStripeTexture);
     const kerbUv = Math.max(80, curveLenApprox / 8);
     const kerbMat = new THREE.MeshBasicMaterial({
       map: kerbTex,
@@ -2437,7 +2634,7 @@ function Track3D({
     scene.add(aoR);
 
     const barrierOffset = Math.max(18, RUNOFF_INNER + RUNOFF_STRIP_WIDTH + 2.8);
-    const barrierTex = makeArmcoTexture();
+    const barrierTex = cachedTex("armco", makeArmcoTexture);
     barrierTex.repeat.set(1, 20);
     const barrierMat = new THREE.MeshBasicMaterial({
       color: 0xffffff,
@@ -2461,7 +2658,7 @@ function Track3D({
     scene.add(barrierR);
 
     const cornerRanges = buildCornerRanges(curve, 720);
-    const gravelTex = makeGravelTexture();
+    const gravelTex = cachedTex("gravel", makeGravelTexture);
     gravelTex.repeat.set(1, 45);
     const gravelMat = new THREE.MeshBasicMaterial({
       color: 0xc2a974,
@@ -2607,12 +2804,11 @@ function Track3D({
 
     // Image-based lighting from a procedural RoomEnvironment — gives the car
     // bodies real shoulder/cockpit reflections and lifts the metal kerb
-    // accents without shipping an HDRI asset.
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    const envScene = new RoomEnvironment();
-    const envTex = pmrem.fromScene(envScene, 0.04).texture;
+    // accents without shipping an HDRI asset. Cached at module scope; the
+    // PMREM generator only runs once per renderer instead of once per scene
+    // build.
+    const envTex = getRoomEnvironment(renderer);
     scene.environment = envTex;
-    pmrem.dispose();
 
     // --- Post-processing composer ---
     // Bloom is the headline effect (kerbs/DRS/brake lights/sun pop).
@@ -2767,6 +2963,155 @@ function Track3D({
     // Weather scratch vector
     const _windVec = new THREE.Vector3();
 
+    // Project a world-space position to the renderer's CSS pixel grid. Returns
+    // false when the point is outside the camera frustum (z < -1 or z > 1) so
+    // the caller can hide its label. Mutates the shared `_vp` scratch to avoid
+    // per-call allocations; safe because nothing else holds onto it across
+    // the call.
+    const projectToScreen = (worldPos, yOffset, w, h) => {
+      _vp.copy(worldPos);
+      _vp.y += yOffset;
+      _vp.project(camera);
+      if (_vp.z < -1 || _vp.z > 1) return null;
+      return {
+        px: (_vp.x * 0.5 + 0.5) * w,
+        py: (-_vp.y * 0.5 + 0.5) * h,
+      };
+    };
+
+    // Show/hide an HTMLElement label and position it at a screen-space coord.
+    // Caches the visibility state on `_shown` so we only touch `style.display`
+    // when it actually changes — DOM writes are the bulk of label cost.
+    const setLabelXY = (label, screen, anchor) => {
+      if (!screen) {
+        if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
+        return;
+      }
+      if (label._shown !== true) { label.style.display = "block"; label._shown = true; }
+      label.style.transform = `translate3d(${screen.px | 0}px, ${screen.py | 0}px, 0) ${anchor}`;
+    };
+
+    // ─── Per-frame safety-car update ─────────────────────────────────────
+    // Lazy-creates the SC mesh + label on first appearance, then keeps the
+    // mesh on the curve at `sc.fraction`. Hidden when `sc` is null/missing.
+    const updateSafetyCar = (live, now) => {
+      const sc = live.safetyCar;
+      if (sc && sc.fraction != null) {
+        if (!scGroup) {
+          scGroup = makeSafetyCarMarker();
+          scene.add(scGroup);
+          scLabel = document.createElement("div");
+          scLabel.textContent = "SC";
+          Object.assign(scLabel.style, {
+            position: "absolute",
+            fontSize: "10px", fontWeight: "700", letterSpacing: "0.08em",
+            color: "#ffcc00",
+            background: "rgba(0,0,0,0.72)",
+            border: "1px solid #ffcc0088",
+            borderRadius: "3px",
+            padding: "1px 4px",
+            pointerEvents: "none",
+            transform: "translate(-50%, -100%)",
+            display: "none",
+          });
+          labelLayer.appendChild(scLabel);
+        }
+        scGroup.visible = true;
+        const u = ((sc.fraction % 1) + 1) % 1;
+        const p = curve.getPointAt(u, tmpPoint);
+        curve.getTangentAt(u, tmpTan);
+        _fwd.copy(tmpTan).normalize();
+        _right.crossVectors(_fwd, _worldUp).normalize();
+        _up.crossVectors(_right, _fwd).normalize();
+        _basis.makeBasis(_fwd, _up, _right);
+        scGroup.quaternion.setFromRotationMatrix(_basis);
+        _surf.copy(_up).multiplyScalar(TRACK_TOP_Y + CAR_SURFACE_CLEARANCE);
+        scGroup.position.set(p.x + _surf.x, p.y + _surf.y, p.z + _surf.z);
+        // Pulse the halo opacity during "deploying" phase.
+        const alpha = sc.alpha ?? 1;
+        if (scGroup.userData.haloMat) {
+          scGroup.userData.haloMat.opacity = sc.phase === "deploying"
+            ? 0.3 + 0.25 * Math.sin(now * 0.005)
+            : 0.55 * alpha;
+        }
+      } else {
+        if (scGroup) scGroup.visible = false;
+        if (scLabel && scLabel._shown !== false) {
+          scLabel.style.display = "none";
+          scLabel._shown = false;
+        }
+      }
+    };
+
+    // ─── Per-frame weather/wet-overlay update ────────────────────────────
+    // Reads `live.weather`, mutates rain particles + track/runoff/ground/
+    // fog tinting + bloom intensity. Idempotent: each branch fully sets
+    // every value it depends on, so flipping rainState mid-race doesn't
+    // leak the previous state.
+    const updateWeather = (live, dt) => {
+      const w = live.weather || {};
+      const raining = w.rainState === "RAINING";
+      rain.visible = raining;
+      if (raining) {
+        const wDeg = (w.windDirection || 0) + 180;
+        const wRad = wDeg * Math.PI / 180;
+        const wSpeed = (w.windSpeed || 0) * 0.2778;
+        _windVec.set(Math.sin(wRad) * wSpeed, 0, -Math.cos(wRad) * wSpeed);
+        advanceRain(rain, dt, _windVec);
+        trackMat.color.setHex(trackWetColor);
+        runoffMat.color.setHex(runoffWetColor);
+        groundMat.color.setHex(groundWetColor);
+        scene.fog.color.setHex(fogWetColor);
+        scene.fog.density = (preset.fog.densityScale * WET_OVERLAY.fogDensityMult) / extent;
+        if (bloomPass) {
+          bloomPass.strength = preset.bloom.strength + WET_OVERLAY.bloomStrengthAdd;
+          bloomPass.threshold = Math.max(0.7, preset.bloom.threshold - WET_OVERLAY.bloomThresholdDrop);
+        }
+      } else {
+        trackMat.color.setHex(trackDryColor);
+        runoffMat.color.setHex(runoffDryColor);
+        groundMat.color.setHex(groundBaseColor);
+        scene.fog.color.setHex(fogDryColor);
+        scene.fog.density = preset.fog.densityScale / extent;
+        if (bloomPass) {
+          bloomPass.strength = preset.bloom.strength;
+          bloomPass.threshold = preset.bloom.threshold;
+        }
+      }
+    };
+
+    // ─── Per-frame label projection ──────────────────────────────────────
+    // Runs every frame the labels are visible. Hot path — keeps DOM writes
+    // minimal via the `_shown` cache and skips off-screen / hidden cars
+    // before paying the projection cost.
+    const updateLabels = (live, inFollow, inPov) => {
+      if (!(live.showLabels && !inFollow)) {
+        if (labelLayer.style.display !== "none") labelLayer.style.display = "none";
+        return;
+      }
+      if (labelLayer.style.display !== "block") labelLayer.style.display = "block";
+      const w = renderer.domElement.clientWidth;
+      const h = renderer.domElement.clientHeight;
+      for (const [code, entry] of driverMap) {
+        const label = entry.label;
+        // Hide the pinned driver's own label in POV — they're the camera.
+        if (inPov && code === live.pinned) {
+          if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
+          continue;
+        }
+        const firstBody = entry.group.userData.body[0];
+        const hasStatusBadge = !!entry.lastLabelStatus;
+        if ((!firstBody || !firstBody.visible) && !hasStatusBadge) {
+          if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
+          continue;
+        }
+        setLabelXY(label, projectToScreen(entry.group.position, 3, w, h), "translate(-50%, -130%)");
+      }
+      if (scLabel && scGroup?.visible) {
+        setLabelXY(scLabel, projectToScreen(scGroup.position, 3, w, h), "translate(-50%, -100%)");
+      }
+    };
+
     const animate = () => {
       try {
       const now = performance.now();
@@ -2784,7 +3129,7 @@ function Track3D({
         standings = live.standings || [];
       }
 
-      // Reconcile drivers.
+      // ─── DRIVERS: position, orientation, indicators, status visibility ──
       const seen = new Set();
       for (const s of standings) {
         if (!s?.driver?.code) continue;
@@ -2871,13 +3216,43 @@ function Track3D({
           for (const m of entry.group.userData.body) m.visible = !outOfPlay;
           for (const wh of entry.group.userData.wheels) wh.visible = !outOfPlay;
           if (entry.group.userData.compound) entry.group.userData.compound.visible = !outOfPlay && !isDns;
-          for (const mat of entry.group.userData.bodyMats) {
-            mat.transparent = true;
-            mat.opacity = isDns ? 0.34 : inPit ? 0.45 : 1;
+          if (entry.group.userData.blobShadow) {
+            entry.group.userData.blobShadow.visible = !outOfPlay && !isDns;
           }
-          for (const mat of entry.group.userData.wheelMats || []) {
-            mat.transparent = true;
-            mat.opacity = isDns ? 0.38 : inPit ? 0.5 : 1;
+          // Body/wheel materials are shared across drivers on the same team,
+          // so PIT/DNS opacity must clone-on-write the first time we touch
+          // them per car. After cloning, swap the material on every body/
+          // wheel mesh of THIS car only — the shared cache stays opaque.
+          const needsTrans = isDns || inPit;
+          if (needsTrans && !entry.ownsMats) {
+            const swap = (meshes, mats) => {
+              const map = new Map();
+              for (const mesh of meshes) {
+                if (!mesh.material) continue;
+                let owned = map.get(mesh.material.uuid);
+                if (!owned) {
+                  owned = mesh.material.clone();
+                  map.set(mesh.material.uuid, owned);
+                }
+                mesh.material = owned;
+              }
+              // Replace mats list with the per-car clones (deduped).
+              mats.length = 0;
+              for (const m of map.values()) mats.push(m);
+            };
+            swap(entry.group.userData.body, entry.group.userData.bodyMats);
+            swap(entry.group.userData.wheels, entry.group.userData.wheelMats || []);
+            entry.ownsMats = true;
+          }
+          if (entry.ownsMats) {
+            for (const mat of entry.group.userData.bodyMats) {
+              mat.transparent = true;
+              mat.opacity = isDns ? 0.34 : inPit ? 0.45 : 1;
+            }
+            for (const mat of entry.group.userData.wheelMats || []) {
+              mat.transparent = true;
+              mat.opacity = isDns ? 0.38 : inPit ? 0.5 : 1;
+            }
           }
           entry.lastRenderKey = renderKey;
         }
@@ -2890,55 +3265,9 @@ function Track3D({
         }
       }
 
-      // --- Safety car ---
-      const sc = live.safetyCar;
-      if (sc && sc.fraction != null) {
-        if (!scGroup) {
-          scGroup = makeSafetyCarMarker();
-          scene.add(scGroup);
-          scLabel = document.createElement("div");
-          scLabel.textContent = "SC";
-          Object.assign(scLabel.style, {
-            position: "absolute",
-            fontSize: "10px", fontWeight: "700", letterSpacing: "0.08em",
-            color: "#ffcc00",
-            background: "rgba(0,0,0,0.72)",
-            border: "1px solid #ffcc0088",
-            borderRadius: "3px",
-            padding: "1px 4px",
-            pointerEvents: "none",
-            transform: "translate(-50%, -100%)",
-            display: "none",
-          });
-          labelLayer.appendChild(scLabel);
-        }
-        scGroup.visible = true;
-        const u = ((sc.fraction % 1) + 1) % 1;
-        const p = curve.getPointAt(u, tmpPoint);
-        curve.getTangentAt(u, tmpTan);
-        _fwd.copy(tmpTan).normalize();
-        _right.crossVectors(_fwd, _worldUp).normalize();
-        _up.crossVectors(_right, _fwd).normalize();
-        _basis.makeBasis(_fwd, _up, _right);
-        scGroup.quaternion.setFromRotationMatrix(_basis);
-        _surf.copy(_up).multiplyScalar(TRACK_TOP_Y + CAR_SURFACE_CLEARANCE);
-        scGroup.position.set(p.x + _surf.x, p.y + _surf.y, p.z + _surf.z);
-        // Pulse the halo opacity during "deploying" phase.
-        const alpha = sc.alpha ?? 1;
-        if (scGroup.userData.haloMat) {
-          scGroup.userData.haloMat.opacity = sc.phase === "deploying"
-            ? 0.3 + 0.25 * Math.sin(now * 0.005)
-            : 0.55 * alpha;
-        }
-      } else {
-        if (scGroup) scGroup.visible = false;
-        if (scLabel && scLabel._shown !== false) {
-          scLabel.style.display = "none";
-          scLabel._shown = false;
-        }
-      }
+      updateSafetyCar(live, now);
 
-      // --- Camera modes ---
+      // ─── CAMERA: orbit / chase / POV mode resolution + FOV easing ─────
       const inFollow = live.cameraMode === "follow" && !!live.pinned;
       const inPov = live.cameraMode === "pov" && !!live.pinned;
       // Target vignette state — settles by lerp at the bottom so the FX
@@ -3086,38 +3415,7 @@ function Track3D({
         camera.updateProjectionMatrix();
       }
 
-      // --- Weather ---
-      // Wet overlay composes on top of whatever TOD preset is active: darken
-      // track/runoff/ground, cool the fog, lift bloom so wet headlights pop.
-      const w = live.weather || {};
-      const raining = w.rainState === "RAINING";
-      rain.visible = raining;
-      if (raining) {
-        const wDeg = (w.windDirection || 0) + 180;
-        const wRad = wDeg * Math.PI / 180;
-        const wSpeed = (w.windSpeed || 0) * 0.2778;
-        _windVec.set(Math.sin(wRad) * wSpeed, 0, -Math.cos(wRad) * wSpeed);
-        advanceRain(rain, dt, _windVec);
-        trackMat.color.setHex(trackWetColor);
-        runoffMat.color.setHex(runoffWetColor);
-        groundMat.color.setHex(groundWetColor);
-        scene.fog.color.setHex(fogWetColor);
-        scene.fog.density = (preset.fog.densityScale * WET_OVERLAY.fogDensityMult) / extent;
-        if (bloomPass) {
-          bloomPass.strength = preset.bloom.strength + WET_OVERLAY.bloomStrengthAdd;
-          bloomPass.threshold = Math.max(0.7, preset.bloom.threshold - WET_OVERLAY.bloomThresholdDrop);
-        }
-      } else {
-        trackMat.color.setHex(trackDryColor);
-        runoffMat.color.setHex(runoffDryColor);
-        groundMat.color.setHex(groundBaseColor);
-        scene.fog.color.setHex(fogDryColor);
-        scene.fog.density = preset.fog.densityScale / extent;
-        if (bloomPass) {
-          bloomPass.strength = preset.bloom.strength;
-          bloomPass.threshold = preset.bloom.threshold;
-        }
-      }
+      updateWeather(live, dt);
 
       // Tick star twinkle.
       if (stars) stars.material.uniforms.uTime.value += dt;
@@ -3128,57 +3426,7 @@ function Track3D({
       vu.uStrength.value += (targetVignetteStrength - vu.uStrength.value) * kV;
       vu.uRadius.value   += (targetVignetteRadius   - vu.uRadius.value)   * kV;
 
-      // --- Driver labels overlay ---
-      // Labels stay on in POV so the driver can see who's around them; they
-      // naturally fade off-screen for the pinned driver (whose own body is
-      // behind/around the camera). Only the chase cam hides them since it
-      // already has its own nearest-rival treatment.
-      if (live.showLabels && !inFollow) {
-        if (labelLayer.style.display !== "block") labelLayer.style.display = "block";
-        const w2 = renderer.domElement.clientWidth;
-        const h2 = renderer.domElement.clientHeight;
-        for (const [code, entry] of driverMap) {
-          const label = entry.label;
-          // Hide the pinned driver's own label in POV — they're the camera.
-          if (inPov && code === live.pinned) {
-            if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
-            continue;
-          }
-          const firstBody = entry.group.userData.body[0];
-          const hasStatusBadge = !!entry.lastLabelStatus;
-          if ((!firstBody || !firstBody.visible) && !hasStatusBadge) {
-            if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
-            continue;
-          }
-          _vp.copy(entry.group.position);
-          _vp.y += 3;
-          _vp.project(camera);
-          if (_vp.z < -1 || _vp.z > 1) {
-            if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
-            continue;
-          }
-          const px = (_vp.x * 0.5 + 0.5) * w2;
-          const py = (-_vp.y * 0.5 + 0.5) * h2;
-          if (label._shown !== true) { label.style.display = "block"; label._shown = true; }
-          label.style.transform = `translate3d(${px | 0}px, ${py | 0}px, 0) translate(-50%, -130%)`;
-        }
-        // SC label.
-        if (scLabel && scGroup?.visible) {
-          _vp.copy(scGroup.position);
-          _vp.y += 3;
-          _vp.project(camera);
-          if (_vp.z < -1 || _vp.z > 1) {
-            if (scLabel._shown !== false) { scLabel.style.display = "none"; scLabel._shown = false; }
-          } else {
-            const scPx = (_vp.x * 0.5 + 0.5) * w2;
-            const scPy = (-_vp.y * 0.5 + 0.5) * h2;
-            if (scLabel._shown !== true) { scLabel.style.display = "block"; scLabel._shown = true; }
-            scLabel.style.transform = `translate3d(${scPx | 0}px, ${scPy | 0}px, 0) translate(-50%, -100%)`;
-          }
-        }
-      } else {
-        if (labelLayer.style.display !== "none") labelLayer.style.display = "none";
-      }
+      updateLabels(live, inFollow, inPov);
 
       // Frame ran clean — re-arm the error logger so a recurrence after a
       // healthy window gets logged again instead of being dedupe-swallowed.
@@ -3212,14 +3460,24 @@ function Track3D({
       povHud.pill.remove();
       composer.dispose();
       renderTarget.dispose();
-      envTex.dispose();
+      // envTex is module-cached (getRoomEnvironment) — do NOT dispose here.
+      // Disposing a previously-cached envTex would break the next scene build.
       renderer.domElement.remove();
       renderer.dispose();
+      // The PMREM is bound to a renderer; once that renderer is gone the
+      // cached env is unusable. Drop the cache so the next renderer rebuilds.
+      if (_pmremRendererRef === renderer) {
+        _pmremEnv = null;
+        _pmremRendererRef = null;
+      }
       scene.traverse((o) => {
         if (o.geometry) o.geometry.dispose();
         if (o.material) {
-          if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
-          else o.material.dispose();
+          if (Array.isArray(o.material)) {
+            for (const m of o.material) m.dispose();
+          } else {
+            o.material.dispose();
+          }
         }
       });
     };
