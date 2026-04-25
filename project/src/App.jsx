@@ -100,6 +100,15 @@ function App() {
   // Toggles
   const [showLabels, setShowLabels] = React.useState(true);
   const [compareChannel, setCompareChannel] = React.useState("speed");
+  const [geometryVersion, setGeometryVersion] = React.useState(() => window.APEX?.geometryVersion || 0);
+
+  React.useEffect(() => {
+    const onGeometryVersion = (e) => {
+      setGeometryVersion(e.detail?.version ?? (window.APEX?.geometryVersion || 0));
+    };
+    window.addEventListener("apex:geometry-version", onGeometryVersion);
+    return () => window.removeEventListener("apex:geometry-version", onGeometryVersion);
+  }, []);
 
   // Arc-length cache for CIRCUIT so safety-car mapping doesn't rebuild O(n)
   // cumulative lengths every render.
@@ -114,7 +123,7 @@ function App() {
       cumLen[i] = totalLen;
     }
     return { cumLen, totalLen };
-  }, [CIRCUIT.length, snapshot?.geometry]);
+  }, [geometryVersion, snapshot?.geometry]);
 
   // Tweaks
   const [tweaksOn, setTweaksOn] = React.useState(false);

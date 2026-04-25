@@ -2063,6 +2063,191 @@ function buildGrandstands(center, extent, yBase) {
   return inst;
 }
 
+const TRACKSIDE_WORLD_UP = new THREE.Vector3(0, 1, 0);
+const TRACKSIDE_SIGN_TEX_CACHE = new Map();
+
+function sampleTrackFrameAt(curve, u, point, tangent, right, up) {
+  curve.getPointAt(u, point);
+  curve.getTangentAt(u, tangent).normalize();
+  right.crossVectors(tangent, TRACKSIDE_WORLD_UP);
+  const len2 = right.lengthSq();
+  if (len2 < 1e-10) right.set(1, 0, 0);
+  else right.multiplyScalar(1 / Math.sqrt(len2));
+  up.crossVectors(right, tangent).normalize();
+  if (up.y < 0) {
+    right.multiplyScalar(-1);
+    up.multiplyScalar(-1);
+  }
+}
+
+function getTracksideSignTexture(label, {
+  bg = "#F4F4F6",
+  fg = "#11131A",
+  border = "#11131A",
+  accent = null,
+} = {}) {
+  const key = `${label}|${bg}|${fg}|${border}|${accent || ""}`;
+  if (TRACKSIDE_SIGN_TEX_CACHE.has(key)) return TRACKSIDE_SIGN_TEX_CACHE.get(key);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 160;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (accent) {
+    ctx.fillStyle = accent;
+    ctx.fillRect(0, 0, canvas.width, 20);
+  }
+  ctx.strokeStyle = border;
+  ctx.lineWidth = 10;
+  ctx.strokeRect(5, 5, canvas.width - 10, canvas.height - 10);
+  ctx.fillStyle = fg;
+  ctx.font = `900 ${accent ? 78 : 92}px "Arial Black", sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, canvas.width * 0.5, canvas.height * (accent ? 0.58 : 0.54));
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  TRACKSIDE_SIGN_TEX_CACHE.set(key, tex);
+  return tex;
+}
+
+function makeTracksidePlacard(label, {
+  width = 2.2,
+  height = 1.5,
+  postHeight = 2.8,
+  postColor = 0x676d79,
+  bg = "#F4F4F6",
+  fg = "#11131A",
+  border = "#11131A",
+  accent = null,
+} = {}) {
+  const g = new THREE.Group();
+  const postMat = new THREE.MeshStandardMaterial({
+    color: postColor,
+    roughness: 0.82,
+    metalness: 0.12,
+  });
+  const postGeom = new THREE.BoxGeometry(0.12, postHeight, 0.12);
+  const leftPost = new THREE.Mesh(postGeom, postMat);
+  const rightPost = new THREE.Mesh(postGeom, postMat);
+  const postSpread = width * 0.28;
+  leftPost.position.set(-postSpread, postHeight * 0.5, 0);
+  rightPost.position.set(postSpread, postHeight * 0.5, 0);
+  g.add(leftPost);
+  g.add(rightPost);
+
+  const back = new THREE.Mesh(
+    new THREE.BoxGeometry(width, height, 0.08),
+    new THREE.MeshStandardMaterial({
+      color: 0x10141c,
+      roughness: 0.78,
+      metalness: 0.08,
+    }),
+  );
+  back.position.set(0, postHeight - height * 0.2, 0);
+  g.add(back);
+
+  const face = new THREE.Mesh(
+    new THREE.PlaneGeometry(width * 0.92, height * 0.86),
+    new THREE.MeshBasicMaterial({
+      map: getTracksideSignTexture(label, { bg, fg, border, accent }),
+      transparent: true,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  );
+  face.position.set(0, back.position.y, 0.045);
+  g.add(face);
+  g.userData.face = face;
+  return g;
+}
+
+function makeMarshalPanel(color) {
+  const g = new THREE.Group();
+  const postMat = new THREE.MeshStandardMaterial({
+    color: 0x5f6571,
+    roughness: 0.82,
+    metalness: 0.1,
+  });
+  const post = new THREE.Mesh(new THREE.BoxGeometry(0.11, 2.4, 0.11), postMat);
+  post.position.y = 1.2;
+  g.add(post);
+
+  const box = new THREE.Mesh(
+    new THREE.BoxGeometry(1.25, 0.8, 0.18),
+    new THREE.MeshStandardMaterial({
+      color: 0x0d1118,
+      roughness: 0.72,
+      metalness: 0.12,
+    }),
+  );
+  box.position.set(0, 2.2, 0);
+  g.add(box);
+
+  const lamp = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.9, 0.26),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.85,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  );
+  lamp.position.set(0, 2.2, 0.1);
+  g.add(lamp);
+  return g;
+}
+
+function buildTerrainGeometry(curve, center, extent, floorY) {
+  const size = extent * 6;
+  const segs = Math.max(56, Math.min(112, Math.round(extent / 18)));
+  const geom = new THREE.PlaneGeometry(size, size, segs, segs);
+  geom.rotateX(-Math.PI / 2);
+
+  const sampleSegs = Math.max(180, Math.min(480, Math.round(extent * 0.16)));
+  const frames = sampleCurveFrames(curve, sampleSegs);
+  const fp = frames.points;
+  const count = frames.count;
+  const influenceRadius = Math.max(90, extent * 0.24);
+  const pos = geom.attributes.position;
+
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const z = pos.getZ(i);
+    const worldX = center.x + x;
+    const worldZ = center.z + z;
+
+    let bestD2 = Infinity;
+    let nearestY = floorY;
+    for (let j = 0; j < count; j++) {
+      const dx = worldX - fp[j * 3 + 0];
+      const dz = worldZ - fp[j * 3 + 2];
+      const d2 = dx * dx + dz * dz;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        nearestY = fp[j * 3 + 1];
+      }
+    }
+
+    const dist = Math.sqrt(bestD2);
+    const radial = Math.min(1, Math.hypot(x, z) / (size * 0.5));
+    const base = floorY - radial * radial * 10;
+    const nearTrack = nearestY - 1.35 - Math.min(8, dist * 0.08);
+    const t = Math.max(0, Math.min(1, 1 - dist / influenceRadius));
+    const blend = t * t * (3 - 2 * t);
+    const undulation =
+      (Math.sin(worldX * 0.0055 + worldZ * 0.003) * 0.45 +
+       Math.sin(worldZ * 0.0085 - worldX * 0.004) * 0.28) * (0.25 + radial * 0.75);
+    pos.setY(i, base * (1 - blend) + nearTrack * blend + undulation);
+  }
+
+  geom.computeVertexNormals();
+  return geom;
+}
+
 function buildRain(bbox) {
   const COUNT = 3000;
   const positions = new Float32Array(COUNT * 3);
@@ -2319,17 +2504,13 @@ function Track3D({
   // Rebuild scene when the circuit changes (TOD preset is baked at setup).
   const todKey = detectTimeOfDay(circuitName);
 
-  const [geoVersion, setGeoVersion] = React.useState(0);
+  const [geoVersion, setGeoVersion] = React.useState(() => window.APEX?.geometryVersion || 0);
   React.useEffect(() => {
-    let lastLen = -1;
-    const id = setInterval(() => {
-      const n = window.APEX.CIRCUIT.length;
-      if (n !== lastLen && n >= 2) {
-        lastLen = n;
-        setGeoVersion((v) => v + 1);
-      }
-    }, 250);
-    return () => clearInterval(id);
+    const onGeometryVersion = (e) => {
+      setGeoVersion(e.detail?.version ?? (window.APEX?.geometryVersion || 0));
+    };
+    window.addEventListener("apex:geometry-version", onGeometryVersion);
+    return () => window.removeEventListener("apex:geometry-version", onGeometryVersion);
   }, []);
 
   const [qualityVersion, setQualityVersion] = React.useState(0);
@@ -2402,6 +2583,7 @@ function Track3D({
     const center = bb.getCenter(new THREE.Vector3());
     const size = bb.getSize(new THREE.Vector3());
     const extent = Math.max(size.x, size.z, 100);
+    const curveLength = curve.getLength();
     const bboxInfo = {
       cx: center.x, cy: center.y, cz: center.z,
       sx: Math.max(size.x, 300), sy: Math.max(size.y, 20), sz: Math.max(size.z, 300),
@@ -2452,19 +2634,19 @@ function Track3D({
       scene.add(buildStadiumLights(center, extent, standsY, preset.stadiumLights));
     }
 
-    // Ground plane — broad grass field around the circuit.
-    const groundSize = extent * 6;
+    // Terrain mesh — broad undulating field around the circuit. A flat plane
+    // made elevated tracks read like a ribbon floating over a table, so the
+    // terrain now follows the circuit's height envelope and falls away from it.
     const grassTex = cachedTex("grass", makeGrassTexture);
-    grassTex.repeat.set(groundSize / 120, groundSize / 120);
-    const groundGeom = new THREE.PlaneGeometry(groundSize, groundSize, 1, 1);
-    groundGeom.rotateX(-Math.PI / 2);
+    grassTex.repeat.set((extent * 6) / 120, (extent * 6) / 120);
+    const groundGeom = buildTerrainGeometry(curve, center, extent, bb.min.y - 1.6);
     const groundMat = new THREE.MeshLambertMaterial({
       color: groundBaseColor, map: grassTex,
       polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 4,
     });
     const ground = new THREE.Mesh(groundGeom, groundMat);
-    ground.position.set(center.x, bb.min.y - 0.5, center.z);
-    ground.receiveShadow = true;
+    ground.position.set(center.x, 0, center.z);
+    ground.receiveShadow = false;
     scene.add(ground);
 
     // Runoff band — TWO parallel strips outside the track/kerbs, NOT a full
@@ -2657,7 +2839,96 @@ function Track3D({
     scene.add(barrierL);
     scene.add(barrierR);
 
+    const fenceMat = new THREE.MeshBasicMaterial({
+      color: 0xd9e5ef,
+      transparent: true,
+      opacity: 0.18,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    });
+    const fenceOffset = barrierOffset + 0.06;
+    const fenceBase = 0.06 + armcoHeight;
+    const fenceHeight = 2.2;
+    const fenceL = new THREE.Mesh(
+      buildVerticalRibbonGeometry(curve, segments, -fenceOffset, 0.08, fenceBase, fenceHeight, 26),
+      fenceMat,
+    );
+    const fenceR = new THREE.Mesh(
+      buildVerticalRibbonGeometry(curve, segments, +fenceOffset, 0.08, fenceBase, fenceHeight, 26),
+      fenceMat,
+    );
+    fenceL.renderOrder = 2;
+    fenceR.renderOrder = 2;
+    scene.add(fenceL);
+    scene.add(fenceR);
+
     const cornerRanges = buildCornerRanges(curve, 720);
+    const tracksideGroup = new THREE.Group();
+    const propPoint = new THREE.Vector3();
+    const propTan = new THREE.Vector3();
+    const propRight = new THREE.Vector3();
+    const propUp = new THREE.Vector3();
+    const propFlatFwd = new THREE.Vector3();
+    const propFlatRight = new THREE.Vector3();
+    const propBasis = new THREE.Matrix4();
+    const placeTrackside = (obj, u, side, offset, lift = 0.05) => {
+      sampleTrackFrameAt(curve, u, propPoint, propTan, propRight, propUp);
+      obj.position.copy(propPoint)
+        .addScaledVector(propRight, offset * side)
+        .addScaledVector(propUp, lift);
+      propFlatFwd.copy(propTan);
+      propFlatFwd.y = 0;
+      if (propFlatFwd.lengthSq() < 1e-8) propFlatFwd.copy(propTan);
+      propFlatFwd.normalize();
+      propFlatRight.crossVectors(propFlatFwd, TRACKSIDE_WORLD_UP).normalize();
+      if (propFlatRight.dot(propRight) < 0) propFlatRight.multiplyScalar(-1);
+      propBasis.makeBasis(propFlatFwd, TRACKSIDE_WORLD_UP, propFlatRight);
+      obj.quaternion.setFromRotationMatrix(propBasis);
+      if (side > 0) obj.rotateY(Math.PI);
+      tracksideGroup.add(obj);
+    };
+
+    const brakingDistances = [150, 100, 50];
+    const brakingOffset = barrierOffset + 2.8;
+    const cornerOffset = barrierOffset + 4.4;
+    for (let i = 0; i < cornerRanges.length; i++) {
+      const c = cornerRanges[i];
+      const side = c.sign >= 0 ? 1 : -1;
+      for (const dist of brakingDistances) {
+        const u = ((c.startU - dist / Math.max(curveLength, 1)) % 1 + 1) % 1;
+        placeTrackside(
+          makeTracksidePlacard(String(dist), {
+            width: 1.8,
+            height: 1.25,
+            postHeight: 2.5,
+            bg: "#F4F4F6",
+            fg: "#10131A",
+            border: "#10131A",
+          }),
+          u,
+          side,
+          brakingOffset,
+          0.04,
+        );
+      }
+      placeTrackside(
+        makeTracksidePlacard(`T${i + 1}`, {
+          width: 2.0,
+          height: 1.35,
+          postHeight: 2.9,
+          bg: "#11151D",
+          fg: "#F4F4F6",
+          border: "#F4F4F6",
+          accent: "#FF5A36",
+        }),
+        c.apexU,
+        side,
+        cornerOffset,
+        0.06,
+      );
+    }
+
     const gravelTex = cachedTex("gravel", makeGravelTexture);
     gravelTex.repeat.set(1, 45);
     const gravelMat = new THREE.MeshBasicMaterial({
@@ -2724,12 +2995,36 @@ function Track3D({
 
     // DRS zones — green stripes on the outer side of each zone.
     for (const z of window.APEX.DRS_ZONES || []) {
+      const u = Math.max(0, Math.min(1, z.startIdx / Math.max(1, circuit.length - 1)));
       for (const side of [+1, -1]) {
         const m = buildDRSZoneMesh(curve, segments, circuit.length, z, side);
         m.position.y = ABOVE_TRACK(0.42, 0.03);
         scene.add(m);
+        placeTrackside(
+          makeTracksidePlacard("DRS", {
+            width: 2.2,
+            height: 1.3,
+            postHeight: 2.6,
+            bg: "#16B35E",
+            fg: "#08110B",
+            border: "#E6FFF1",
+          }),
+          u,
+          side,
+          brakingOffset - 0.6,
+          0.04,
+        );
       }
     }
+
+    for (const sector of window.APEX.SECTORS || []) {
+      if (sector.idx == null) continue;
+      const u = Math.max(0, Math.min(1, sector.idx / Math.max(1, circuit.length - 1)));
+      for (const side of [+1, -1]) {
+        placeTrackside(makeMarshalPanel(sector.color || "#F4F4F6"), u, side, barrierOffset + 1.2, 0.04);
+      }
+    }
+    scene.add(tracksideGroup);
 
     // Sector boundary gates are disabled by default in 3D because they can
     // read as intrusive cross-track bars at wide camera distances.
@@ -2920,13 +3215,15 @@ function Track3D({
 
     // --- Chase state ---
     const chase = {
-      pos: new THREE.Vector3(), look: new THREE.Vector3(), initialised: false,
+      pos: new THREE.Vector3(), look: new THREE.Vector3(), up: new THREE.Vector3(), initialised: false,
     };
     const CHASE_BEHIND = Math.max(18, extent * 0.004);
     const CHASE_HEIGHT = Math.max(6, extent * 0.002);
+    const CHASE_SIDE = 1.4;
     const CHASE_LOOKAHEAD = Math.max(28, extent * 0.006);
     const CHASE_SMOOTH_POS = 6.0;
     const CHASE_SMOOTH_LOOK = 9.0;
+    const CHASE_SMOOTH_UP = 7.0;
 
     // --- POV (first-person / cockpit) state ---
     const POV_EYE_HEIGHT  = 3.100;
@@ -2937,6 +3234,7 @@ function Track3D({
     const POV_SMOOTH_ROT  = 12.0;
     const pov = {
       smoothedForward: null,
+      smoothedUp: null,
       initialised: false,
       attachedTo: null,
     };
@@ -2959,7 +3257,10 @@ function Track3D({
     const _chaseLook = new THREE.Vector3();
     const _eyeWorld = new THREE.Vector3();
     const _lookWorld = new THREE.Vector3();
-    const _povTangent = new THREE.Vector3();
+    const _carForward = new THREE.Vector3();
+    const _carUp = new THREE.Vector3();
+    const _carRight = new THREE.Vector3();
+    const _cameraRight = new THREE.Vector3();
     // Weather scratch vector
     const _windVec = new THREE.Vector3();
 
@@ -3309,27 +3610,34 @@ function Track3D({
 
       if (inFollow) {
         const pinnedStanding = findByCode(live.pinned);
-        if (pinnedStanding) {
+        const pinnedEntry = driverMap.get(live.pinned);
+        if (pinnedStanding && pinnedEntry) {
           chaseSpeedKph = pinnedStanding.speedKph || 0;
-          const frac = pinnedStanding.fraction ?? 0;
-          const u = ((frac % 1) + 1) % 1;
-          const carPos = curve.getPointAt(u, tmpPoint);
-          curve.getTangentAt(u, tmpTan);
-          _chasePos.copy(carPos).addScaledVector(tmpTan, -CHASE_BEHIND);
-          _chasePos.y += CHASE_HEIGHT;
-          _chaseLook.copy(carPos).addScaledVector(tmpTan, CHASE_LOOKAHEAD);
-          _chaseLook.y += 1.2;
+          _carForward.set(1, 0, 0).applyQuaternion(pinnedEntry.group.quaternion).normalize();
+          _carUp.set(0, 1, 0).applyQuaternion(pinnedEntry.group.quaternion).normalize();
+          _carRight.set(0, 0, 1).applyQuaternion(pinnedEntry.group.quaternion).normalize();
+          _chasePos.copy(pinnedEntry.group.position)
+            .addScaledVector(_carForward, -CHASE_BEHIND)
+            .addScaledVector(_carUp, CHASE_HEIGHT)
+            .addScaledVector(_carRight, CHASE_SIDE);
+          _chaseLook.copy(pinnedEntry.group.position)
+            .addScaledVector(_carForward, CHASE_LOOKAHEAD)
+            .addScaledVector(_carUp, 1.8);
           const kPos = 1 - Math.exp(-CHASE_SMOOTH_POS * dt);
           const kLook = 1 - Math.exp(-CHASE_SMOOTH_LOOK * dt);
+          const kUp = 1 - Math.exp(-CHASE_SMOOTH_UP * dt);
           if (!chase.initialised) {
             chase.pos.copy(_chasePos);
             chase.look.copy(_chaseLook);
+            chase.up.copy(_carUp);
             chase.initialised = true;
           } else {
             chase.pos.lerp(_chasePos, kPos);
             chase.look.lerp(_chaseLook, kLook);
+            chase.up.lerp(_carUp, kUp).normalize();
           }
           camera.position.copy(chase.pos);
+          camera.up.copy(chase.up);
           camera.lookAt(chase.look);
           controls.enabled = false;
           updatePovHud(povHud, pinnedStanding,
@@ -3349,38 +3657,48 @@ function Track3D({
         }
       } else if (inPov) {
         const pinnedStanding = findByCode(live.pinned);
-        if (pinnedStanding) {
+        const pinnedEntry = driverMap.get(live.pinned);
+        if (pinnedStanding && pinnedEntry) {
           chaseSpeedKph = pinnedStanding.speedKph || 0;
-
-          const frac = pinnedStanding.fraction ?? 0;
-          const u = ((frac % 1) + 1) % 1;
 
           if (camera.near !== 0.1) {
             camera.near = 0.1;
             camera.updateProjectionMatrix();
           }
 
-          const carPosW = curve.getPointAt(u, tmpPoint);
-          curve.getTangentAt(u, _povTangent);
-          _povTangent.normalize();
+          _carForward.set(1, 0, 0).applyQuaternion(pinnedEntry.group.quaternion).normalize();
+          _carUp.set(0, 1, 0).applyQuaternion(pinnedEntry.group.quaternion).normalize();
+          _carRight.set(0, 0, 1).applyQuaternion(pinnedEntry.group.quaternion).normalize();
 
           // Reset smoothed forward when switching drivers.
           if (!pov.initialised || pov.attachedTo !== live.pinned) {
             if (!pov.smoothedForward) pov.smoothedForward = new THREE.Vector3();
-            pov.smoothedForward.copy(_povTangent);
+            if (!pov.smoothedUp) pov.smoothedUp = new THREE.Vector3();
+            pov.smoothedForward.copy(_carForward);
+            pov.smoothedUp.copy(_carUp);
             pov.initialised = true;
             pov.attachedTo = live.pinned;
           } else {
             if (!pov.smoothedForward) pov.smoothedForward = new THREE.Vector3();
+            if (!pov.smoothedUp) pov.smoothedUp = new THREE.Vector3();
             const kFwd = 1 - Math.exp(-POV_SMOOTH_ROT * dt);
-            pov.smoothedForward.lerp(_povTangent, kFwd).normalize();
+            pov.smoothedForward.lerp(_carForward, kFwd).normalize();
+            pov.smoothedUp.lerp(_carUp, kFwd).normalize();
           }
           const fwd = pov.smoothedForward;
+          const up = pov.smoothedUp;
+          _cameraRight.crossVectors(fwd, up).normalize();
+          up.crossVectors(_cameraRight, fwd).normalize();
 
-          _eyeWorld.copy(carPosW).addScaledVector(fwd, POV_EYE_FORWARD).addScaledVector(_worldUp, POV_EYE_HEIGHT);
+          _eyeWorld.copy(pinnedEntry.group.position)
+            .addScaledVector(fwd, POV_EYE_FORWARD)
+            .addScaledVector(up, POV_EYE_HEIGHT);
           camera.position.copy(_eyeWorld);
+          camera.up.copy(up);
 
-          _lookWorld.copy(carPosW).addScaledVector(fwd, POV_LOOK_AHEAD).addScaledVector(_worldUp, POV_LOOK_HEIGHT);
+          _lookWorld.copy(pinnedEntry.group.position)
+            .addScaledVector(fwd, POV_LOOK_AHEAD)
+            .addScaledVector(up, POV_LOOK_HEIGHT);
           camera.lookAt(_lookWorld);
 
           controls.enabled = false;
@@ -3402,6 +3720,7 @@ function Track3D({
           controls.target.copy(center);
           chase.initialised = false;
         }
+        camera.up.copy(_worldUp);
         controls.enabled = true;
         controls.update();
         povHud.root.style.display = "none"; povHud.pill.style.display = "none";

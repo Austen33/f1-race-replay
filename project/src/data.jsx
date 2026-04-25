@@ -37,6 +37,7 @@ const DRS_ZONES = [];
 // 0.1 for FastF1 decimetres (the common case), 1 if already metres, 0.0001
 // for legacy 1/10 mm exports. Set by _recomputeUnitScale on snapshot.
 let UNIT_SCALE = 1;
+let GEOMETRY_VERSION = 0;
 
 // Infer the multiplier needed to convert CIRCUIT coords to metres. FastF1
 // position data is in 1/10 m (decimetres), which gives a ~5 km track a
@@ -55,6 +56,56 @@ function _detectUnitScale(circuit) {
   if (diag > 500000) return 0.0001;
   if (diag > 2000)   return 0.1;
   return 1;
+}
+
+function _publishGeometryUpdate() {
+  GEOMETRY_VERSION += 1;
+  window.dispatchEvent(new CustomEvent("apex:geometry-version", {
+    detail: { version: GEOMETRY_VERSION },
+  }));
+}
+
+function _installGeometry(geo) {
+  if (!geo) return false;
+  const cx = geo.centerline?.x || [];
+  const cy = geo.centerline?.y || [];
+  if (cx.length <= 1) return false;
+
+  const cz = geo.centerline?.z || null;
+  CIRCUIT.splice(0, CIRCUIT.length, ...cx.map((x, i) => ({
+    x, y: cy[i] || 0, z: cz ? (cz[i] || 0) : 0,
+  })));
+  UNIT_SCALE = _detectUnitScale(CIRCUIT);
+  DRS_ZONES.splice(0, DRS_ZONES.length,
+    ...(geo.drs_zones || []).map((z) => ({
+      startIdx: z.start_idx, endIdx: z.end_idx,
+    }))
+  );
+
+  const totalLength = geo.total_length_m || 1;
+  const n = CIRCUIT.length;
+  const boundaries = geo.sector_boundaries_m || [];
+  const sectorColors = ["#FF1E00", "#FFD93A", "#00D9FF"];
+
+  if (boundaries.length >= 2) {
+    SECTORS.splice(0, SECTORS.length,
+      { idx: 0, color: sectorColors[0], name: "S1" },
+      ...boundaries.slice(0, 2).map((m, i) => ({
+        idx: Math.round((m / totalLength) * (n - 1)) % n,
+        color: sectorColors[i + 1] || "#FFFFFF",
+        name: `S${i + 2}`,
+      })),
+    );
+  } else if (n > 1) {
+    SECTORS.splice(0, SECTORS.length,
+      { idx: 0, color: "#FF1E00", name: "S1" },
+      { idx: Math.floor(n / 3), color: "#FFD93A", name: "S2" },
+      { idx: Math.floor(2 * n / 3), color: "#00D9FF", name: "S3" },
+    );
+  }
+
+  _publishGeometryUpdate();
+  return true;
 }
 
 // --- Populate from summary / geometry (async, non-blocking) ---
@@ -85,42 +136,7 @@ async function _initAPEX() {
     }
   }
 
-  if (_geometry) {
-    const cx = _geometry.centerline?.x || [];
-    const cy = _geometry.centerline?.y || [];
-    const cz = _geometry.centerline?.z || null;
-    CIRCUIT.splice(0, CIRCUIT.length, ...cx.map((x, i) => ({
-      x, y: cy[i] || 0, z: cz ? (cz[i] || 0) : 0,
-    })));
-    UNIT_SCALE = _detectUnitScale(CIRCUIT);
-    DRS_ZONES.splice(0, DRS_ZONES.length,
-      ...(_geometry.drs_zones || []).map((z) => ({
-        startIdx: z.start_idx, endIdx: z.end_idx,
-      }))
-    );
-
-    const totalLength = _geometry.total_length_m || 1;
-    const n = CIRCUIT.length;
-    const boundaries = _geometry.sector_boundaries_m || [];
-    const sectorColors = ["#FF1E00", "#FFD93A", "#00D9FF"];
-
-    if (boundaries.length >= 2) {
-      SECTORS.splice(0, SECTORS.length,
-        { idx: 0, color: sectorColors[0], name: "S1" },
-        ...boundaries.slice(0, 2).map((m, i) => ({
-          idx: Math.round((m / totalLength) * (n - 1)) % n,
-          color: sectorColors[i + 1] || "#FFFFFF",
-          name: `S${i + 2}`,
-        })),
-      );
-    } else if (n > 1) {
-      SECTORS.splice(0, SECTORS.length,
-        { idx: 0, color: "#FF1E00", name: "S1" },
-        { idx: Math.floor(n / 3), color: "#FFD93A", name: "S2" },
-        { idx: Math.floor(2 * n / 3), color: "#00D9FF", name: "S3" },
-      );
-    }
-  }
+  _installGeometry(_geometry);
 
   // Fallbacks (only fill if still empty after fetch)
   if (CIRCUIT.length === 0) CIRCUIT.push({ x: 0, y: 0 });
@@ -192,43 +208,7 @@ function _installSnapshot(snap) {
   }
   _refreshDriverCache();
   // Rebuild geometry from snapshot if present (mutate in-place)
-  const geo = snap.geometry;
-  if (geo) {
-    const cx = geo.centerline?.x || [];
-    const cy = geo.centerline?.y || [];
-    if (cx.length > 1) {
-      const cz = geo.centerline?.z || null;
-      CIRCUIT.splice(0, CIRCUIT.length, ...cx.map((x, i) => ({
-        x, y: cy[i] || 0, z: cz ? (cz[i] || 0) : 0,
-      })));
-      UNIT_SCALE = _detectUnitScale(CIRCUIT);
-      DRS_ZONES.splice(0, DRS_ZONES.length,
-        ...(geo.drs_zones || []).map((z) => ({
-          startIdx: z.start_idx, endIdx: z.end_idx,
-        }))
-      );
-      const totalLength = geo.total_length_m || 1;
-      const n = CIRCUIT.length;
-      const boundaries = geo.sector_boundaries_m || [];
-      const sectorColors = ["#FF1E00", "#FFD93A", "#00D9FF"];
-      if (boundaries.length >= 2) {
-        SECTORS.splice(0, SECTORS.length,
-          { idx: 0, color: sectorColors[0], name: "S1" },
-          ...boundaries.slice(0, 2).map((m, i) => ({
-            idx: Math.round((m / totalLength) * (n - 1)) % n,
-            color: sectorColors[i + 1] || "#FFFFFF",
-            name: `S${i + 2}`,
-          })),
-        );
-      } else if (n > 1) {
-        SECTORS.splice(0, SECTORS.length,
-          { idx: 0, color: "#FF1E00", name: "S1" },
-          { idx: Math.floor(n / 3), color: "#FFD93A", name: "S2" },
-          { idx: Math.floor(2 * n / 3), color: "#00D9FF", name: "S3" },
-        );
-      }
-    }
-  }
+  _installGeometry(snap.geometry);
 }
 
 function _normalizedFraction(s, fallback = 0) {
@@ -597,6 +577,7 @@ function enrichStandingsWithDrivers(standings) {
 window.APEX = {
   TEAMS, DRIVERS, COMPOUNDS, CIRCUIT, SECTORS, DRS_ZONES,
   get UNIT_SCALE() { return UNIT_SCALE; },
+  get geometryVersion() { return GEOMETRY_VERSION; },
   computeStandings, telemetryFor, lapTrace,
   fetchLapTrace, getCachedLapTrace, clearLapTelemetry,
   _installSnapshot, _accumulateFrame,
