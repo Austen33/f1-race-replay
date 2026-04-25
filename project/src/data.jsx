@@ -584,5 +584,9 @@ window.APEX = {
   getSessionBest, getStints, getPitStops,
   sampleStandingsAt,
   INTERPOLATE: true,
+  // ms of render-side delay applied to the live buffer so we always interpolate
+  // between two received frames instead of clamping to the latest one when a
+  // frame lands late. Higher = smoother but more lagged. Tunable at runtime.
+  RENDER_DELAY_MS: 220,
 };
 window.APEX_DATA_READY = APEX_DATA_READY;

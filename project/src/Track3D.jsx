@@ -3225,6 +3225,14 @@ function Track3D({
     const CHASE_SMOOTH_LOOK = 9.0;
     const CHASE_SMOOTH_UP = 7.0;
 
+    // Per-car visual smoothing applied on top of the data interpolation in
+    // sampleStandingsAt. Damps out kinks at network-frame boundaries (where
+    // the inter-frame velocity can change abruptly) and noisy curve tangents
+    // near the spline seam. Time constants ≈ 45 / 55 ms — small enough that
+    // steady-state lag at 320 kph is ~4 m, well under typical viewing scale.
+    const CAR_POS_SMOOTH = 22.0;
+    const CAR_ROT_SMOOTH = 18.0;
+
     // --- POV (first-person / cockpit) state ---
     const POV_EYE_HEIGHT  = 3.100;
     const POV_EYE_FORWARD = 0.700;
@@ -3243,6 +3251,10 @@ function Track3D({
     // --- Animation loop ---
     let rafId;
     let lastT = performance.now();
+    // EMA of dt used only for lerp factors. Raw dt drives physics-like
+    // integrations (wheel spin, weather time). Smoothing here means a single
+    // hitched frame doesn't slingshot dampers (chase pos/look, vignette, FOV).
+    let dtSmooth = 1 / 60;
     const tmpPoint = new THREE.Vector3();
     const tmpTan = new THREE.Vector3();
     const _fwd = new THREE.Vector3();
@@ -3250,6 +3262,7 @@ function Track3D({
     const _up = new THREE.Vector3();
     const _worldUp = new THREE.Vector3(0, 1, 0);
     const _basis = new THREE.Matrix4();
+    const _carTargetQuat = new THREE.Quaternion();
     const _surf = new THREE.Vector3();
     const _vp = new THREE.Vector3();
     // Chase/POV scratch vectors to avoid per-frame allocations
@@ -3419,10 +3432,14 @@ function Track3D({
       const rawDt = (now - lastT) / 1000;
       const dt = Math.min(rawDt, 1 / 30);
       lastT = now;
+      // EMA over ~4 frames; only used for damper k-factors via dtL.
+      dtSmooth += (dt - dtSmooth) * 0.25;
+      const dtL = dtSmooth;
       const live = liveRef.current;
 
       // Sample interpolated standings if available and enabled
-      const tRender = now - 80;
+      const renderDelay = window.APEX?.RENDER_DELAY_MS ?? 220;
+      const tRender = now - renderDelay;
       let standings;
       if (window.APEX?.INTERPOLATE !== false && window.APEX.sampleStandingsAt) {
         standings = window.APEX.sampleStandingsAt(tRender) || live.standings || [];
@@ -3463,11 +3480,29 @@ function Track3D({
         _up.crossVectors(_right, _fwd).normalize();
         // Car local frame: +X forward, +Y up, +Z right
         _basis.makeBasis(_fwd, _up, _right);
-        entry.group.quaternion.setFromRotationMatrix(_basis);
         // Position on track surface, offset along the surface normal (up)
         // so the car sits on top of the track even on slopes.
         _surf.copy(_up).multiplyScalar(TRACK_TOP_Y + CAR_SURFACE_CLEARANCE);
-        entry.group.position.set(p.x + _surf.x, p.y + _surf.y, p.z + _surf.z);
+        const targetX = p.x + _surf.x;
+        const targetY = p.y + _surf.y;
+        const targetZ = p.z + _surf.z;
+        _carTargetQuat.setFromRotationMatrix(_basis);
+        // First frame for this car: snap. After that: damp toward target.
+        // Smooths kinks at network-frame boundaries in sampleStandingsAt and
+        // tangent noise near the spline seam without adding perceptible lag.
+        if (!entry.smoothInit) {
+          entry.group.position.set(targetX, targetY, targetZ);
+          entry.group.quaternion.copy(_carTargetQuat);
+          entry.smoothInit = true;
+        } else {
+          const kPos = 1 - Math.exp(-CAR_POS_SMOOTH * dtL);
+          const kRot = 1 - Math.exp(-CAR_ROT_SMOOTH * dtL);
+          const pos = entry.group.position;
+          pos.x += (targetX - pos.x) * kPos;
+          pos.y += (targetY - pos.y) * kPos;
+          pos.z += (targetZ - pos.z) * kPos;
+          entry.group.quaternion.slerp(_carTargetQuat, kRot);
+        }
 
         // Selection halo + ring scale.
         const isPinned = live.pinned === s.driver.code;
@@ -3623,9 +3658,9 @@ function Track3D({
           _chaseLook.copy(pinnedEntry.group.position)
             .addScaledVector(_carForward, CHASE_LOOKAHEAD)
             .addScaledVector(_carUp, 1.8);
-          const kPos = 1 - Math.exp(-CHASE_SMOOTH_POS * dt);
-          const kLook = 1 - Math.exp(-CHASE_SMOOTH_LOOK * dt);
-          const kUp = 1 - Math.exp(-CHASE_SMOOTH_UP * dt);
+          const kPos = 1 - Math.exp(-CHASE_SMOOTH_POS * dtL);
+          const kLook = 1 - Math.exp(-CHASE_SMOOTH_LOOK * dtL);
+          const kUp = 1 - Math.exp(-CHASE_SMOOTH_UP * dtL);
           if (!chase.initialised) {
             chase.pos.copy(_chasePos);
             chase.look.copy(_chaseLook);
@@ -3650,7 +3685,7 @@ function Track3D({
           targetVignetteRadius = 1.05 - sCurve * 0.2;
           // Subtle FOV widening at speed for that "hood-cam" effect.
           const targetFov = 50 + sCurve * 8;
-          camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-3 * dt));
+          camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-3 * dtL));
           camera.updateProjectionMatrix();
         } else {
           povHud.root.style.display = "none"; povHud.pill.style.display = "none";
@@ -3681,7 +3716,7 @@ function Track3D({
           } else {
             if (!pov.smoothedForward) pov.smoothedForward = new THREE.Vector3();
             if (!pov.smoothedUp) pov.smoothedUp = new THREE.Vector3();
-            const kFwd = 1 - Math.exp(-POV_SMOOTH_ROT * dt);
+            const kFwd = 1 - Math.exp(-POV_SMOOTH_ROT * dtL);
             pov.smoothedForward.lerp(_carForward, kFwd).normalize();
             pov.smoothedUp.lerp(_carUp, kFwd).normalize();
           }
@@ -3710,7 +3745,7 @@ function Track3D({
           targetVignetteStrength = preset.vignette.base + sCurve * 0.3;
           targetVignetteRadius = 1.0 - sCurve * 0.22;
           const targetFov = POV_FOV + sCurve * 6;
-          camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-3 * dt));
+          camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-3 * dtL));
           camera.updateProjectionMatrix();
         } else {
           povHud.root.style.display = "none"; povHud.pill.style.display = "none";
@@ -3725,7 +3760,7 @@ function Track3D({
         controls.update();
         povHud.root.style.display = "none"; povHud.pill.style.display = "none";
         // Reset chase-cam FOV when we leave follow/pov.
-        camera.fov += (50 - camera.fov) * (1 - Math.exp(-3 * dt));
+        camera.fov += (50 - camera.fov) * (1 - Math.exp(-3 * dtL));
         // Restore the default near plane when leaving POV so distant track
         // geometry isn't over-precise-to-the-point-of-shimmering.
         if (camera.near !== 1) {
@@ -3740,7 +3775,7 @@ function Track3D({
       if (stars) stars.material.uniforms.uTime.value += dt;
 
       // Smoothly settle vignette toward target each frame.
-      const kV = 1 - Math.exp(-4 * dt);
+      const kV = 1 - Math.exp(-4 * dtL);
       const vu = vignettePass.uniforms;
       vu.uStrength.value += (targetVignetteStrength - vu.uStrength.value) * kV;
       vu.uRadius.value   += (targetVignetteRadius   - vu.uRadius.value)   * kV;
