@@ -26,3 +26,10 @@ project/assets/
 REVIEW_REPORT.md
 WEBGL-upgrade.MD
 chrome-devs-trace.json
+BIG_WINS_AGENT_PLAN.md
+docs/perf/baseline.json
+.gitignore
+.gitignore
+docs/perf/phase1.json
+.gitignore
+docs/perf/phase2.json

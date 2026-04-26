@@ -1,3 +1,4 @@
+import os
 import time
 from fastapi import APIRouter, BackgroundTasks, Request
 from src.web.session_manager import loading_state
@@ -14,6 +15,15 @@ router = APIRouter(prefix="/api")
 @router.get("/session/status")
 def session_status():
     return safe_jsonable(loading_state())
+
+
+@router.get("/debug/ws_stats")
+def debug_ws_stats(request: Request):
+    if os.getenv("APEX_DEBUG", "0") != "1":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Not found")
+    hub = request.app.state.ws_hub
+    return safe_jsonable(hub.stats())
 
 
 # ---------------------------------------------------------------------------
@@ -106,10 +116,14 @@ def session_race_control(request: Request, since: float | None = None):
 @router.get("/session/results")
 def session_results(request: Request):
     loaded = _require_loaded(request)
-    frames = loaded["frames"]
-    if not frames:
+    frames = loaded.get("frames")
+    handle = loaded.get("handle")
+    if not frames and handle is None:
         return []
-    last = frames[-1]
+    if frames:
+        last = frames[-1]
+    else:
+        last = handle.frame_at(handle.frame_count - 1)
     drivers = last.get("drivers", {})
     rows = []
     for code, d in drivers.items():
@@ -132,14 +146,19 @@ def session_lap_telemetry(code: str, lap: int, request: Request):
     DECEL_FULL = 50.0  # m/s² ≈ 5g, matches playback.standings_from_frame
 
     loaded = _require_loaded(request)
-    frames = loaded["frames"]
-    if not frames:
+    frames = loaded.get("frames")
+    handle = loaded.get("handle")
+    if not frames and handle is None:
         return {"fraction": [], "speed": [], "throttle": [], "brake": [], "gear": [], "rpm": [], "drs": []}
 
     fraction, speed, throttle, brake, gear, rpm, drs = [], [], [], [], [], [], []
     prev_d = None
     prev_t = None
-    for f in frames:
+    if frames:
+        iterator = iter(frames)
+    else:
+        iterator = handle.frames_iter(0, handle.frame_count)
+    for f in iterator:
         d = f.get("drivers", {}).get(code)
         if not d or int(round(d.get("lap", 0))) != lap:
             prev_d = None  # reset brake diff across gaps

@@ -2,8 +2,10 @@ import math
 import os
 import pickle
 import sys
+import time
 from datetime import timedelta, date
 from multiprocessing import Pool, cpu_count
+from pathlib import Path
 
 import fastf1
 import fastf1.plotting
@@ -13,6 +15,7 @@ import pandas as pd
 from src.lib.settings import get_settings
 from src.lib.time import parse_time_string
 from src.lib.tyres import get_tyre_compound_int
+from src.data import perf_metrics
 
 
 def enable_cache():
@@ -177,38 +180,26 @@ def get_circuit_rotation(session):
     return circuit.rotation
 
 
-def _compute_safety_car_positions(frames, track_statuses, session):
+def _compute_safety_car_events(timeline, driver_arrays, track_statuses, session):
     """
-    Simulate safety car (SC) positions for each frame based on track status.
-    
-    The F1 API does not provide SC GPS data, so we simulate it:
-    - SC appears when track status is "4" (Safety Car deployed)
-    - SC enters from pitlane, travels along the track until the first car catches up
-    - SC leads the pack while on track
-    - When the SC period ends, SC accelerates away and enters the pitlane
-    
-    Handles edge cases:
-    - The first car behind the SC may be a lapped car, not the race leader
-    - Lapped cars can be let through (e.g. Abu Dhabi 2021 scenario)
-    
-    Each frame gets a 'safety_car' key with:
-      - x, y: world coordinates of the SC
-      - phase: 'deploying' | 'on_track' | 'returning' | None
-      - alpha: 0.0-1.0 for fade in/out animation
+    Simulate safety-car positions and emit sparse events keyed by frame_idx.
+
+    Returns:
+      list[dict]: [{"frame_idx", "x", "y", "phase", "alpha"}, ...]
     """
-    if not frames or not track_statuses:
-        return
+    if timeline is None or len(timeline) == 0 or not track_statuses:
+        return []
 
     # Build reference polyline from the first driver's telemetry to get track shape
     try:
         fastest_lap = session.laps.pick_fastest()
         if fastest_lap is None:
             print("Safety Car: No fastest lap found, skipping SC position computation")
-            return
+            return []
         tel = fastest_lap.get_telemetry()
         if tel is None or tel.empty:
             print("Safety Car: No telemetry data, skipping SC position computation")
-            return
+            return []
         
         ref_xs = tel["X"].to_numpy().astype(float)
         ref_ys = tel["Y"].to_numpy().astype(float)
@@ -216,7 +207,7 @@ def _compute_safety_car_positions(frames, track_statuses, session):
         
         if len(ref_xs) < 10:
             print("Safety Car: Insufficient reference points, skipping")
-            return
+            return []
         
         # Interpolate reference to high density for smooth positioning
         from scipy.spatial import cKDTree
@@ -244,7 +235,7 @@ def _compute_safety_car_positions(frames, track_statuses, session):
         
     except Exception as e:
         print(f"Safety Car: Failed to build reference polyline: {e}")
-        return
+        return []
 
     # Identify SC deployment periods from track_statuses
     sc_periods = []
@@ -257,7 +248,7 @@ def _compute_safety_car_positions(frames, track_statuses, session):
     
     if not sc_periods:
         print("Safety Car: No SC periods found in this session")
-        return
+        return []
 
     print(f"Safety Car: Found {len(sc_periods)} SC deployment period(s)")
     
@@ -313,56 +304,27 @@ def _compute_safety_car_positions(frames, track_statuses, session):
     pit_entry_pit_x = float(ref_xs_dense[pit_entry_idx] + ref_nx[pit_entry_idx] * PIT_OFFSET_INWARD)
     pit_entry_pit_y = float(ref_ys_dense[pit_entry_idx] + ref_ny[pit_entry_idx] * PIT_OFFSET_INWARD)
 
-    def get_first_car_behind_sc(frame, sc_dist_on_track):
-        """
-        Find the car that is closest behind the SC on the track.
-        This might be a lapped car, not necessarily the race leader.
-        Returns (code, x, y, track_dist) or (None, None, None, None).
-        """
-        drivers = frame.get("drivers", {})
-        if not drivers:
-            return None, None, None, None
-        
-        best_code = None
-        best_gap = float('inf')  # smallest positive gap = closest behind
-        best_x, best_y, best_dist = None, None, None
-        
-        for code, pos in drivers.items():
-            dx, dy = pos.get("x", 0.0), pos.get("y", 0.0)
-            d_track = _dist_of_point(dx, dy)
-            
-            # Gap = how far behind the SC this car is (on track, wrapping)
-            gap = (sc_dist_on_track - d_track) % ref_total
-            
-            # We want the car with the smallest positive gap (closest behind SC)
-            # Ignore cars that are essentially at the same position (< 10m)
-            if 10.0 < gap < best_gap:
-                best_gap = gap
-                best_code = code
-                best_x = dx
-                best_y = dy
-                best_dist = d_track
-        
-        return best_code, best_x, best_y, best_dist
-
-    def get_leader_info(frame):
+    def get_leader_info(frame_idx):
         """Get the race leader's (code, x, y, track_dist, total_progress)."""
-        drivers = frame.get("drivers", {})
-        if not drivers:
+        if not driver_arrays:
             return None, None, None, None, None
         best_code = None
         best_progress = -1
-        for code, pos in drivers.items():
-            lap = pos.get("lap", 1)
-            dist = pos.get("dist", 0)
+        best_x = None
+        best_y = None
+        for code, arrays in driver_arrays.items():
+            if frame_idx >= len(arrays["x"]):
+                continue
+            lap = float(arrays["lap"][frame_idx])
+            dist = float(arrays["dist"][frame_idx])
             progress = (max(lap, 1) - 1) * ref_total + dist
             if progress > best_progress:
                 best_progress = progress
                 best_code = code
+                best_x = float(arrays["x"][frame_idx])
+                best_y = float(arrays["y"][frame_idx])
         if best_code:
-            px = drivers[best_code]["x"]
-            py = drivers[best_code]["y"]
-            return best_code, px, py, _dist_of_point(px, py), best_progress
+            return best_code, best_x, best_y, _dist_of_point(best_x, best_y), best_progress
         return None, None, None, None, None
 
     # ---- Per-SC-period state tracking ----
@@ -371,8 +333,8 @@ def _compute_safety_car_positions(frames, track_statuses, session):
     # For each SC period, track the SC's cumulative position on the track
     sc_state = {}  # keyed by sc_period index
     
-    for fi, frame in enumerate(frames):
-        t = frame["t"]
+    events = []
+    for fi, t in enumerate(timeline):
         
         # Check if current time falls in any SC period
         active_sc = None
@@ -388,7 +350,6 @@ def _compute_safety_car_positions(frames, track_statuses, session):
                 break
         
         if active_sc is None:
-            frame["safety_car"] = None
             continue
         
         sc_start = active_sc["start_time"]
@@ -431,7 +392,7 @@ def _compute_safety_car_positions(frames, track_statuses, session):
             alpha = 1.0
             
             # Estimate the leader's actual speed from telemetry position changes
-            leader_code, _, _, leader_dist, _ = get_leader_info(frame)
+            leader_code, _, _, leader_dist, _ = get_leader_info(fi)
             
             if leader_code is not None:
                 # Track leader speed by comparing consecutive positions
@@ -515,7 +476,7 @@ def _compute_safety_car_positions(frames, track_statuses, session):
             
             # Find the RACE LEADER (by total progress: laps * track_length + distance)
             # This is robust across the start/finish line because it uses lap count.
-            leader_code, leader_x, leader_y, leader_dist, _ = get_leader_info(frame)
+            leader_code, leader_x, leader_y, leader_dist, _ = get_leader_info(fi)
             
             if leader_code is not None:
                 # Position SC directly at a fixed offset ahead of the leader.
@@ -530,43 +491,154 @@ def _compute_safety_car_positions(frames, track_statuses, session):
             
             sc_x, sc_y = _pos_at_dist(state["track_dist"])
         
-        frame["safety_car"] = {
-            "x": round(sc_x, 2),
-            "y": round(sc_y, 2),
-            "phase": phase,
-            "alpha": round(alpha, 3),
+        events.append(
+            {
+                "frame_idx": int(fi),
+                "x": round(sc_x, 2),
+                "y": round(sc_y, 2),
+                "phase": phase,
+                "alpha": round(alpha, 3),
+            }
+        )
+
+    print(f"Safety Car: Computed positions for {len(events)} frames")
+    return events
+
+
+def _weather_sparse_checkpoints(weather_resampled, num_frames: int, fps: int = FPS):
+    if not weather_resampled or num_frames <= 0:
+        return []
+
+    def _at(name, idx):
+        arr = weather_resampled.get(name)
+        if arr is None:
+            return None
+        val = float(arr[idx])
+        return None if np.isnan(val) else val
+
+    step = max(1, int(fps * 60))
+    idxs = list(range(0, num_frames, step))
+    if idxs[-1] != num_frames - 1:
+        idxs.append(num_frames - 1)
+
+    checkpoints = []
+    for idx in idxs:
+        point = {
+            "frame_idx": int(idx),
+            "track_temp": _at("track_temp", idx),
+            "air_temp": _at("air_temp", idx),
+            "humidity": _at("humidity", idx),
+            "wind_speed": _at("wind_speed", idx),
+            "wind_direction": _at("wind_direction", idx),
         }
+        rainfall = _at("rainfall", idx)
+        point["rain_state"] = "RAINING" if rainfall is not None and rainfall >= 0.5 else "DRY"
+        checkpoints.append(point)
 
-    # Count frames with SC data
-    sc_frame_count = sum(1 for f in frames if f.get("safety_car") is not None)
-    print(f"Safety Car: Computed positions for {sc_frame_count} frames")
+    return checkpoints
 
 
-def get_race_telemetry(session, session_type="R"):
+def get_race_telemetry(session, session_type="R", include_frames=True):
+    started_total = time.perf_counter()
     event_name = str(session).replace(" ", "_")
     cache_suffix = "sprint" if session_type == "S" else "race"
+    session_tag = "S" if session_type == "S" else "R"
+    pickle_path = Path("computed_data") / f"{event_name}_{cache_suffix}_telemetry.pkl"
+    arrow_path = Path("computed_data") / f"{event_name}_{session_tag}.arrow"
+    refresh_requested = "--refresh-data" in sys.argv
+    use_legacy_cache = os.getenv("APEX_USE_LEGACY_CACHE", "0") == "1"
+    write_legacy_pickle = os.getenv("APEX_WRITE_LEGACY_PICKLE", "0") == "1"
 
-    # Check if this data has already been computed
+    from src.data.race_store import (
+        RaceHandle,
+        migrate_pickle_payload_to_arrow,
+        write_race,
+    )
+
+    def _coerce_driver_colors(value):
+        if not isinstance(value, dict):
+            return {}
+        out = {}
+        for code, color in value.items():
+            if isinstance(color, str) and color.startswith("#") and len(color) >= 7:
+                out[code] = (
+                    int(color[1:3], 16),
+                    int(color[3:5], 16),
+                    int(color[5:7], 16),
+                )
+            elif isinstance(color, (list, tuple)) and len(color) >= 3:
+                out[code] = (int(color[0]), int(color[1]), int(color[2]))
+        return out
+
+    def _payload_from_meta(meta, frames):
+        return {
+            "frames": frames,
+            "driver_colors": _coerce_driver_colors(meta.get("driver_colors", {})),
+            "track_statuses": meta.get("track_statuses", []),
+            "race_control_messages": meta.get("race_control_messages", []),
+            "total_laps": int(meta.get("total_laps", 0)),
+            "max_tyre_life": meta.get("max_tyre_life", {}),
+            "telemetry_ranges": meta.get("telemetry_ranges", {}),
+        }
+
+    # Check if this data has already been computed.
+    # Arrow is the primary cache path unless explicit legacy mode is requested.
+    if not refresh_requested and not use_legacy_cache and arrow_path.exists():
+        try:
+            cache_started = time.perf_counter()
+            handle = RaceHandle(arrow_path)
+            frames = list(handle.frames_iter(0, handle.frame_count)) if include_frames else None
+            cache_elapsed = time.perf_counter() - cache_started
+            perf_metrics.record_sample("cache_arrow_load", cache_elapsed)
+            perf_metrics.log(
+                f"cache_arrow_load_s={cache_elapsed:.4f} event='{event_name}' session_type='{session_type}'"
+            )
+            print(f"Loaded precomputed {cache_suffix} telemetry data (Arrow).")
+            print("The replay should begin in a new window shortly!")
+            total_elapsed = time.perf_counter() - started_total
+            perf_metrics.log(
+                f"get_race_telemetry_total_s={total_elapsed:.4f} source='arrow_cache' event='{event_name}'"
+            )
+            return _payload_from_meta(handle.meta, frames)
+        except Exception as e:
+            perf_metrics.log(f"cache_arrow_load_failed='{e}'")
 
     try:
-        if "--refresh-data" not in sys.argv:
-            with open(
-                f"computed_data/{event_name}_{cache_suffix}_telemetry.pkl", "rb"
-            ) as f:
-                frames = pickle.load(f)
+        if not refresh_requested:
+            cache_started = time.perf_counter()
+            with pickle_path.open("rb") as f:
+                legacy_payload = pickle.load(f)
+            cache_elapsed = time.perf_counter() - cache_started
+            perf_metrics.record_sample("cache_pickle_load", cache_elapsed)
+            perf_metrics.log(
+                f"cache_pickle_load_s={cache_elapsed:.4f} event='{event_name}' session_type='{session_type}'"
+            )
             # Validate cache has required fields (rpm was added after initial release)
-            sample_frame = next((fr for fr in frames.get("frames", []) if fr.get("drivers")), None)
+            sample_frame = next((fr for fr in legacy_payload.get("frames", []) if fr.get("drivers")), None)
             if sample_frame:
                 sample_driver = next(iter(sample_frame["drivers"].values()))
                 if "rpm" not in sample_driver:
                     print("Cache missing 'rpm' field — recomputing telemetry data.")
                     raise FileNotFoundError  # force recompute
-            if "telemetry_ranges" not in frames:
+            if "telemetry_ranges" not in legacy_payload:
                 print("Cache missing 'telemetry_ranges' field — recomputing telemetry data.")
                 raise FileNotFoundError  # force recompute
             print(f"Loaded precomputed {cache_suffix} telemetry data.")
             print("The replay should begin in a new window shortly!")
-            return frames
+            if not arrow_path.exists():
+                try:
+                    migrate_pickle_payload_to_arrow(legacy_payload, arrow_path, fps=FPS)
+                except Exception as e:
+                    perf_metrics.log(f"arrow_sidecar_from_cache_failed='{e}'")
+            total_elapsed = time.perf_counter() - started_total
+            perf_metrics.log(
+                f"get_race_telemetry_total_s={total_elapsed:.4f} source='cache' event='{event_name}'"
+            )
+            if include_frames:
+                return legacy_payload
+            trimmed = dict(legacy_payload)
+            trimmed["frames"] = None
+            return trimmed
     except FileNotFoundError:
         pass  # Need to compute from scratch
 
@@ -795,141 +867,78 @@ def get_race_telemetry(session, session_type="R"):
         except Exception as e:
             print(f"Weather data could not be processed: {e}")
 
-    # 5. Build the frames + LIVE LEADERBOARD
-    frames = []
     num_frames = len(timeline)
+    safety_car_events = _compute_safety_car_events(
+        timeline, resampled_data, formatted_track_statuses, session
+    )
+    weather_per_minute = _weather_sparse_checkpoints(
+        weather_resampled, num_frames=num_frames, fps=FPS
+    )
+    driver_colors = get_driver_colors(session)
 
-    # Pre-extract data references for faster access
-    driver_codes = list(resampled_data.keys())
-    driver_arrays = {code: resampled_data[code] for code in driver_codes}
-
-    for i in range(num_frames):
-        t = timeline[i]
-        snapshot = []
-        for code in driver_codes:
-            d = driver_arrays[code]
-            snapshot.append({
-                "code": code,
-                "dist": float(d["dist"][i]),
-                "x": float(d["x"][i]),
-                "y": float(d["y"][i]),
-                "lap": int(round(d["lap"][i])),
-                "rel_dist": float(d["rel_dist"][i]),
-                "tyre": float(d["tyre"][i]),
-                "tyre_life": float(d["tyre_life"][i]),
-                "speed": float(d['speed'][i]),
-                "gear": int(d['gear'][i]),
-                "drs": int(d['drs'][i]),
-                "throttle": float(d['throttle'][i]),
-                "brake": float(d['brake'][i]),
-                "rpm": float(d['rpm'][i]),
-            })
-
-        # If for some reason we have no drivers at this instant
-        if not snapshot:
-            continue
-
-        # 5b. Sort by race distance to get POSITIONS (1–20)
-        # Leader = largest race distance covered
-        snapshot.sort(key=lambda r: (r.get("lap", 0), r["dist"]), reverse=True)
-
-        leader = snapshot[0]
-        leader_lap = leader["lap"]
-
-        # TODO: This 5c. step seems futile currently as we are not using gaps anywhere, and it doesn't even comput the gaps. I think I left this in when removing the "gaps" feature that was half-finished during the initial development.
-
-        # 5c. Compute gap to car in front in SECONDS
-        frame_data = {}
-
-        for idx, car in enumerate(snapshot):
-            code = car["code"]
-            position = idx + 1
-
-            # include speed, gear, drs_active in frame driver dict
-            frame_data[code] = {
-                "x": car["x"],
-                "y": car["y"],
-                "dist": car["dist"],
-                "lap": car["lap"],
-                "rel_dist": round(car["rel_dist"], 4),
-                "tyre": car["tyre"],
-                "tyre_life": car["tyre_life"],
-                "position": position,
-                "speed": car["speed"],
-                "gear": car["gear"],
-                "drs": car["drs"],
-                "throttle": car["throttle"],
-                "brake": car["brake"],
-                "rpm": car["rpm"],
-            }
-
-        weather_snapshot = {}
-        if weather_resampled:
-            try:
-                wt = weather_resampled
-                rain_val = wt["rainfall"][i] if wt.get("rainfall") is not None else 0.0
-                weather_snapshot = {
-                    "track_temp": float(wt["track_temp"][i])
-                    if wt.get("track_temp") is not None
-                    else None,
-                    "air_temp": float(wt["air_temp"][i])
-                    if wt.get("air_temp") is not None
-                    else None,
-                    "humidity": float(wt["humidity"][i])
-                    if wt.get("humidity") is not None
-                    else None,
-                    "wind_speed": float(wt["wind_speed"][i])
-                    if wt.get("wind_speed") is not None
-                    else None,
-                    "wind_direction": float(wt["wind_direction"][i])
-                    if wt.get("wind_direction") is not None
-                    else None,
-                    "rain_state": "RAINING" if rain_val and rain_val >= 0.5 else "DRY",
-                }
-            except Exception as e:
-                print(f"Failed to attach weather data to frame {i}: {e}")
-
-        frame_payload = {
-            "t": round(t, 3),
-            "lap": leader_lap,  # leader's lap at this time
-            "drivers": frame_data,
+    write_arrays = {}
+    for code, d in resampled_data.items():
+        write_arrays[code] = {
+            "t_idx": np.arange(num_frames, dtype=np.uint32),
+            "x": np.asarray(d["x"], dtype=np.float32),
+            "y": np.asarray(d["y"], dtype=np.float32),
+            "dist": np.asarray(d["dist"], dtype=np.float32),
+            "rel_dist": np.asarray(d["rel_dist"], dtype=np.float32),
+            "lap": np.rint(d["lap"]).astype(np.int16),
+            "speed": np.asarray(d["speed"], dtype=np.float32),
+            # Preserve legacy coercion semantics from int(float_value).
+            "gear": np.asarray(d["gear"], dtype=np.float32).astype(np.int8),
+            "drs": np.asarray(d["drs"], dtype=np.float32).astype(np.int8),
+            "throttle": np.asarray(d["throttle"], dtype=np.float32),
+            "brake": (np.asarray(d["brake"]) > 0.0).astype(np.int8),
+            "rpm": np.asarray(d["rpm"], dtype=np.float32),
+            "tyre": np.rint(d["tyre"]).astype(np.int8),
+            "tyre_life": np.asarray(d["tyre_life"], dtype=np.float32),
         }
-        if weather_snapshot:
-            frame_payload["weather"] = weather_snapshot
 
-        frames.append(frame_payload)
+    meta = {
+        "schema_version": 1,
+        "fps": FPS,
+        "timeline_t0": 0.0,
+        "frame_count": int(num_frames),
+        "total_laps": int(max_lap_number),
+        "driver_codes": sorted(resampled_data.keys()),
+        "driver_colors": driver_colors,
+        "telemetry_ranges": telemetry_ranges,
+        "max_tyre_life": max_tyre_life_map,
+        "track_statuses": formatted_track_statuses,
+        "race_control_messages": formatted_rc_messages,
+        "weather_per_minute": weather_per_minute,
+        "safety_car_events": safety_car_events,
+    }
 
-    # 5d. Compute Safety Car positions for each frame
-    _compute_safety_car_positions(frames, formatted_track_statuses, session)
-    print("completed telemetry extraction...")
-    print("Saving to cache file...")
-    # If computed_data/ directory doesn't exist, create it
+    print("Completed telemetry extraction...")
+    print("Saving Arrow cache...")
     if not os.path.exists("computed_data"):
         os.makedirs("computed_data")
+    write_race(arrow_path, write_arrays, meta)
 
-    # Save using pickle (10-100x faster than JSON)
-    with open(f"computed_data/{event_name}_{cache_suffix}_telemetry.pkl", "wb") as f:
-        pickle.dump({
-            "frames": frames,
-            "driver_colors": get_driver_colors(session),
-            "track_statuses": formatted_track_statuses,
-            "race_control_messages": formatted_rc_messages,
-            "total_laps": int(max_lap_number),
-            "max_tyre_life": max_tyre_life_map,
-            "telemetry_ranges": telemetry_ranges,
-        }, f, protocol=pickle.HIGHEST_PROTOCOL)
+    need_legacy_frames = include_frames or use_legacy_cache or write_legacy_pickle
+    frames = None
+    if need_legacy_frames:
+        handle = RaceHandle(arrow_path)
+        frames = list(handle.frames_iter(0, handle.frame_count))
+
+    payload = _payload_from_meta(meta, frames if include_frames else None)
+
+    if use_legacy_cache or write_legacy_pickle:
+        legacy_payload = _payload_from_meta(meta, frames)
+        with pickle_path.open("wb") as f:
+            pickle.dump(legacy_payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Saved legacy pickle fallback: {pickle_path.name}")
 
     print("Saved Successfully!")
     print("The replay should begin in a new window shortly")
-    return {
-        "frames": frames,
-        "driver_colors": get_driver_colors(session),
-        "track_statuses": formatted_track_statuses,
-        "race_control_messages": formatted_rc_messages,
-        "total_laps": int(max_lap_number),
-        "max_tyre_life": max_tyre_life_map,
-        "telemetry_ranges": telemetry_ranges,
-    }
+    total_elapsed = time.perf_counter() - started_total
+    perf_metrics.log(
+        f"get_race_telemetry_total_s={total_elapsed:.4f} source='recompute' event='{event_name}'"
+    )
+    return payload
 
 
 def get_qualifying_results(session):

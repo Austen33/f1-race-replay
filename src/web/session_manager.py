@@ -1,9 +1,21 @@
 from pathlib import Path
+import os
+import time
 import numpy as np
 from scipy.spatial import cKDTree
 
 import fastf1
 from src.f1_data import load_session, get_race_telemetry, get_circuit_rotation
+from src.data import perf_metrics
+from src.data.race_store import (
+    RaceHandle,
+    migrate_pickle_file_to_arrow,
+)
+
+try:
+    import psutil
+except Exception:  # pragma: no cover - optional at import time
+    psutil = None
 
 _LOAD_STATE = {"status": "idle", "progress": 0, "message": "", "year": None, "round": None}
 
@@ -19,35 +31,55 @@ class SessionManager:
         fastf1.Cache.enable_cache(str(cache_dir))
 
     def load(self, year: int, round_number: int, session_type: str = "R") -> dict:
+        load_started = time.perf_counter()
         _LOAD_STATE.update(
             status="loading", progress=5,
             message=f"Loading {year} R{round_number} {session_type}",
             year=year, round=round_number,
         )
         try:
+            session_started = time.perf_counter()
             session = load_session(year, round_number, session_type)
+            perf_metrics.log(f"session_load_s={time.perf_counter() - session_started:.4f}")
             _LOAD_STATE.update(progress=30, message="Computing telemetry")
-            race = get_race_telemetry(session, session_type=session_type)
+            telemetry_started = time.perf_counter()
+            race, handle = _load_race_payload(session, session_type)
+            perf_metrics.log(f"race_cache_load_s={time.perf_counter() - telemetry_started:.4f}")
+            if psutil is not None:
+                rss_bytes = int(psutil.Process().memory_info().rss)
+                perf_metrics.log(f"rss_after_get_race_telemetry_mb={rss_bytes / (1024 * 1024):.2f}")
             _LOAD_STATE.update(progress=70, message="Building geometry")
 
             geometry = _extract_geometry(race, session)
             driver_meta = _extract_driver_meta(session)
             driver_results = _extract_driver_results(session)
             rotation = get_circuit_rotation(session)
+            frames = race.get("frames")
+            track_statuses = race["track_statuses"]
+            if frames:
+                total_duration_s = float(frames[-1]["t"])
+            elif handle is not None and handle.frame_count > 0:
+                total_duration_s = float((handle.frame_count - 1) / max(handle.fps, 1))
+            else:
+                total_duration_s = 0.0
+            total_laps = int(race["total_laps"])
 
             self._loaded = {
                 "year": year,
                 "round": round_number,
                 "session_type": session_type,
                 "session": session,
-                "frames": race["frames"],
+                "frames": frames,
+                "handle": handle,
                 "driver_colors_hex": {
                     k: "#{:02X}{:02X}{:02X}".format(*v)
                     for k, v in race["driver_colors"].items()
                 },
-                "track_statuses": race["track_statuses"],
+                "track_statuses": track_statuses,
+                "track_status_start_times": [float(e["start_time"]) for e in track_statuses],
                 "race_control_messages": race["race_control_messages"],
-                "total_laps": race["total_laps"],
+                "total_laps": total_laps,
+                "total_duration_s": total_duration_s,
                 "max_tyre_life": race["max_tyre_life"],
                 "telemetry_ranges": race.get("telemetry_ranges", {}),
                 "circuit_rotation": rotation,
@@ -55,13 +87,14 @@ class SessionManager:
                 "driver_meta": driver_meta,
                 "driver_results": driver_results,
                 "driver_stop_windows": _compute_driver_stop_windows(
-                    race["frames"], driver_results
+                    frames if frames is not None else handle, driver_results
                 ),
-                "event": _event_info(session, year, round_number, race),
+                "event": _event_info(session, year, round_number, {"total_laps": total_laps}),
                 "lap_data": _precompute_lap_data(session),
                 "session_best": _compute_session_best(session),
                 "fastest_qual_lap_s": _fastest_qual_lap_s(session),
             }
+            perf_metrics.log(f"session_manager_load_total_s={time.perf_counter() - load_started:.4f}")
             _LOAD_STATE.update(status="ready", progress=100, message="Ready")
             return self._loaded
         except Exception as e:
@@ -75,6 +108,55 @@ class SessionManager:
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+def _cache_paths(session, session_type: str) -> tuple[Path, Path]:
+    event_name = str(session).replace(" ", "_")
+    suffix = "sprint" if session_type == "S" else "race"
+    session_tag = "S" if session_type == "S" else "R"
+    pickle_path = Path("computed_data") / f"{event_name}_{suffix}_telemetry.pkl"
+    arrow_path = Path("computed_data") / f"{event_name}_{session_tag}.arrow"
+    return pickle_path, arrow_path
+
+
+def _rgb_triplet(value) -> tuple[int, int, int]:
+    if isinstance(value, str) and value.startswith("#") and len(value) >= 7:
+        return (int(value[1:3], 16), int(value[3:5], 16), int(value[5:7], 16))
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        return (int(value[0]), int(value[1]), int(value[2]))
+    return (128, 128, 128)
+
+
+def _load_race_payload(session, session_type: str) -> tuple[dict, RaceHandle | None]:
+    use_legacy = os.getenv("APEX_USE_LEGACY_CACHE", "0") == "1"
+    if use_legacy:
+        return get_race_telemetry(session, session_type=session_type), None
+
+    pickle_path, arrow_path = _cache_paths(session, session_type)
+    if not arrow_path.exists():
+        if pickle_path.exists():
+            migrate_pickle_file_to_arrow(pickle_path, arrow_path)
+        else:
+            # Build Arrow cache directly without materializing dense legacy frames.
+            get_race_telemetry(session, session_type=session_type, include_frames=False)
+            if not arrow_path.exists():
+                raise FileNotFoundError(f"Arrow cache was not created at {arrow_path}")
+
+    handle = RaceHandle(arrow_path)
+    meta = handle.meta
+    driver_colors = {
+        code: _rgb_triplet(color)
+        for code, color in (meta.get("driver_colors") or {}).items()
+    }
+    payload = {
+        "frames": None,
+        "driver_colors": driver_colors,
+        "track_statuses": meta.get("track_statuses", []),
+        "race_control_messages": meta.get("race_control_messages", []),
+        "total_laps": int(meta.get("total_laps", 0)),
+        "max_tyre_life": meta.get("max_tyre_life", {}),
+        "telemetry_ranges": meta.get("telemetry_ranges", {}),
+    }
+    return payload, handle
 
 def _pick_example_lap(session):
     """Same chain as main.py:50-67 — prefer quali lap for DRS zones."""
@@ -264,10 +346,89 @@ def _is_finished_status(status: str | None) -> bool:
     return False
 
 
-def _compute_driver_stop_windows(frames: list[dict], driver_results: dict[str, dict]) -> dict[str, dict]:
+def _compute_driver_stop_windows_columnar(frame_source, driver_results: dict[str, dict]) -> dict[str, dict]:
     out = {}
-    if not frames:
+    frame_count = int(getattr(frame_source, "frame_count", 0))
+    if frame_count <= 0:
         return out
+
+    fps = float(getattr(frame_source, "fps", 60) or 60)
+    if fps <= 0:
+        fps = 60.0
+
+    min_stop_duration_s = 3.0
+    move_threshold_m = 3.0
+    rel_dist_threshold = 0.002
+    speed_threshold_kph = 8.0
+    trailing_end_idx = frame_count - 1
+
+    for code, result in driver_results.items():
+        status = result.get("status", "")
+        if _is_dns_status(status) or _is_finished_status(status):
+            continue
+
+        try:
+            xs = np.asarray(frame_source.column(code, "x"), dtype=np.float64)
+            ys = np.asarray(frame_source.column(code, "y"), dtype=np.float64)
+            rel = np.asarray(frame_source.column(code, "rel_dist"), dtype=np.float64)
+            laps = np.asarray(frame_source.column(code, "lap"), dtype=np.int16)
+            speeds = np.asarray(frame_source.column(code, "speed"), dtype=np.float64)
+        except Exception:
+            continue
+
+        if (
+            xs.shape[0] != frame_count
+            or ys.shape[0] != frame_count
+            or rel.shape[0] != frame_count
+            or laps.shape[0] != frame_count
+            or speeds.shape[0] != frame_count
+        ):
+            continue
+
+        trailing_start_idx = trailing_end_idx
+        newer_idx = trailing_end_idx
+        for idx in range(trailing_end_idx - 1, -1, -1):
+            moved_xy = np.hypot(xs[newer_idx] - xs[idx], ys[newer_idx] - ys[idx]) > move_threshold_m
+            moved_progress = abs(rel[newer_idx] - rel[idx]) > rel_dist_threshold
+            lap_changed = int(laps[newer_idx]) != int(laps[idx])
+            moving_fast = max(float(speeds[newer_idx]), float(speeds[idx])) > speed_threshold_kph
+            if moved_xy or moved_progress or lap_changed or moving_fast:
+                break
+            trailing_start_idx = idx
+            newer_idx = idx
+
+        duration_s = (trailing_end_idx - trailing_start_idx) / fps
+        if duration_s < min_stop_duration_s:
+            continue
+
+        start_t = trailing_start_idx / fps
+        end_t = trailing_end_idx / fps
+        out[code] = {
+            "start_time": start_t,
+            "end_time": end_t,
+            "duration_s": duration_s,
+        }
+
+    return out
+
+
+def _compute_driver_stop_windows(frame_source, driver_results: dict[str, dict]) -> dict[str, dict]:
+    out = {}
+    if frame_source is None:
+        return out
+
+    if isinstance(frame_source, list):
+        if not frame_source:
+            return out
+        frame_count = len(frame_source)
+        frame_at = frame_source.__getitem__
+    else:
+        frame_count = int(getattr(frame_source, "frame_count", 0))
+        if frame_count <= 0:
+            return out
+        if hasattr(frame_source, "column"):
+            return _compute_driver_stop_windows_columnar(frame_source, driver_results)
+        frame_at = frame_source.frame_at
 
     min_stop_duration_s = 3.0
     move_threshold_m = 3.0
@@ -283,7 +444,8 @@ def _compute_driver_stop_windows(frames: list[dict], driver_results: dict[str, d
         trailing_start_t = None
         newer_driver = None
 
-        for frame in reversed(frames):
+        for frame_idx in range(frame_count - 1, -1, -1):
+            frame = frame_at(frame_idx)
             driver = frame.get("drivers", {}).get(code)
             if driver is None:
                 continue

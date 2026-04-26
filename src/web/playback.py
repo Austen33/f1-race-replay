@@ -1,6 +1,10 @@
 import asyncio
+import time
+from bisect import bisect_right
+
 import numpy as np
 
+from src.data import perf_metrics
 from src.f1_data import FPS
 from src.web.ws_hub import WSHub
 from src.web.flags import FlagBisectByTime, FLAG_MAP
@@ -83,6 +87,15 @@ class Playback:
         self._last_broadcast_t_s: float = 0.0
         self._flag_bisect: FlagBisectByTime | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._loaded_signature: tuple | None = None
+        self._snapshot_pending = False
+        self._frame_cache_idx: int | None = None
+        self._frame_cache_payload: dict | None = None
+        self._standings_cache_key: tuple | None = None
+        self._standings_cache: list | None = None
+        self._standings_cache_hits = 0
+        self._standings_cache_misses = 0
+        self._standings_cache_last_log = time.time()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -115,16 +128,24 @@ class Playback:
             asyncio.create_task(self._push_now())
 
     def set_speed(self, s: float):
+        old_sign = -1 if self.playback_speed < 0 else 1
         self.playback_speed = max(0.1, min(256.0, float(s)))
+        new_sign = -1 if self.playback_speed < 0 else 1
+        if new_sign != old_sign:
+            self._invalidate_standings_cache()
         self._schedule_push()
 
     def toggle_pause(self, value: bool | None = None):
-        self.paused = (not self.paused) if value is None else bool(value)
+        new_paused = (not self.paused) if value is None else bool(value)
+        if new_paused != self.paused:
+            self._invalidate_standings_cache()
+        self.paused = new_paused
         self._schedule_push()
 
     def seek(self, t_fraction: float):
         n = self._n_frames()
         self.frame_index = max(0.0, min(float(t_fraction), 1.0)) * (n - 1)
+        self._invalidate_standings_cache()
         self._schedule_push()
 
     # ------------------------------------------------------------------
@@ -133,7 +154,96 @@ class Playback:
 
     def _n_frames(self) -> int:
         loaded = self.session_mgr.current()
-        return len(loaded["frames"]) if loaded else 1
+        if not loaded:
+            return 1
+        if loaded.get("handle") is not None:
+            return int(loaded["handle"].frame_count)
+        return len(loaded["frames"])
+
+    def _session_signature(self, loaded: dict | None) -> tuple | None:
+        if loaded is None:
+            return None
+        if loaded.get("handle") is not None:
+            frame_count = int(loaded["handle"].frame_count)
+        else:
+            frame_count = len(loaded.get("frames") or [])
+        event = loaded.get("event", {})
+        return (
+            event.get("year"),
+            event.get("round"),
+            loaded.get("session_type"),
+            loaded.get("total_laps"),
+            frame_count,
+        )
+
+    def _invalidate_standings_cache(self):
+        self._standings_cache_key = None
+        self._standings_cache = None
+
+    def _sync_loaded_state(self, loaded: dict):
+        sig = self._session_signature(loaded)
+        if sig == self._loaded_signature:
+            return
+        self._loaded_signature = sig
+        self._flag_bisect = FlagBisectByTime(loaded["track_statuses"])
+        self.frame_index = 0.0
+        self._last_broadcast_t_s = 0.0
+        self._frame_cache_idx = None
+        self._frame_cache_payload = None
+        self._invalidate_standings_cache()
+        self._snapshot_pending = True
+
+    def _frame_at(self, loaded: dict, frame_index: int) -> dict | None:
+        if self._frame_cache_idx == frame_index and self._frame_cache_payload is not None:
+            return self._frame_cache_payload
+
+        frame = None
+        if loaded.get("handle") is not None:
+            frame = loaded["handle"].frame_at(frame_index)
+        else:
+            frames = loaded.get("frames") or []
+            if 0 <= frame_index < len(frames):
+                frame = frames[frame_index]
+
+        self._frame_cache_idx = frame_index
+        self._frame_cache_payload = frame
+        return frame
+
+    def _standings_for_frame(
+        self,
+        frame_idx: int,
+        frame: dict,
+        loaded: dict,
+        geo: dict,
+        prev_frame: dict | None,
+    ) -> list:
+        sign = -1 if self.playback_speed < 0 else 1
+        frame_count_signature = self._n_frames()
+        key = (int(frame_idx), sign, frame_count_signature)
+        if key == self._standings_cache_key and self._standings_cache is not None:
+            self._standings_cache_hits += 1
+            self._maybe_log_standings_cache_stats()
+            return self._standings_cache
+
+        standings = standings_from_frame(frame, loaded, geo, prev_frame)
+        self._standings_cache_key = key
+        self._standings_cache = standings
+        self._standings_cache_misses += 1
+        self._maybe_log_standings_cache_stats()
+        return standings
+
+    def _maybe_log_standings_cache_stats(self):
+        now = time.time()
+        if now - self._standings_cache_last_log < 3600:
+            return
+        total = self._standings_cache_hits + self._standings_cache_misses
+        if total > 0:
+            hit_rate = (self._standings_cache_hits / total) * 100.0
+            perf_metrics.log(
+                "standings_cache "
+                f"hits={self._standings_cache_hits} misses={self._standings_cache_misses} hit_rate={hit_rate:.2f}%"
+            )
+        self._standings_cache_last_log = now
 
     async def _run(self):
         loop = asyncio.get_event_loop()
@@ -153,13 +263,14 @@ class Playback:
                     self._last_push = now
                 continue
 
-            # Auto-unpause when session first becomes ready
-            if self.paused and self._flag_bisect is None:
-                self._flag_bisect = FlagBisectByTime(loaded["track_statuses"])
+            self._sync_loaded_state(loaded)
+
+            if self._snapshot_pending:
                 self.paused = False
                 # Send snapshot to all clients
                 snap = build_snapshot(loaded, self)
                 await self.ws_hub.broadcast(snap)
+                self._snapshot_pending = False
                 self._last_push = now
                 continue
 
@@ -184,14 +295,17 @@ class Playback:
         loaded = self.session_mgr.current()
         if loaded is None:
             return None
+        self._sync_loaded_state(loaded)
 
-        frames = loaded["frames"]
-        if not frames:
+        total_frames = self._n_frames()
+        if total_frames <= 0:
             return None
 
         fi = int(self.frame_index)
-        fi = min(fi, len(frames) - 1)
-        frame = frames[fi]
+        fi = min(fi, total_frames - 1)
+        frame = self._frame_at(loaded, fi)
+        if frame is None:
+            return None
 
         # Clock string
         t = frame.get("t", 0)
@@ -207,11 +321,20 @@ class Playback:
 
         # Track status raw code
         track_status = "1"
-        for entry in loaded["track_statuses"]:
-            if t >= entry["start_time"] and (
-                entry.get("end_time") is None or t <= entry["end_time"]
-            ):
-                track_status = entry["status"]
+        track_statuses = loaded.get("track_statuses", [])
+        track_starts = loaded.get("track_status_start_times") or []
+        if track_starts:
+            idx = bisect_right(track_starts, t) - 1
+            if idx >= 0:
+                entry = track_statuses[idx]
+                if entry.get("end_time") is None or t <= entry["end_time"]:
+                    track_status = entry["status"]
+        else:
+            for entry in track_statuses:
+                if t >= entry["start_time"] and (
+                    entry.get("end_time") is None or t <= entry["end_time"]
+                ):
+                    track_status = entry["status"]
 
         # Safety car
         sc = frame.get("safety_car")
@@ -227,13 +350,13 @@ class Playback:
 
         # Standings
         geo = loaded["geometry"]
-        prev_frame = frames[fi - 1] if fi > 0 else None
-        standings = standings_from_frame(frame, loaded, geo, prev_frame)
+        prev_frame = self._frame_at(loaded, fi - 1) if fi > 0 else None
+        standings = self._standings_for_frame(fi, frame, loaded, geo, prev_frame)
 
         return {
             "type": "frame",
             "frame_index": fi,
-            "total_frames": len(frames),
+            "total_frames": total_frames,
             "t": round(t, 3),
             "t_seconds": round(t, 3),
             "lap": frame.get("lap", 1),
@@ -259,22 +382,49 @@ def build_snapshot(loaded: dict, playback: "Playback") -> dict:
     geo = loaded["geometry"]
     public_geo = {k: v for k, v in geo.items() if not k.startswith("_")}
 
-    fi = int(playback.frame_index)
-    frames = loaded["frames"]
-    fi = min(fi, len(frames) - 1) if frames else 0
-    frame = frames[fi] if frames else None
-    prev_frame = frames[fi - 1] if frames and fi > 0 else None
+    fi = int(getattr(playback, "frame_index", 0) or 0)
+    total_frames = 0
+    if isinstance(playback, Playback):
+        total_frames = playback._n_frames()
+    if total_frames <= 0:
+        if loaded.get("handle") is not None:
+            total_frames = int(loaded["handle"].frame_count)
+        else:
+            total_frames = len(loaded.get("frames") or [])
+
+    fi = min(fi, total_frames - 1) if total_frames else 0
+    if isinstance(playback, Playback):
+        frame = playback._frame_at(loaded, fi) if total_frames else None
+        prev_frame = playback._frame_at(loaded, fi - 1) if total_frames and fi > 0 else None
+    else:
+        frame = None
+        prev_frame = None
+        if total_frames:
+            if loaded.get("handle") is not None:
+                frame = loaded["handle"].frame_at(fi)
+                prev_frame = loaded["handle"].frame_at(fi - 1) if fi > 0 else None
+            else:
+                frames = loaded.get("frames") or []
+                frame = frames[fi] if 0 <= fi < len(frames) else None
+                prev_frame = frames[fi - 1] if fi > 0 and (fi - 1) < len(frames) else None
 
     standings = []
-    if frame:
-        standings = standings_from_frame(frame, loaded, geo, prev_frame)
+    if isinstance(playback, Playback) and frame:
+        standings = playback._standings_for_frame(fi, frame, loaded, geo, prev_frame)
 
     flag_state = "green"
     if frame:
         flag_state = FlagBisectByTime(loaded["track_statuses"]).at(frame["t"])
 
     lap_data = loaded.get("lap_data", {})
-    total_frames = len(frames) if frames else 1
+    total_duration_s = loaded.get("total_duration_s")
+    if total_duration_s is None:
+        if loaded.get("frames"):
+            total_duration_s = loaded["frames"][-1]["t"]
+        elif loaded.get("handle") is not None and total_frames:
+            total_duration_s = loaded["handle"].frame_at(total_frames - 1).get("t", 0)
+        else:
+            total_duration_s = 0
     return {
         "type": "snapshot",
         "frame_index": fi,
@@ -290,8 +440,8 @@ def build_snapshot(loaded: dict, playback: "Playback") -> dict:
         "standings": standings,
         "flag_state": flag_state,
         "playback": {
-            "speed": playback.playback_speed,
-            "is_paused": playback.paused,
+            "speed": float(getattr(playback, "playback_speed", 1.0) or 1.0),
+            "is_paused": bool(getattr(playback, "paused", False)),
         },
         "session_best": loaded.get("session_best", {}),
         "fastest_qual_lap_s": loaded.get("fastest_qual_lap_s"),
@@ -305,7 +455,7 @@ def build_snapshot(loaded: dict, playback: "Playback") -> dict:
             }
             for e in loaded["track_statuses"]
         ],
-        "total_duration_s": frames[-1]["t"] if frames else 0,
+        "total_duration_s": total_duration_s,
     }
 
 
@@ -326,8 +476,10 @@ def _brake_intensity_pct(code: str, d: dict, prev_drivers: dict, dt: float, dece
 
 def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict | None = None) -> list:
     """Build a standings list from a single frame dict."""
+    started = time.perf_counter()
     drivers = frame.get("drivers", {})
     if not drivers:
+        perf_metrics.record_sample("standings_from_frame", time.perf_counter() - started)
         return []
 
     # FastF1's Brake channel is boolean (on/off), not analog pressure. Synthesize
@@ -388,7 +540,9 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
     driver_results = loaded.get("driver_results", {})
     telemetry_ranges = loaded.get("telemetry_ranges", {})
     driver_stop_windows = loaded.get("driver_stop_windows", {})
-    total_duration_s = float(loaded["frames"][-1]["t"]) if loaded.get("frames") else float(frame.get("t", 0.0))
+    total_duration_s = float(loaded.get("total_duration_s") or frame.get("t", 0.0))
+    if total_duration_s <= 0.0 and loaded.get("frames"):
+        total_duration_s = float(loaded["frames"][-1]["t"])
     all_codes = list(driver_meta.keys())
 
     standings = []
@@ -532,4 +686,5 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
         })
 
     standings.sort(key=lambda s: s.get("pos", 99))
+    perf_metrics.record_sample("standings_from_frame", time.perf_counter() - started)
     return standings
