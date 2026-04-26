@@ -341,6 +341,15 @@ class RaceHandle:
                 "tyre_life": float(arr["tyre_life"][idx]),
             }
 
+        # Preserve legacy frame contract: each driver includes a race position.
+        ordered_codes = sorted(
+            drivers.keys(),
+            key=lambda code: (int(drivers[code]["lap"]), float(drivers[code]["dist"])),
+            reverse=True,
+        )
+        for pos, code in enumerate(ordered_codes, start=1):
+            drivers[code]["position"] = pos
+
         frame = {
             "t": round(idx / float(self.fps), 3),
             "lap": leader_lap,

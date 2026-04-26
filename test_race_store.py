@@ -53,3 +53,4 @@ def test_write_race_roundtrip_preserves_drs_raw():
         assert frame0["drivers"]["AAA"]["drs"] == 0
         assert frame1["drivers"]["AAA"]["drs"] == 10
         assert frame2["drivers"]["AAA"]["drs"] == 14
+        assert frame0["drivers"]["AAA"]["position"] == 1

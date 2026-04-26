@@ -128,11 +128,7 @@ class Playback:
             asyncio.create_task(self._push_now())
 
     def set_speed(self, s: float):
-        old_sign = -1 if self.playback_speed < 0 else 1
         self.playback_speed = max(0.1, min(256.0, float(s)))
-        new_sign = -1 if self.playback_speed < 0 else 1
-        if new_sign != old_sign:
-            self._invalidate_standings_cache()
         self._schedule_push()
 
     def toggle_pause(self, value: bool | None = None):

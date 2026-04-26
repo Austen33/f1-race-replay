@@ -62,12 +62,13 @@ class WSHub:
 
     async def broadcast(self, payload: dict):
         data = safe_jsonable(payload)
-        payload_size = len(json.dumps(data, separators=(",", ":"), ensure_ascii=False))
+        payload_json = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+        payload_size = len(payload_json.encode("utf-8"))
         self._observe_broadcast(payload_size)
         dead = []
         for ws in list(self.active):
             try:
-                await ws.send_json(data)
+                await ws.send_text(payload_json)
             except (WebSocketDisconnect, RuntimeError):
                 dead.append(ws)
             except Exception:
