@@ -93,6 +93,8 @@ class Playback:
         self._standings_cache_hits = 0
         self._standings_cache_misses = 0
         self._standings_cache_last_log = time.time()
+        self._last_standings_frame_idx: int | None = None
+        self._last_standings_by_code: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -172,6 +174,8 @@ class Playback:
     def _invalidate_standings_cache(self):
         self._standings_cache_key = None
         self._standings_cache = None
+        self._last_standings_frame_idx = None
+        self._last_standings_by_code = {}
 
     def _sync_loaded_state(self, loaded: dict):
         sig = self._session_signature(loaded)
@@ -220,7 +224,27 @@ class Playback:
             self._maybe_log_standings_cache_stats()
             return self._standings_cache
 
-        standings = standings_from_frame(frame, loaded, geo, prev_frame)
+        prev_pos_hint = None
+        if (
+            self._last_standings_frame_idx is not None
+            and abs(int(frame_idx) - int(self._last_standings_frame_idx)) == 1
+            and self._last_standings_by_code
+        ):
+            prev_pos_hint = dict(self._last_standings_by_code)
+
+        standings = standings_from_frame(
+            frame,
+            loaded,
+            geo,
+            prev_frame,
+            prev_pos_hint=prev_pos_hint,
+        )
+        self._last_standings_frame_idx = int(frame_idx)
+        self._last_standings_by_code = {
+            str(s.get("code")): int(s.get("pos", 99))
+            for s in standings
+            if s.get("code") is not None
+        }
         self._standings_cache_key = key
         self._standings_cache = standings
         self._standings_cache_misses += 1
@@ -469,7 +493,13 @@ def _brake_intensity_pct(code: str, d: dict, prev_drivers: dict, dt: float, dece
     return max(0.0, min(100.0, (decel / decel_full) * 100.0))
 
 
-def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict | None = None) -> list:
+def standings_from_frame(
+    frame: dict,
+    loaded: dict,
+    geo: dict,
+    prev_frame: dict | None = None,
+    prev_pos_hint: dict[str, int] | None = None,
+) -> list:
     """Build a standings list from a single frame dict."""
     started = time.perf_counter()
     drivers = frame.get("drivers", {})
@@ -509,9 +539,52 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
             result_info, telemetry_window, stop_window, float(frame.get("t", 0.0)), total_duration_s
         )
 
+    grid_rank_by_code = {}
+    for code in all_codes:
+        raw = (driver_results.get(code) or {}).get("grid_position")
+        try:
+            gp = int(raw) if raw is not None else 10_000
+        except (TypeError, ValueError):
+            gp = 10_000
+        if gp <= 0:
+            gp = 10_000
+        grid_rank_by_code[code] = gp
+
+    track_length_m = float(
+        geo.get("_ref_total_length")
+        or geo.get("total_length_m")
+        or 0.0
+    )
+    position_quantum_m = 0.3
+    max_position_step = 2
+
     driver_progress = {}
     for code, d in drivers.items():
-        driver_progress[code] = float(d.get("dist", 0.0))
+        try:
+            lap_no = int(d.get("lap", 1))
+        except (TypeError, ValueError):
+            lap_no = 1
+        lap_no = max(1, lap_no)
+
+        rel_dist = d.get("rel_dist", 0.0)
+        try:
+            rel = float(rel_dist)
+        except (TypeError, ValueError):
+            rel = 0.0
+        if rel != rel:
+            rel = 0.0
+        rel = max(0.0, min(1.0, rel))
+
+        if track_length_m > 0.0:
+            progress_m = (lap_no - 1) * track_length_m + rel * track_length_m
+        else:
+            try:
+                progress_m = float(d.get("dist", 0.0))
+            except (TypeError, ValueError):
+                progress_m = 0.0
+            if progress_m != progress_m or progress_m < 0.0:
+                progress_m = 0.0
+        driver_progress[code] = progress_m
 
     rankable_codes = [
         code
@@ -521,7 +594,74 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
     if not rankable_codes:
         rankable_codes = list(driver_progress.keys())
 
-    sorted_codes = sorted(rankable_codes, key=lambda c: driver_progress[c], reverse=True)
+    if prev_pos_hint is None:
+        prev_pos_hint = {}
+
+    frame_t = float(frame.get("t", 0.0))
+    max_progress_m = max((driver_progress[c] for c in rankable_codes), default=0.0)
+    launch_seed_lock = (not prev_pos_hint) and frame_t <= 1.0 and max_progress_m <= 20.0
+
+    if launch_seed_lock:
+        target_sorted_codes = sorted(
+            rankable_codes,
+            key=lambda c: (
+                grid_rank_by_code.get(c, 10_000),
+                c,
+            ),
+        )
+    else:
+        progress_bucket = {
+            code: int(driver_progress[code] / position_quantum_m)
+            for code in rankable_codes
+        }
+
+        target_sorted_codes = sorted(
+            rankable_codes,
+            key=lambda c: (
+                -progress_bucket[c],
+                prev_pos_hint.get(c, 10_000),
+                grid_rank_by_code.get(c, 10_000),
+                -driver_progress[c],
+                c,
+            ),
+        )
+
+    sorted_codes = target_sorted_codes
+
+    # Adjacent-frame continuity guard: allow only small per-frame rank movement
+    # to suppress impossible leaderboard jumps from telemetry jitter.
+    if prev_pos_hint and len(target_sorted_codes) > 1:
+        target_pos_by_code = {code: i + 1 for i, code in enumerate(target_sorted_codes)}
+        prev_order = sorted(
+            target_sorted_codes,
+            key=lambda c: (
+                prev_pos_hint.get(c, 10_000),
+                grid_rank_by_code.get(c, 10_000),
+                c,
+            ),
+        )
+
+        n_codes = len(target_sorted_codes)
+        clamped_entries = []
+        for code in prev_order:
+            target_pos = target_pos_by_code[code]
+            prev_pos = int(prev_pos_hint.get(code, target_pos))
+            prev_pos = max(1, min(n_codes, prev_pos))
+            lo = max(1, prev_pos - max_position_step)
+            hi = min(n_codes, prev_pos + max_position_step)
+            clamped_pos = max(lo, min(hi, target_pos))
+            clamped_entries.append((code, clamped_pos, target_pos, prev_pos))
+
+        clamped_entries.sort(
+            key=lambda item: (
+                item[1],
+                item[2],
+                item[3],
+                grid_rank_by_code.get(item[0], 10_000),
+                item[0],
+            )
+        )
+        sorted_codes = [item[0] for item in clamped_entries]
     pos_by_code = {code: i + 1 for i, code in enumerate(sorted_codes)}
 
     standings = []

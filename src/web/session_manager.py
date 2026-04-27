@@ -135,6 +135,7 @@ def _load_race_payload(session, session_type: str) -> tuple[dict, RaceHandle | N
         return get_race_telemetry(session, session_type=session_type), None
 
     pickle_path, arrow_path = _cache_paths(session, session_type)
+
     if not arrow_path.exists():
         if pickle_path.exists():
             migrate_pickle_file_to_arrow(pickle_path, arrow_path)
@@ -145,6 +146,12 @@ def _load_race_payload(session, session_type: str) -> tuple[dict, RaceHandle | N
                 raise FileNotFoundError(f"Arrow cache was not created at {arrow_path}")
 
     handle = RaceHandle(arrow_path)
+    schema_version = int(handle.meta.get("schema_version", 0) or 0)
+    if schema_version < 2:
+        perf_metrics.log(
+            f"arrow_cache_schema_outdated schema={schema_version} path='{arrow_path}'"
+        )
+
     meta = handle.meta
     driver_colors = {
         code: _rgb_triplet(color)
@@ -315,14 +322,20 @@ def _extract_driver_results(session):
         if not code:
             continue
         pos_raw = row.get("Position")
+        grid_raw = row.get("GridPosition")
         try:
             position = int(pos_raw) if pos_raw is not None and not np.isnan(pos_raw) else None
         except TypeError:
             position = None
+        try:
+            grid_position = int(grid_raw) if grid_raw is not None and not np.isnan(grid_raw) else None
+        except TypeError:
+            grid_position = None
         out[code] = {
             "status": _clean_str(row.get("Status", "")),
             "classified_position": _clean_str(row.get("ClassifiedPosition", "")),
             "position": position,
+            "grid_position": grid_position,
         }
     return out
 

@@ -78,8 +78,7 @@ def _process_single_driver(args):
         t_lap = lap_tel["SessionTime"].dt.total_seconds().to_numpy()
         x_lap = lap_tel["X"].to_numpy()
         y_lap = lap_tel["Y"].to_numpy()
-        d_lap = lap_tel["Distance"].to_numpy()
-        rd_lap = lap_tel["RelativeDistance"].to_numpy()
+        d_lap = lap_tel["Distance"].to_numpy(dtype=float)
         speed_kph_lap = lap_tel["Speed"].to_numpy()
         gear_lap = lap_tel["nGear"].to_numpy()
         drs_lap = lap_tel["DRS"].to_numpy()
@@ -87,7 +86,22 @@ def _process_single_driver(args):
         brake_lap = lap_tel["Brake"].to_numpy().astype(float)
         rpm_lap = lap_tel["RPM"].to_numpy()
 
-        # race distance = distance before this lap + distance within this lap
+        # Normalize lap-distance to start at 0 and be monotonic. Raw FastF1
+        # distance can have tiny negative offsets/noise near start-finish.
+        d_lap = np.nan_to_num(d_lap, nan=0.0, posinf=0.0, neginf=0.0)
+        if d_lap.size > 0:
+            d_lap = d_lap - float(d_lap[0])
+            d_lap = np.maximum(d_lap, 0.0)
+            d_lap = np.maximum.accumulate(d_lap)
+
+        lap_length_m = float(d_lap[-1]) if d_lap.size > 0 else 0.0
+        if lap_length_m > 1e-6:
+            rd_lap = np.clip(d_lap / lap_length_m, 0.0, 1.0)
+        else:
+            rd_lap = np.zeros_like(d_lap, dtype=float)
+
+        # Race distance = cumulative race progress before this lap + clean
+        # within-lap distance.
         race_d_lap = total_dist_so_far + d_lap
 
         t_all.append(t_lap)
@@ -901,7 +915,7 @@ def get_race_telemetry(session, session_type="R", include_frames=True):
         }
 
     meta = {
-        "schema_version": 1,
+        "schema_version": 2,
         "fps": FPS,
         "timeline_t0": 0.0,
         "frame_count": int(num_frames),
