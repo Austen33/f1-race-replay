@@ -78,6 +78,31 @@ const TRACK3D_POV_TUNE = Object.freeze({
   baseFov: 75.000,
 });
 
+// Steering-wheel HUD quad placement on the GLB's Steer mesh. The screen face
+// is identified by the wheel mesh's shortest local axis (the disk normal).
+// Held as a mutable object so the on-screen debug panel (toggle: 'W' key)
+// can tweak values live. Once the values look right, paste them back as the
+// new defaults below.
+// faceSign:           +1 / -1 — flip if the quad lands on the wrong side
+//                     of the wheel (front-of-cockpit vs. driver-facing).
+// flipU / flipV:      mirror the dashboard horizontally / vertically.
+// shiftFaceX / Y:     nudge along the wheel face (fraction of face bbox).
+// sizeFaceX / Y:      screen size as fraction of face bbox (separate W/H).
+// sizeMultiplier:     overall screen size scaling on top of the per-axis
+//                     sizes — useful for quick global tweaks.
+// emissiveIntensity:  HUD glow under the cockpit ambient. Sweet spot 0.5–0.8.
+const TRACK3D_WHEEL_HUD_TUNE = {
+  faceSign: 1,
+  flipU: true,
+  flipV: true,
+  shiftFaceX: 0.000,
+  shiftFaceY: 0.225,
+  sizeFaceX: 0.310,
+  sizeFaceY: 0.330,
+  sizeMultiplier: 1.000,
+  emissiveIntensity: 0.750,
+};
+
 function detectUnitScale(circuit) {
   let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
   for (const p of circuit) {
@@ -1462,9 +1487,24 @@ function makeDriverMarker(team) {
     // If all wheels share a single mesh, we can't spin them individually —
     // store a flag so the animation loop skips the spin on GLB models.
     let wheelsAreSeparateMeshes = true;
+    // Steering wheel mesh — captured here so the live HUD can target it
+    // without re-traversing the clone. Identified by node/material name
+    // containing "steer". Must be excluded from the road-wheel list so the
+    // animation loop doesn't spin it.
+    let steeringWheelMesh = null;
     clone.traverse((child) => {
       if (!child.isMesh) return;
+      const nodeName = (child.name || "").toLowerCase();
       const matName = (child.material?.name || "").toLowerCase();
+      const isSteering = nodeName.includes("steer") || matName.includes("steer");
+      if (isSteering) {
+        if (!steeringWheelMesh) steeringWheelMesh = child;
+        body.push(child);
+        if (child.material && !bodyMats.includes(child.material)) {
+          bodyMats.push(child.material);
+        }
+        return;
+      }
       const isWheelByMat = matName.includes("wheel") || matName.includes("tire") || matName.includes("tyre");
       let isWheelByGeom = false;
       if (!isWheelByMat && child.geometry) {
@@ -1510,6 +1550,7 @@ function makeDriverMarker(team) {
     g.userData.wheelsAreSeparateMeshes = wheelsAreSeparateMeshes;
     g.userData.modelRoot = clone;
     g.userData.modelFitScale = fitScale;
+    g.userData.steeringWheel = steeringWheelMesh;
   }).catch(() => {
     // GLB failed — use the primitive fallback.
     const fallback = makeFallbackMarker(team);
@@ -2375,6 +2416,546 @@ function advanceRain(rain, dt, windVec) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Steering-wheel live HUD — renders an F1-style dashboard onto a CanvasTexture
+// applied to the cockpit steering wheel mesh. One instance per Track3D
+// component; the material is migrated between cars when the pinned driver
+// changes (see attachWheelHud / detachWheelHud below).
+// ───────────────────────────────────────────────────────────────────────────
+
+const WHEEL_HUD_W = 1024;
+const WHEEL_HUD_H = 512;
+
+// Shift-light strip: classic F1 progression — green (revs in band), amber
+// (approaching shift), red (shift now), then blue flash at the rev limiter.
+const SHIFT_LIGHTS = [
+  { from: 0.55, color: "#1eff6a" },
+  { from: 0.62, color: "#1eff6a" },
+  { from: 0.69, color: "#1eff6a" },
+  { from: 0.74, color: "#1eff6a" },
+  { from: 0.78, color: "#ffd93a" },
+  { from: 0.82, color: "#ffd93a" },
+  { from: 0.86, color: "#ffb800" },
+  { from: 0.89, color: "#ff1e00" },
+  { from: 0.92, color: "#ff1e00" },
+  { from: 0.95, color: "#ff1e00" },
+];
+const REV_LIMIT_RPM = 13500; // rough F1 V6 hybrid rev band ceiling
+
+const TYRE_COLORS = {
+  S: "#ff1e00", M: "#ffd93a", H: "#ffffff", I: "#1eff6a", W: "#00d9ff",
+};
+const TYRE_TEXT = { S: "SOFT", M: "MED", H: "HARD", I: "INTER", W: "WET" };
+
+function buildWheelHud() {
+  const canvas = document.createElement("canvas");
+  canvas.width = WHEEL_HUD_W;
+  canvas.height = WHEEL_HUD_H;
+  const ctx = canvas.getContext("2d");
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  // The HUD is rendered onto a PlaneGeometry quad (not the GLTF wheel mesh
+  // directly), so standard UV convention applies — leave flipY at its
+  // default true.
+  // Mirror the canvas via texture repeat/offset so the geometry pose stays
+  // simple. With repeat = -1 / offset = 1 on a given axis, that axis is
+  // mirrored. The values are applied on every attach (see attachWheelHud)
+  // so live debug-panel toggles take effect immediately.
+
+  const material = new THREE.MeshStandardMaterial({
+    map: texture,
+    emissiveMap: texture,
+    emissive: new THREE.Color(0xffffff),
+    emissiveIntensity: TRACK3D_WHEEL_HUD_TUNE.emissiveIntensity,
+    roughness: 0.45,
+    metalness: 0.05,
+    transparent: false,
+  });
+
+  // First paint: placeholder to ensure the texture has a non-empty initial
+  // upload. The real data fill happens once the pinned driver is known.
+  paintWheelHudPlaceholder(ctx);
+  texture.needsUpdate = true;
+
+  // Re-paint once JetBrains Mono is loaded — first placeholder may have used
+  // the system fallback. After this resolves, all subsequent repaints use
+  // the correct font.
+  const fontReady = (typeof document !== "undefined" && document.fonts)
+    ? document.fonts.load('bold 64px "JetBrains Mono"')
+        .then(() => { paintWheelHudPlaceholder(ctx); texture.needsUpdate = true; })
+        .catch(() => {})
+    : Promise.resolve();
+
+  let lastKey = "";
+
+  const repaint = (data) => {
+    if (!data) return false;
+    // Cheap dirty-check key — avoids redrawing identical frames.
+    const key = `${data.gear}|${Math.round(data.speed)}|${Math.floor((data.rpm || 0) / 100)}|${data.drs}|${data.tyre}|${data.tyreLaps}|${data.flagState}|${data.pos}|${data.lap}|${data.totalLaps}|${data.lastLap}|${data.lastLapMode}|${data.lapTag}|${data.inPit ? 1 : 0}|${data.teamColor}|${data.code}`;
+    if (key === lastKey) return false;
+    lastKey = key;
+    paintWheelHud(ctx, data);
+    texture.needsUpdate = true;
+    return true;
+  };
+
+  const dispose = () => {
+    texture.dispose();
+    material.dispose();
+  };
+
+  return { canvas, ctx, texture, material, repaint, dispose, fontReady };
+}
+
+function paintWheelHudPlaceholder(ctx) {
+  ctx.fillStyle = "#05060a";
+  ctx.fillRect(0, 0, WHEEL_HUD_W, WHEEL_HUD_H);
+  ctx.fillStyle = "rgba(180,180,200,0.35)";
+  ctx.font = 'bold 28px "JetBrains Mono", monospace';
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("APEX • PITWALL", WHEEL_HUD_W / 2, WHEEL_HUD_H / 2);
+}
+
+function paintWheelHud(ctx, d) {
+  const W = WHEEL_HUD_W;
+  const H = WHEEL_HUD_H;
+
+  // Background — deep cockpit black, slight team-tint vignette in corners.
+  ctx.fillStyle = "#03040a";
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle outer team-colour border to frame the screen.
+  const team = d.teamColor || "#FF1E00";
+  ctx.strokeStyle = team;
+  ctx.lineWidth = 6;
+  ctx.globalAlpha = 0.55;
+  ctx.strokeRect(8, 8, W - 16, H - 16);
+  ctx.globalAlpha = 1;
+
+  // Inner panel border (theme.borderRaw equivalent)
+  ctx.strokeStyle = "rgba(255,255,255,0.10)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(20, 20, W - 40, H - 40);
+
+  // Pit limiter override — when the car is in the pit lane, replace the
+  // entire screen with a high-contrast LIMITER state. Real F1 wheels do this.
+  if (d.inPit) {
+    paintLimiter(ctx, W, H);
+    return;
+  }
+
+  // ─── Shift light strip across the very top ─────────────────────────────
+  paintShiftLights(ctx, W, H, d.rpm || 0);
+
+  // ─── Flanking flag indicators (yellow / red) ───────────────────────────
+  paintFlagLights(ctx, W, H, d.flagState);
+
+  // ─── Top status row: POS, LAP X/Y, FLAG ───────────────────────────────
+  const topY = 70;
+  const posBoxX = 50;
+  const posBoxY = topY;
+  const posBoxW = 150;
+  const posBoxH = 70;
+  // POS chip — team coloured
+  ctx.fillStyle = team;
+  ctx.globalAlpha = 0.18;
+  ctx.fillRect(posBoxX, posBoxY, posBoxW, posBoxH);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = team;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(posBoxX, posBoxY, posBoxW, posBoxH);
+  ctx.fillStyle = "rgba(180,180,200,0.55)";
+  ctx.font = 'bold 14px "JetBrains Mono", monospace';
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText("POS", posBoxX + 12, posBoxY + 22);
+  ctx.fillStyle = "#f6f6fa";
+  ctx.font = 'bold 48px "JetBrains Mono", monospace';
+  ctx.textAlign = "right";
+  const posStr = d.pos != null ? String(d.pos).padStart(2, "0") : "--";
+  ctx.fillText(posStr, posBoxX + posBoxW - 14, posBoxY + 60);
+
+  // Driver code — small, top centre above gear
+  ctx.fillStyle = team;
+  ctx.font = 'bold 30px "JetBrains Mono", monospace';
+  ctx.textAlign = "center";
+  ctx.fillText(d.code || "---", W / 2, topY + 32);
+  ctx.fillStyle = "rgba(180,180,200,0.7)";
+  ctx.font = 'bold 16px "JetBrains Mono", monospace';
+  ctx.fillText(`LAP ${d.lap || "-"} / ${d.totalLaps || "-"}`, W / 2, topY + 58);
+
+  // FLAG pill — top right
+  const flagX = W - 50 - 150;
+  const flagY = topY;
+  paintFlagPill(ctx, flagX, flagY, 150, 70, d.flagState);
+
+  // ─── Centre hero: GIANT gear digit ────────────────────────────────────
+  const gearCX = W / 2;
+  const gearCY = 260;
+  ctx.font = 'bold 200px "JetBrains Mono", monospace';
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // Glow under the gear digit at high revs.
+  const revFrac = Math.max(0, Math.min(1, (d.rpm || 0) / REV_LIMIT_RPM));
+  if (revFrac > 0.85) {
+    ctx.shadowColor = "#ff1e00";
+    ctx.shadowBlur = 48;
+  }
+  let gearStr;
+  if (d.gear == null || d.gear === 0) gearStr = "N";
+  else gearStr = String(d.gear);
+  ctx.fillStyle = revFrac > 0.92 ? "#ff1e00" : "#f6f6fa";
+  ctx.fillText(gearStr, gearCX, gearCY);
+  ctx.shadowBlur = 0;
+
+  // ─── Speed reading — below gear ───────────────────────────────────────
+  const speed = Math.max(0, Math.round(d.speed || 0));
+  ctx.fillStyle = "#f6f6fa";
+  ctx.font = 'bold 56px "JetBrains Mono", monospace';
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(String(speed).padStart(3, "0"), gearCX, 388);
+  ctx.fillStyle = "rgba(180,180,200,0.55)";
+  ctx.font = 'bold 14px "JetBrains Mono", monospace';
+  ctx.fillText("KPH", gearCX, 410);
+
+  // ─── Left vertical bar: BRAKE (red) ──────────────────────────────────
+  // Labels above the bars (instead of below) so they're never clipped by
+  // the inner border and stay visible even when the bar is full.
+  paintVerticalBar(ctx, {
+    x: 50, y: 175, w: 36, h: 235,
+    fillFrac: Math.max(0, Math.min(100, d.brake || 0)) / 100,
+    color: "#ff1e00", label: "BRK", labelAbove: true,
+  });
+
+  // ─── Right vertical bar: THROTTLE (green) ────────────────────────────
+  paintVerticalBar(ctx, {
+    x: W - 50 - 36, y: 175, w: 36, h: 235,
+    fillFrac: Math.max(0, Math.min(100, d.throttle || 0)) / 100,
+    color: "#1eff6a", label: "THR", labelAbove: true,
+  });
+
+  // ─── Bottom row: tyre chip · MOM pill · last lap time ─────────────────
+  const botY = H - 78;
+
+  // Tyre compound chip (theme tyre colours)
+  const tyreCol = TYRE_COLORS[d.tyre] || "#ffd93a";
+  const tyreLabel = TYRE_TEXT[d.tyre] || "—";
+  paintChip(ctx, {
+    x: 110, y: botY, w: 200, h: 50,
+    label: `${tyreLabel} · ${d.tyreLaps != null ? d.tyreLaps + "L" : "—"}`,
+    color: tyreCol,
+    fontSize: 22,
+  });
+
+  // MOM (DRS) pill — center. Wider than the others, bigger font, and a
+  // dimmer-but-still-readable inactive state so the label never disappears.
+  const drsActive = d.drs === "OPEN" || d.drs === true;
+  paintChip(ctx, {
+    x: W / 2 - 80, y: botY, w: 160, h: 50,
+    label: "MOM",
+    color: drsActive ? "#00d9ff" : "rgba(0,217,255,0.55)",
+    filled: drsActive,
+    fontSize: 26,
+  });
+
+  // Last lap time — right. Falls back to BEST when no completed lap yet
+  // (lap 1 of the race). Color codes for session-best / personal-best.
+  const lapText = d.lastLap || "--:--.---";
+  const lapMode = d.lastLapMode || "LAST";
+  let lapColor = "#f6f6fa";
+  if (d.lapTag === "session_best") lapColor = "#c15aff";
+  else if (d.lapTag === "pb") lapColor = "#1eff6a";
+  paintChip(ctx, {
+    x: W - 110 - 240, y: botY, w: 240, h: 50,
+    label: `${lapMode} ${lapText}`,
+    color: lapColor,
+    fontSize: 22,
+  });
+}
+
+function paintShiftLights(ctx, W, H, rpm) {
+  const stripY = 32;
+  const stripH = 22;
+  const padding = 60;
+  const inner = W - padding * 2;
+  const gap = 4;
+  const n = SHIFT_LIGHTS.length;
+  const ledW = (inner - gap * (n - 1)) / n;
+  const frac = Math.max(0, Math.min(1, rpm / REV_LIMIT_RPM));
+  // At redline (>0.95) flash the whole strip blue at 8 Hz — the limiter cue.
+  const limiterFlash = frac > 0.95 && (Math.floor(performance.now() / 70) % 2 === 0);
+  for (let i = 0; i < n; i++) {
+    const x = padding + i * (ledW + gap);
+    const seg = SHIFT_LIGHTS[i];
+    const lit = frac >= seg.from;
+    if (limiterFlash) {
+      ctx.fillStyle = "#00d9ff";
+    } else if (lit) {
+      ctx.fillStyle = seg.color;
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,0.06)";
+    }
+    if (lit && !limiterFlash) {
+      ctx.shadowColor = seg.color;
+      ctx.shadowBlur = 16;
+    } else {
+      ctx.shadowBlur = 0;
+    }
+    ctx.fillRect(x, stripY, ledW, stripH);
+  }
+  ctx.shadowBlur = 0;
+}
+
+function paintFlagLights(ctx, W, H, flagState) {
+  // Small square indicators flanking the central display — fire on yellow/red.
+  const f = (flagState || "").toUpperCase();
+  let color = null;
+  if (f === "YELLOW" || f === "SAFETY_CAR" || f === "VIRTUAL_SC") color = "#ffd93a";
+  else if (f === "RED") color = "#ff1e00";
+  if (!color) return;
+  const flash = Math.floor(performance.now() / 250) % 2 === 0;
+  if (!flash) return;
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 24;
+  ctx.fillRect(28, H / 2 - 18, 16, 36);
+  ctx.fillRect(W - 44, H / 2 - 18, 16, 36);
+  ctx.shadowBlur = 0;
+}
+
+function paintFlagPill(ctx, x, y, w, h, flagState) {
+  const f = (flagState || "GREEN").toUpperCase();
+  let color = "rgba(30,255,106,0.7)";
+  let label = "GREEN";
+  if (f === "YELLOW") { color = "#ffd93a"; label = "YELLOW"; }
+  else if (f === "RED") { color = "#ff1e00"; label = "RED"; }
+  else if (f === "SAFETY_CAR") { color = "#ffb800"; label = "SC"; }
+  else if (f === "VIRTUAL_SC") { color = "#ffb800"; label = "VSC"; }
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.18;
+  ctx.fillRect(x, y, w, h);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, y, w, h);
+  ctx.fillStyle = "rgba(180,180,200,0.55)";
+  ctx.font = 'bold 13px "JetBrains Mono", monospace';
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText("FLAG", x + 12, y + 22);
+  ctx.fillStyle = color;
+  ctx.font = 'bold 32px "JetBrains Mono", monospace';
+  ctx.textAlign = "right";
+  ctx.fillText(label, x + w - 14, y + 56);
+}
+
+function paintVerticalBar(ctx, { x, y, w, h, fillFrac, color, label, labelAbove }) {
+  // Track
+  ctx.fillStyle = "rgba(255,255,255,0.06)";
+  ctx.fillRect(x, y, w, h);
+  // Fill (bottom-up)
+  const fh = h * Math.max(0, Math.min(1, fillFrac));
+  ctx.fillStyle = color;
+  if (fillFrac > 0.05) {
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 12;
+  }
+  ctx.fillRect(x, y + (h - fh), w, fh);
+  ctx.shadowBlur = 0;
+  // Border
+  ctx.strokeStyle = "rgba(255,255,255,0.12)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x, y, w, h);
+  // Label
+  ctx.fillStyle = "rgba(180,180,200,0.7)";
+  ctx.font = 'bold 14px "JetBrains Mono", monospace';
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  if (labelAbove) {
+    ctx.fillText(label, x + w / 2, y - 8);
+  } else {
+    ctx.fillText(label, x + w / 2, y + h + 22);
+  }
+}
+
+function paintChip(ctx, { x, y, w, h, label, color, filled, fontSize }) {
+  if (filled) {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = "#0b0b11";
+  } else {
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.14;
+    ctx.fillRect(x, y, w, h);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = color;
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, y, w, h);
+  ctx.font = `bold ${fontSize || 22}px "JetBrains Mono", monospace`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, x + w / 2, y + h / 2 + 1);
+}
+
+// Build the live tune panel for the wheel HUD. Toggle with W. The panel
+// mutates TRACK3D_WHEEL_HUD_TUNE in place; `reapply` is called whenever a
+// control changes so the on-screen quad updates immediately.
+function buildWheelHudDebugPanel(mount, reapply) {
+  const panel = document.createElement("div");
+  Object.assign(panel.style, {
+    position: "absolute", top: "12px", right: "12px",
+    display: "none",
+    fontFamily: "JetBrains Mono, monospace",
+    fontSize: "11px",
+    color: "#e6e6ef",
+    padding: "10px 12px",
+    background: "rgba(11,11,17,0.92)",
+    border: "1px solid rgba(255,30,0,0.35)",
+    borderRadius: "4px",
+    backdropFilter: "blur(6px)",
+    WebkitBackdropFilter: "blur(6px)",
+    pointerEvents: "auto",
+    zIndex: 6,
+    width: "260px",
+    boxShadow: "0 4px 20px rgba(0,0,0,0.5)",
+  });
+  panel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <div style="font-weight:800;letter-spacing:0.18em;color:#ff1e00;">WHEEL HUD TUNE</div>
+      <div data-act="close" style="cursor:pointer;color:rgba(180,180,200,0.6);padding:0 4px;">×</div>
+    </div>
+    <div style="font-size:9px;color:rgba(180,180,200,0.55);letter-spacing:0.14em;margin-bottom:8px;">PRESS W TO TOGGLE</div>
+    <div data-rows></div>
+    <div style="display:flex;gap:6px;margin-top:10px;">
+      <button data-act="copy" style="flex:1;font-family:inherit;font-size:10px;background:#1a1a26;color:#e6e6ef;border:1px solid rgba(255,255,255,0.15);padding:6px;cursor:pointer;letter-spacing:0.08em;">COPY VALUES</button>
+      <button data-act="reset" style="flex:1;font-family:inherit;font-size:10px;background:#1a1a26;color:#e6e6ef;border:1px solid rgba(255,255,255,0.15);padding:6px;cursor:pointer;letter-spacing:0.08em;">RESET</button>
+    </div>
+    <div data-status style="font-size:9px;color:rgba(180,180,200,0.55);letter-spacing:0.10em;margin-top:6px;min-height:12px;"></div>
+  `;
+  mount.appendChild(panel);
+
+  const rowsEl = panel.querySelector("[data-rows]");
+  const statusEl = panel.querySelector("[data-status]");
+
+  const rows = [
+    { key: "shiftFaceX",        kind: "slider", min: -0.5, max: 0.5, step: 0.005 },
+    { key: "shiftFaceY",        kind: "slider", min: -0.5, max: 0.5, step: 0.005 },
+    { key: "sizeFaceX",         kind: "slider", min: 0.05, max: 1.0, step: 0.01 },
+    { key: "sizeFaceY",         kind: "slider", min: 0.05, max: 1.0, step: 0.01 },
+    { key: "sizeMultiplier",    kind: "slider", min: 0.2,  max: 2.5, step: 0.01 },
+    { key: "emissiveIntensity", kind: "slider", min: 0.0,  max: 2.0, step: 0.01 },
+    { key: "faceSign",          kind: "toggle", on: 1,    off: -1 },
+    { key: "flipU",             kind: "toggle", on: true, off: false },
+    { key: "flipV",             kind: "toggle", on: true, off: false },
+  ];
+
+  // Snapshot of initial defaults — used by RESET.
+  const defaults = {};
+  for (const r of rows) defaults[r.key] = TRACK3D_WHEEL_HUD_TUNE[r.key];
+
+  const refs = {};
+  for (const r of rows) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:5px;";
+    if (r.kind === "slider") {
+      row.innerHTML = `
+        <div style="width:108px;font-size:10px;color:rgba(180,180,200,0.7);letter-spacing:0.06em;">${r.key}</div>
+        <input type="range" min="${r.min}" max="${r.max}" step="${r.step}" value="${TRACK3D_WHEEL_HUD_TUNE[r.key]}" style="flex:1;accent-color:#ff1e00;">
+        <div data-val style="width:48px;text-align:right;font-size:10px;color:#f6f6fa;font-variant-numeric:tabular-nums;">${TRACK3D_WHEEL_HUD_TUNE[r.key].toFixed(3)}</div>
+      `;
+      const input = row.querySelector("input");
+      const valEl = row.querySelector("[data-val]");
+      input.addEventListener("input", () => {
+        const v = parseFloat(input.value);
+        TRACK3D_WHEEL_HUD_TUNE[r.key] = v;
+        valEl.textContent = v.toFixed(3);
+        reapply();
+      });
+      refs[r.key] = { row, input, valEl };
+    } else {
+      row.innerHTML = `
+        <div style="width:108px;font-size:10px;color:rgba(180,180,200,0.7);letter-spacing:0.06em;">${r.key}</div>
+        <div data-btn style="flex:1;text-align:center;font-size:10px;background:#1a1a26;border:1px solid rgba(255,255,255,0.15);padding:4px;cursor:pointer;letter-spacing:0.08em;">${String(TRACK3D_WHEEL_HUD_TUNE[r.key])}</div>
+      `;
+      const btn = row.querySelector("[data-btn]");
+      btn.addEventListener("click", () => {
+        const cur = TRACK3D_WHEEL_HUD_TUNE[r.key];
+        const next = (cur === r.on) ? r.off : r.on;
+        TRACK3D_WHEEL_HUD_TUNE[r.key] = next;
+        btn.textContent = String(next);
+        reapply();
+      });
+      refs[r.key] = { row, btn };
+    }
+    rowsEl.appendChild(row);
+  }
+
+  panel.querySelector("[data-act=close]").addEventListener("click", () => {
+    panel.style.display = "none";
+  });
+
+  panel.querySelector("[data-act=copy]").addEventListener("click", () => {
+    const lines = [];
+    lines.push("const TRACK3D_WHEEL_HUD_TUNE = {");
+    for (const r of rows) {
+      const v = TRACK3D_WHEEL_HUD_TUNE[r.key];
+      const fmt = (typeof v === "number") ? v.toFixed(3) : String(v);
+      lines.push(`  ${r.key}: ${fmt},`);
+    }
+    lines.push("};");
+    const text = lines.join("\n");
+    navigator.clipboard?.writeText(text).then(
+      () => { statusEl.textContent = "COPIED · paste into Track3D.jsx"; },
+      () => { statusEl.textContent = "COPY FAILED · see console"; console.log(text); }
+    );
+    setTimeout(() => { statusEl.textContent = ""; }, 2400);
+  });
+
+  panel.querySelector("[data-act=reset]").addEventListener("click", () => {
+    for (const r of rows) {
+      const v = defaults[r.key];
+      TRACK3D_WHEEL_HUD_TUNE[r.key] = v;
+      const ref = refs[r.key];
+      if (r.kind === "slider") {
+        ref.input.value = v;
+        ref.valEl.textContent = v.toFixed(3);
+      } else {
+        ref.btn.textContent = String(v);
+      }
+    }
+    reapply();
+    statusEl.textContent = "RESET";
+    setTimeout(() => { statusEl.textContent = ""; }, 1200);
+  });
+
+  const toggle = () => {
+    panel.style.display = (panel.style.display === "none") ? "block" : "none";
+  };
+
+  return { root: panel, toggle };
+}
+
+function paintLimiter(ctx, W, H) {
+  // Flash the whole screen between yellow and dark every 250 ms.
+  const phase = Math.floor(performance.now() / 250) % 2 === 0;
+  ctx.fillStyle = phase ? "#ffb800" : "#1a1004";
+  ctx.fillRect(20, 20, W - 40, H - 40);
+  ctx.fillStyle = phase ? "#0b0b11" : "#ffb800";
+  ctx.font = 'bold 160px "JetBrains Mono", monospace';
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("PIT", W / 2, H / 2 - 50);
+  ctx.font = 'bold 56px "JetBrains Mono", monospace';
+  ctx.fillText("LIMITER", W / 2, H / 2 + 80);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // POV HUD — shown only when cameraMode === "follow". Displays speed, gear,
 // throttle/brake bars, DRS and compound for the pinned driver.
 // ───────────────────────────────────────────────────────────────────────────
@@ -2574,6 +3155,14 @@ function Track3D({
 }) {
   const mountRef = React.useRef(null);
   const hudToggleRef = React.useRef(null);
+  // Live frame ref — refreshed every render so the RAF loop can read the
+  // current frame without stale-closure issues. The hook lives on window.LIVE
+  // and returns null until the WebSocket has produced a snapshot/frame.
+  const _live = window.LIVE?.useLive ? window.LIVE.useLive() : null;
+  const frameRef = React.useRef(_live?.frame || null);
+  frameRef.current = _live?.frame || null;
+  const snapshotRef = React.useRef(_live?.snapshot || null);
+  snapshotRef.current = _live?.snapshot || null;
   const liveRef = React.useRef({ standings, pinned, secondary, cameraMode, weather, showLabels, safetyCar });
   liveRef.current = { standings, pinned, secondary, cameraMode, weather, showLabels, safetyCar };
   // Expose HUD toggle on window so the hotkey handler can reach it.
@@ -3258,6 +3847,132 @@ function Track3D({
     const povHud = buildPovHud(mount);
     hudToggleRef.current = povHud.toggle;
 
+    // Wheel HUD — single CanvasTexture/material instance for the whole scene.
+    // The Steer mesh in this GLB has the screen face baked into a single
+    // chassis texture (buttons, paddles, F1 logo all in one), with no
+    // separate display submesh. Replacing its material would clobber the
+    // whole wheel. Instead, we add a small PlaneGeometry quad as a child of
+    // the steering wheel mesh, positioned to cover the screen area. On a
+    // pinned-driver change we just reparent (or rebuild) the quad — the
+    // shared chassis material is never touched.
+    const wheelHud = buildWheelHud();
+    // The quad is created once and reparented per pinned car. Geometry is
+    // 1:1 (1×1) and sized via mesh.scale so we can re-tune the screen size
+    // at runtime without rebuilding geometry.
+    const wheelHudQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), wheelHud.material);
+    wheelHudQuad.castShadow = false;
+    wheelHudQuad.receiveShadow = false;
+    wheelHudQuad.renderOrder = 5; // draw on top of the wheel surface
+    // Tunables — adjust these to fine-tune the screen position/size on the
+    // GLB's actual steering wheel mesh. They are expressed in the wheel
+    // mesh's LOCAL space (i.e. before any per-car scale), and chosen so the
+    // quad sits ~flush with the back face of the wheel pointing at the
+    // driver. The values are derived from the wheel mesh's local bbox at
+    // attach time — these are dimensionless multipliers / offsets.
+    const wheelHudAttach = { code: null, parent: null };
+    const detachWheelHud = () => {
+      if (wheelHudAttach.parent) {
+        wheelHudAttach.parent.remove(wheelHudQuad);
+      }
+      wheelHudAttach.parent = null;
+      wheelHudAttach.code = null;
+    };
+    const attachWheelHud = (code, entry) => {
+      const wheelMesh = entry?.group?.userData?.steeringWheel;
+      if (!wheelMesh) return false;
+      if (!wheelMesh.geometry) return false;
+      // Re-apply texture flips and emissive intensity from the (possibly
+      // edited) tune values. Cheap and lets the debug panel work live.
+      const tex = wheelHud.texture;
+      if (TRACK3D_WHEEL_HUD_TUNE.flipU) { tex.repeat.x = -1; tex.offset.x = 1; }
+      else                              { tex.repeat.x =  1; tex.offset.x = 0; }
+      if (TRACK3D_WHEEL_HUD_TUNE.flipV) { tex.repeat.y = -1; tex.offset.y = 1; }
+      else                              { tex.repeat.y =  1; tex.offset.y = 0; }
+      tex.needsUpdate = true;
+      wheelHud.material.emissiveIntensity = TRACK3D_WHEEL_HUD_TUNE.emissiveIntensity;
+      // Compute the wheel's local-space bounding box once. This gives us its
+      // size in its own coordinate frame (before model-fit scaling/rotation).
+      if (!wheelMesh.geometry.boundingBox) wheelMesh.geometry.computeBoundingBox();
+      const bb = wheelMesh.geometry.boundingBox;
+      const sz = new THREE.Vector3(); bb.getSize(sz);
+      const ctr = new THREE.Vector3(); bb.getCenter(ctr);
+      // The wheel is roughly disk-shaped: two of its three local-space dims
+      // are the wheel face (large), one is the wheel thickness/depth (small).
+      // Identify the smallest axis — that's the screen-normal axis.
+      const dims = [sz.x, sz.y, sz.z];
+      let normalAxis = 0;
+      if (dims[1] < dims[normalAxis]) normalAxis = 1;
+      if (dims[2] < dims[normalAxis]) normalAxis = 2;
+      // The two face axes — the screen lives on this plane.
+      const faceAxes = [0, 1, 2].filter((a) => a !== normalAxis);
+      // Screen size as a fraction of each face axis — tunable.
+      const screenW = dims[faceAxes[0]] * TRACK3D_WHEEL_HUD_TUNE.sizeFaceX;
+      const screenH = dims[faceAxes[1]] * TRACK3D_WHEEL_HUD_TUNE.sizeFaceY;
+      // PlaneGeometry is built in its OWN XY plane facing +Z. We need to
+      // orient and size it so its normal aligns with the wheel's normalAxis,
+      // and its width/height map onto the wheel's face axes. Easiest way:
+      // build a rotation that aligns +Z (plane normal) with the wheel's
+      // normalAxis, then scale the plane by screenW/screenH along its
+      // local X/Y. The plane's local +X should map onto faceAxes[0].
+      wheelHudQuad.position.set(ctr.x, ctr.y, ctr.z);
+      // Tiny offset along the normal so the quad floats just in front of
+      // the wheel face (avoids z-fighting with the chassis). Sign: we want
+      // the quad on the BACK face of the wheel (driver-facing side). We
+      // don't know which sign that is for this GLB; bias toward +offset and
+      // expose the sign via TRACK3D_WHEEL_HUD_TUNE if it lands on the
+      // wrong face.
+      const offset = dims[normalAxis] * 0.55;
+      const offsetSign = TRACK3D_WHEEL_HUD_TUNE.faceSign;
+      if (normalAxis === 0) {
+        wheelHudQuad.position.x += offsetSign * offset;
+        // Plane normal +Z → wheel normal +X: rotate +90° around Y.
+        wheelHudQuad.rotation.set(0, offsetSign * Math.PI / 2, 0);
+      } else if (normalAxis === 1) {
+        wheelHudQuad.position.y += offsetSign * offset;
+        // Plane normal +Z → wheel normal +Y: rotate -90° around X.
+        wheelHudQuad.rotation.set(offsetSign * -Math.PI / 2, 0, 0);
+      } else {
+        wheelHudQuad.position.z += offsetSign * offset;
+        // Plane normal +Z → wheel normal +Z: no rotation, but flip if -Z.
+        wheelHudQuad.rotation.set(0, offsetSign > 0 ? 0 : Math.PI, 0);
+      }
+      wheelHudQuad.scale.set(screenW, screenH, 1);
+      // Apply user fine-tune offsets (in local face-axis units) — lets the
+      // designer slide the quad up/down/left/right on the wheel face.
+      const tx = TRACK3D_WHEEL_HUD_TUNE.shiftFaceX * dims[faceAxes[0]];
+      const ty = TRACK3D_WHEEL_HUD_TUNE.shiftFaceY * dims[faceAxes[1]];
+      const shift = new THREE.Vector3();
+      shift.setComponent(faceAxes[0], tx);
+      shift.setComponent(faceAxes[1], ty);
+      wheelHudQuad.position.add(shift);
+      wheelHudQuad.scale.multiplyScalar(TRACK3D_WHEEL_HUD_TUNE.sizeMultiplier);
+      wheelMesh.add(wheelHudQuad);
+      wheelHudAttach.parent = wheelMesh;
+      wheelHudAttach.code = code;
+      return true;
+    };
+
+    // Live tune panel — toggle with W. Reapply re-runs attach on the
+    // currently-pinned car so geometry/transform updates are immediate.
+    const reapplyWheelHud = () => {
+      const code = wheelHudAttach.code;
+      if (!code) return;
+      const entry = driverMap.get(code);
+      detachWheelHud();
+      if (entry) attachWheelHud(code, entry);
+    };
+    const wheelHudDebug = buildWheelHudDebugPanel(mount, reapplyWheelHud);
+    const onDebugKey = (e) => {
+      if (e.key === "w" || e.key === "W") {
+        // Don't fire if user is typing in an input field.
+        const t = e.target;
+        const tag = t && t.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+        wheelHudDebug.toggle();
+      }
+    };
+    window.addEventListener("keydown", onDebugKey);
+
     // --- Driver meshes ---
     const driverGroup = new THREE.Group();
     scene.add(driverGroup);
@@ -3835,8 +4550,10 @@ function Track3D({
           camera.lookAt(_lookWorld);
 
           controls.enabled = false;
-          updatePovHud(povHud, pinnedStanding,
-            window.APEX.COMPOUNDS[pinnedStanding.compound]);
+          // POV now uses the in-cockpit wheel display, so suppress the
+          // old screen-space HUD overlay in this camera mode.
+          povHud.root.style.display = "none";
+          povHud.pill.style.display = "none";
 
           const sNorm = Math.max(0, Math.min(1, (chaseSpeedKph - 80) / 240));
           const sCurve = sNorm * sNorm * (3 - 2 * sNorm);
@@ -3865,6 +4582,107 @@ function Track3D({
           camera.near = 1;
         }
         camera.updateProjectionMatrix();
+      }
+
+      // ─── Wheel HUD: live dashboard rendered onto the steering-wheel mesh ─
+      // Always-on when a driver is pinned, regardless of camera mode (the
+      // quad costs nothing when offscreen). On a pinned-driver change,
+      // detach from the previous car before attaching to the new one.
+      {
+        const pinnedCode = live.pinned || null;
+        if (wheelHudAttach.code !== pinnedCode) {
+          if (wheelHudAttach.code) detachWheelHud();
+          if (pinnedCode) {
+            const entry = driverMap.get(pinnedCode);
+            // The GLB clone is built async — userData.steeringWheel is set
+            // when the model finishes loading. If it's not ready yet, leave
+            // the attach for a future frame.
+            if (entry && entry.group?.userData?.steeringWheel) {
+              attachWheelHud(pinnedCode, entry);
+            }
+          }
+        } else if (pinnedCode && !wheelHudAttach.parent) {
+          // Pinned didn't change but the model wasn't ready before — retry.
+          const entry = driverMap.get(pinnedCode);
+          if (entry && entry.group?.userData?.steeringWheel) {
+            attachWheelHud(pinnedCode, entry);
+          }
+        }
+
+        if (wheelHudAttach.parent && pinnedCode) {
+          const standing = findByCode(pinnedCode);
+          if (standing) {
+            const f = frameRef.current;
+            const snap = snapshotRef.current;
+            const teamColor =
+              snap?.driver_meta?.[pinnedCode]?.team_colour ||
+              window.APEX?.TEAMS?.[standing.driver?.team]?.color ||
+              "#FF1E00";
+            // The standings array in the RAF loop comes from
+            // window.APEX.sampleStandingsAt (interpolated for smooth motion),
+            // NOT from computeStandings. The interpolated objects preserve
+            // the raw snake_case frame fields (last_lap_s, best_lap_s, gear,
+            // rpm, throttle_pct, brake_pct, in_drs, in_pit, ...) and add a
+            // few cooked ones (speedKph, compound, tyreAge). Read the raw
+            // fields directly here — the camelCase aliases from
+            // computeStandings (lastLap, bestLap, inDRS, pit) don't exist
+            // on these objects.
+            const lastLapS = standing.last_lap_s;
+            const bestLapS = standing.best_lap_s;
+            const pbLapS = standing.personal_best_lap_s;
+            const drsOn = !!standing.in_drs;
+            const drsLabel = drsOn ? "OPEN" : "CLSD";
+            // Prefer LAST; fall back to BEST when no completed lap yet (e.g.
+            // first lap of the race). Real F1 wheels do exactly this.
+            const fmt = (t) => {
+              const m = Math.floor(t / 60);
+              const s = (t - m * 60);
+              return `${m}:${s.toFixed(3).padStart(6, "0")}`;
+            };
+            let lastLap;
+            let lastLapMode;
+            if (Number.isFinite(lastLapS) && lastLapS > 0) {
+              lastLap = fmt(lastLapS);
+              lastLapMode = "LAST";
+            } else if (Number.isFinite(bestLapS) && bestLapS > 0) {
+              lastLap = fmt(bestLapS);
+              lastLapMode = "BEST";
+            } else {
+              lastLap = "--:--.---";
+              lastLapMode = "LAST";
+            }
+            // Lap tag: session_best > pb > none. Compares the value being
+            // displayed (lastLap or fallback bestLap) against session/PB.
+            const displayedS = (lastLapMode === "LAST") ? lastLapS : bestLapS;
+            let lapTag = "";
+            const sb = window.APEX?.SESSION_BEST?.lap_s;
+            if (Number.isFinite(sb) && Number.isFinite(displayedS) && displayedS > 0 && Math.abs(displayedS - sb) < 0.0005) {
+              lapTag = "session_best";
+            } else if (Number.isFinite(pbLapS) && Number.isFinite(displayedS) && displayedS > 0 && Math.abs(displayedS - pbLapS) < 0.0005) {
+              lapTag = "pb";
+            }
+            wheelHud.repaint({
+              code: standing.driver?.code || pinnedCode,
+              pos: standing.pos,
+              speed: standing.speedKph || standing.speed_kph || 0,
+              gear: standing.gear,
+              rpm: standing.rpm || 0,
+              throttle: standing.throttle_pct || 0,
+              brake: standing.brake_pct || 0,
+              drs: drsLabel,
+              tyre: standing.compound || "M",
+              tyreLaps: standing.tyreAge ?? standing.tyre_age_laps ?? 0,
+              lap: f?.lap || null,
+              totalLaps: f?.total_laps || null,
+              flagState: f?.flag_state || "GREEN",
+              inPit: !!standing.in_pit || standing.status === "PIT",
+              lastLap,
+              lastLapMode,
+              lapTag,
+              teamColor,
+            });
+          }
+        }
       }
 
       updateWeather(live, dt);
@@ -3910,6 +4728,14 @@ function Track3D({
       labelLayer.remove();
       povHud.root.remove();
       povHud.pill.remove();
+      // Detach the wheel HUD quad from whichever car currently owns it before
+      // the scene-level dispose pass, so the live material/geometry don't
+      // get double-disposed via scene.traverse below.
+      detachWheelHud();
+      if (wheelHudQuad.geometry) wheelHudQuad.geometry.dispose();
+      wheelHud.dispose();
+      window.removeEventListener("keydown", onDebugKey);
+      wheelHudDebug.root.remove();
       composer.dispose();
       renderTarget.dispose();
       // envTex is module-cached (getRoomEnvironment) — do NOT dispose here.
