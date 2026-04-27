@@ -1,38 +1,14 @@
-# APEX · Pit Wall — New Frontend
+# APEX · Pit Wall Frontend
 
-A browser-based F1 race engineer console built on top of the forked [4f4d/f1-race-replay](https://github.com/4f4d/f1-race-replay) Python telemetry pipeline. The original project shipped a **PySide6 + Arcade** desktop viewer; this fork adds a full **React** frontend (code-named **APEX Pitwall**) that runs in the browser, backed by a new FastAPI + WebSocket server. Both runtimes coexist — the legacy desktop path still works.
+A browser-based F1 race engineer console built on top of the forked [4f4d/f1-race-replay](https://github.com/4f4d/f1-race-replay) Python telemetry pipeline. The original project shipped a **PySide6 + Arcade** desktop viewer; this fork includes a full **React** frontend (code-named **APEX Pitwall**) that runs in the browser, backed by a FastAPI + WebSocket server. Both runtimes coexist, and the legacy desktop path remains available.
 
-This document enumerates, in detail, **every feature the new frontend adds**.
-
-## Since 2026-04-23 update (`cf926bc` → `HEAD`)
-
-The frontend changed significantly after the last docs pass. Based on git history and tree diff in this range, major updates are:
-
-- **WebGL renderer now first-class** via [Track3D.jsx](project/src/Track3D.jsx) (new file, large addition) with physically richer track/car rendering and retained fallback support for legacy SVG rendering.
-- **New camera/view workflow** in [App.jsx](project/src/App.jsx) and [Controls.jsx](project/src/Controls.jsx): `GL`, `SVG`, `CHASE`, `POV`, `TOP`, plus mode-specific UI behavior.
-- **Quality presets** (`low` / `med` / `high`) for WebGL modes with scalable DPR, shadows, MSAA, and bloom.
-- **POV/follow polish**: cockpit HUD improvements, HUD hide/show toggle, speed-reactive cinematic effects, and better label behavior/placement.
-- **Data-path and frame-loop performance updates** in [data.jsx](project/src/data.jsx), [live_state.jsx](project/src/live_state.jsx), and [Track3D.jsx](project/src/Track3D.jsx): render-time interpolation, enriched standings payload, and allocation/caching cleanups.
-- **3D assets integrated**: `car_model.glb` and `safety_car.glb` now part of the frontend rendering stack.
-
-Frontend files changed in this range include:
-
-- [project/src/Track3D.jsx](project/src/Track3D.jsx)
-- [project/src/App.jsx](project/src/App.jsx)
-- [project/src/Controls.jsx](project/src/Controls.jsx)
-- [project/src/data.jsx](project/src/data.jsx)
-- [project/src/live_state.jsx](project/src/live_state.jsx)
-- [project/src/hotkeyHandler.js](project/src/hotkeyHandler.js)
-- [project/src/App.test.jsx](project/src/App.test.jsx)
-- [project/src/index.jsx](project/src/index.jsx)
-- [project/build.mjs](project/build.mjs)
-- [project/package.json](project/package.json)
+This document is a detailed technical guide to the frontend runtime, rendering stack, API contract, and extension points.
 
 ---
 
 ## Table of Contents
 
-1. [What's new at a glance](#whats-new-at-a-glance)
+1. [Feature overview](#feature-overview)
 2. [Quick start](#quick-start)
 3. [Architecture](#architecture)
 4. [The Pit Wall UI](#the-pit-wall-ui)
@@ -53,22 +29,26 @@ Frontend files changed in this range include:
 
 ---
 
-## What's new at a glance
+## Feature overview
 
-The upstream project had **no browser frontend**. This fork adds:
+The upstream project had no browser frontend. This fork provides:
 
 - A new [project/](project/) directory containing a **React 18** app bundled by **esbuild** into a single IIFE (`project/dist/bundle.js`), served at `http://localhost:8000/app/Pit%20Wall.html`.
 - A new [src/web/](src/web/) FastAPI server that exposes the FastF1 pipeline over HTTP + WebSocket, in parallel with the legacy TCP-9999 insight-window stream.
+- A deterministic Arrow web cache under `computed_data/web/v1/{year}_{round}_{session_type}.arrow` with sidecar metadata validation (`schema_version >= 3`, `cache_profile: "web-replay"`, exact `cache_key`).
+- Cache-first warm startup semantics: valid web cache hydrates runtime state without creating a live FastF1 session object.
+- Cold-cache build semantics: full FastF1 session loading (telemetry/weather/messages) generates deterministic cache artifacts, then runtime state hydrates from cache.
 - **9 dockable panels** with hide / collapse / maximize / pop-out-to-new-window behavior, persisted to `localStorage`.
 - A **dual track renderer**: default **Three.js WebGL** scene ([Track3D.jsx](project/src/Track3D.jsx)) plus legacy **SVG IsoTrack** fallback.
 - WebGL-specific camera modes: **orbit**, **follow/chase**, and **POV**; plus retained **TOP** and **SVG** modes.
 - **Scalable quality presets** (`low`/`med`/`high`) for WebGL rendering to trade visual fidelity vs performance.
+- Binary WebSocket frame transport (`orjson` bytes server-side, `arraybuffer` client-side decode) to minimize repeated serialization overhead.
+- Playback-side memoization for frame/standings calculations and lap-telemetry cache pathing via Arrow `lap_trace_index`.
+- Standings continuity guards and out-of-play handling so retired/incident drivers do not produce invalid interval artifacts.
 - Primary + secondary driver selection with **side-by-side compare traces** (SPD / THR / BRK / GEAR / RPM) and a live delta strip.
 - A **race-engineer-styled HUD**: JetBrains Mono typography, flag-glow overlays, scanlines, pulsing live dot, sector-tinted progress bars.
 - **Strategy strip**, **gap visualisation**, **sector times**, **driver cards**, and a **Race Control feed** with FIA message tagging.
 - Coexistent [Engineer Chat](#engineer-chat--bayesian-tyre-model) AI window with live race context (Groq → Cerebras → Groq-8b fallback chain), 2026 season data, and Bayesian tyre-degradation modelling.
-
-All commits since the initial fork point (`6f473f2`) are frontend or backend additions for this console — ~40 commits across `main`, `feat/map_overhaul`, `feat/ui-features`, and `feat/race_window`.
 
 ---
 
@@ -85,7 +65,7 @@ python -m src.web.pit_wall_server --year 2026 --round 1
 
 Then open **[http://localhost:8000/app/Pit%20Wall.html](http://localhost:8000/app/Pit%20Wall.html)**.
 
-A loading overlay tracks FastF1 cache hydration + telemetry computation. Once `status: "ready"` arrives on the WebSocket, the full console renders.
+A loading overlay tracks session startup state. Warm starts hydrate replay state from deterministic web cache only; cold starts perform full FastF1 load/build, then hydrate from cache. Once `status: "ready"` arrives on the WebSocket, the full console renders.
 
 `npm install` is required once for the frontend bundle. After that, rerun `npm run build` whenever you change files under `project/src/`.
 
@@ -119,7 +99,8 @@ The bundle loads React/ReactDOM from CDN (`unpkg.com`) as globals; only applicat
 ┌──────────────────────────────────────────────────────────────────────┐
 │                   Python process (pit_wall_server.py)                │
 │                                                                      │
-│  FastF1 Cache ──► load_session ──► get_race_telemetry ──► frames     │
+│  Warm path: computed_data/web/v1/{year}_{round}_{session}.arrow      │
+│             + .meta.json  ──► hydrate replay state (cache-only)      │
 │         │                                   │                        │
 │         │                                   ├─► TCP 9999 (unchanged) │
 │         │                                   │   (existing Qt wins)   │
@@ -140,6 +121,35 @@ The bundle loads React/ReactDOM from CDN (`unpkg.com`) as globals; only applicat
 |---|---|---|
 | **Headless web (NEW)** | `python -m src.web.pit_wall_server` | FastAPI + WS → React |
 | **Legacy desktop** | `python main.py` | PySide6 → Arcade → TCP 9999 |
+
+If the deterministic web cache is missing or invalid, startup performs a rebuild into `computed_data/web/v1/` before entering ready state.
+
+### Web cache-first lifecycle
+
+`SessionManager.load(year, round, session_type)` has explicit warm/cold branches:
+
+1. Resolve deterministic path: `computed_data/web/v1/{year}_{round}_{session_type}.arrow`
+2. Validate sidecar metadata (`.meta.json`) against:
+   - `schema_version >= 3`
+   - `cache_profile == "web-replay"`
+   - exact `cache_key` match
+3. Warm path:
+   - open `RaceHandle`
+   - hydrate runtime state from Arrow + sidecar
+   - no `load_session(...)` call
+4. Cold path:
+   - `load_session(...)` + full telemetry/weather/messages load
+   - build deterministic Arrow + sidecar
+   - reopen via `RaceHandle` and hydrate
+
+Startup/loading state messages:
+
+- `Checking web cache`
+- `Building web cache`
+- `Hydrating replay state`
+- `Ready`
+
+In the web runtime, `loaded["session"]` is intentionally nullable and warm-hydrated state sets it to `None`. API/WS payload shapes remain stable for frontend consumers.
 
 ---
 
@@ -204,7 +214,7 @@ The nine registered panels ([PanelRegistry.jsx](project/src/PanelRegistry.jsx)):
 
 ## Track rendering (Track3D + IsoTrack)
 
-[Track3D.jsx](project/src/Track3D.jsx) is now the primary renderer for the circuit panel (`viewMode: webgl/follow/pov`). It adds a Three.js scene with dynamic lighting/post, 3D car/safety-car models, weather-aware material shifts, and camera-mode-specific UX.
+[Track3D.jsx](project/src/Track3D.jsx) is the primary renderer for the circuit panel (`viewMode: webgl/follow/pov`). It adds a Three.js scene with dynamic lighting/post, 3D car/safety-car models, weather-aware material shifts, and camera-mode-specific UX.
 
 [IsoTrack.jsx](project/src/IsoTrack.jsx) remains available as the legacy SVG renderer (`viewMode: iso/top`) and is still useful as a lightweight fallback/debug view.
 
@@ -215,6 +225,13 @@ The nine registered panels ([PanelRegistry.jsx](project/src/PanelRegistry.jsx)):
 - GLB-based **driver car model** and **safety car model**, including orientation and placement on the 3D curve.
 - Camera modes: orbit, follow/chase, and POV; speed-reactive vignette/FOV behavior in dynamic modes.
 - In-scene overlays: floating labels, selection/compare halos, and POV HUD integration.
+- Robust model fallback path: if GLB assets fail, primitive marker meshes are substituted so rendering remains functional.
+- Status-aware labels: `RET` and `ACC` badges are rendered in overlays, and retired/incident cars are hidden from track labels to reduce clutter.
+- Smoothing and interpolation:
+  - data-path interpolation in `data.jsx`/`live_state.jsx`
+  - per-car visual smoothing in Track3D
+  - seek-safe buffer resets when playback state/time discontinuities are detected
+- Track3D includes zero-allocation hot-path cleanups, SMAA edge anti-aliasing, race-start seam/orientation fixes, and wet-conditions visibility adjustments.
 
 ### IsoTrack (legacy SVG path)
 
@@ -464,7 +481,7 @@ New package under [src/web/](src/web/):
 | File | Role |
 |---|---|
 | `pit_wall_server.py` | FastAPI + Uvicorn entry point; argparse; static mount at `/app` → `project/` |
-| `session_manager.py` | FastF1 session loader; caches processed telemetry in-proc; exposes loading state |
+| `session_manager.py` | Cache-first web loader; warm loads hydrate from deterministic Arrow cache, cold loads rebuild via FastF1 |
 | `playback.py` | Wall-clock playhead (25 Hz internal, ~60 Hz WS push cap); frame builder |
 | `ws_hub.py` | WebSocket connection manager and broadcaster |
 | `ws_routes.py` | `/ws/telemetry` endpoint |
@@ -559,7 +576,7 @@ project/                                # NEW — React frontend
 
 src/web/                                # NEW — FastAPI backend
 ├── pit_wall_server.py                  # Entry + static mount
-├── session_manager.py                  # FastF1 loader + cache
+├── session_manager.py                  # Cache-first web loader + deterministic cache builder
 ├── playback.py                         # Playhead + frame builder
 ├── ws_hub.py                           # WS connection manager
 ├── ws_routes.py                        # /ws/telemetry
@@ -607,5 +624,3 @@ window.MyPanel = MyPanel;
 Add it to the registry, wrap it in a `<PanelFrame>` inside `App.jsx`, and it inherits hide / collapse / maximize / popout / localStorage persistence automatically.
 
 ---
-
-*Last updated 2026-04-24 — fork `Austen33/f1-race-replay`, branch `feat/web_gl_track`.*
