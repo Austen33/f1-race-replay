@@ -41,6 +41,8 @@ The upstream project had no browser frontend. This fork provides:
 - **9 dockable panels** with hide / collapse / maximize / pop-out-to-new-window behavior, persisted to `localStorage`.
 - A **dual track renderer**: default **Three.js WebGL** scene ([Track3D.jsx](project/src/Track3D.jsx)) plus legacy **SVG IsoTrack** fallback.
 - WebGL-specific camera modes: **orbit**, **follow/chase**, and **POV**; plus retained **TOP** and **SVG** modes.
+- A cockpit-mounted **steering-wheel HUD** in POV: live gear / speed / brake / throttle / MOM / tyre / lap / flag-state telemetry rendered directly onto the pinned driver's wheel, with a live tuning panel for placement and emissive controls.
+- Updated GLB car assets with tuned cockpit framing, flat team-colour livery handling, and preserved non-livery materials so body colours stay readable without washing out carbon, chrome, or wheel detail.
 - **Scalable quality presets** (`low`/`med`/`high`) for WebGL rendering to trade visual fidelity vs performance.
 - Binary WebSocket frame transport (`orjson` bytes server-side, `arraybuffer` client-side decode) to minimize repeated serialization overhead.
 - Playback-side memoization for frame/standings calculations and lap-telemetry cache pathing via Arrow `lap_trace_index`.
@@ -222,9 +224,11 @@ The nine registered panels ([PanelRegistry.jsx](project/src/PanelRegistry.jsx)):
 
 - Three.js renderer with ACES tone mapping, post-processing chain (bloom + vignette + output), and quality presets.
 - 3D track layers and surface treatment (track, runoff, kerbs, grass/verges, barriers, gravel pockets) with weather-aware color/material modulation.
-- GLB-based **driver car model** and **safety car model**, including orientation and placement on the 3D curve.
+- GLB-based **driver car model** and **safety car model**, including tuned fit/orientation on the 3D curve plus flat team-colour livery handling that keeps wheel, carbon, chrome, and cockpit materials readable.
 - Camera modes: orbit, follow/chase, and POV; speed-reactive vignette/FOV behavior in dynamic modes.
-- In-scene overlays: floating labels, selection/compare halos, and POV HUD integration.
+- In-scene overlays: floating labels, selection/compare halos, follow-cam HUD, and steering-wheel POV HUD integration.
+- Steering-wheel live HUD: renders gear, speed, throttle, brake, MOM state, tyre/lap info, last-lap tagging, and flag state onto the pinned driver's cockpit wheel; SC / VSC states are mirrored into the wheel display and the pit-limiter takeover only appears during genuine pit-lane segments.
+- Live wheel-HUD tuning panel: `W` toggles an on-screen control surface for quad placement, UV flipping, scale, and emissive intensity; tuned defaults live in [`project/src/track3d/constants.js`](project/src/track3d/constants.js).
 - Robust model fallback path: if GLB assets fail, primitive marker meshes are substituted so rendering remains functional.
 - Status-aware labels: `RET` and `ACC` badges are rendered in overlays, and retired/incident cars are hidden from track labels to reduce clutter.
 - Smoothing and interpolation:
@@ -406,6 +410,8 @@ Top-right floating overlay, collapsible with `C`.
 - **LABELS** toggle — driver codes on/off (`L`).
 - **HIDE [C]** button (collapse) and **RESET** (back to broadcast preset).
 
+In `POV`, the old floating HUD is intentionally replaced by the steering-wheel display. `H` affects the follow-cam overlay, while `W` opens the wheel-HUD tuning panel.
+
 Camera state is client-local; presets (when edit mode is active) include BROADCAST, TOP DOWN, LOW ANGLE, PADDOCK.
 
 ---
@@ -425,7 +431,8 @@ From [hotkeyHandler.js](project/src/hotkeyHandler.js) (ref-based to avoid stale 
 | `M` | Toggle view mode (`TOP` ↔ `WEBGL`) |
 | `D` | Force WebGL (`WEBGL`) view |
 | `F` | Toggle chase camera (`FOLLOW` ↔ `WEBGL`) |
-| `H` | Toggle POV HUD visibility |
+| `H` | Toggle follow-cam HUD visibility |
+| `W` | Toggle the wheel-HUD tuning panel (debug) |
 | `C` | Collapse / expand camera controls |
 | `Esc` | Exit panel maximize |
 
@@ -563,7 +570,7 @@ project/                                # NEW — React frontend
     ├── loading_gate.jsx                # Cold-load progress overlay
     ├── data.jsx                        # window.APEX live-data shim
     ├── App.jsx                         # Root component; rail grid; state
-    ├── Track3D.jsx                     # Three.js WebGL track renderer (default)
+    ├── Track3D.jsx                     # Three.js scene orchestration, camera logic, animation loop
     ├── IsoTrack.jsx                    # Legacy 3D/2D SVG renderer (fallback modes)
     ├── Leaderboard.jsx                 # Classification panel
     ├── Telemetry.jsx                   # DriverCard, CompareTraces, SectorTimes
@@ -572,6 +579,16 @@ project/                                # NEW — React frontend
     ├── PanelFrame.jsx                  # Collapse / maximize / popout chrome
     ├── Controls.jsx                    # TopBar, Timeline, CameraControls
     ├── hotkeyHandler.js                # Keyboard shortcuts
+    ├── track3d/
+    │   ├── atmosphere.js               # Sky, rain, trackside set-dressing, time-of-day helpers
+    │   ├── cars.js                     # GLB loading, marker construction, material/livery handling
+    │   ├── constants.js                # Wheel-HUD tuning defaults
+    │   ├── geometry.js                 # Track ribbons, gates, terrain, and helper geometry
+    │   ├── hud.js                      # Follow HUD + steering-wheel HUD + tuning panel
+    │   ├── index.js                    # Track3D helper barrel exports
+    │   ├── labels.js                   # DOM label layer helpers
+    │   ├── textures.js                 # Procedural textures + environment cache
+    │   └── wheelHudAttachment.js       # Steering-wheel HUD attach / detach / reapply logic
     └── App.test.jsx                    # Tests
 
 src/web/                                # NEW — FastAPI backend
