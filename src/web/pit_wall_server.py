@@ -106,6 +106,7 @@ def main():
         host=args.host,
         port=args.port,
         ws_max_size=32 * 1024 * 1024,
+        ws_per_message_deflate=True,
         ws_ping_interval=20.0,
         ws_ping_timeout=20.0,
         ws_max_queue=64,

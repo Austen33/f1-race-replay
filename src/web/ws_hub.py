@@ -1,8 +1,8 @@
-import json
 import time
 from collections import deque
 from threading import Lock
 
+import orjson
 from fastapi import WebSocket, WebSocketDisconnect
 from src.web.serialization import safe_jsonable
 
@@ -24,7 +24,8 @@ class WSHub:
         await ws.accept()
         self.active.add(ws)
         snap = self._snapshot_provider() if self._snapshot_provider else {"type": "loading"}
-        await ws.send_json(safe_jsonable(snap))
+        payload_bytes = orjson.dumps(safe_jsonable(snap), option=orjson.OPT_SERIALIZE_NUMPY)
+        await ws.send_bytes(payload_bytes)
 
     def disconnect(self, ws: WebSocket):
         self.active.discard(ws)
@@ -61,14 +62,13 @@ class WSHub:
             }
 
     async def broadcast(self, payload: dict):
-        data = safe_jsonable(payload)
-        payload_json = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-        payload_size = len(payload_json.encode("utf-8"))
+        payload_bytes = orjson.dumps(safe_jsonable(payload), option=orjson.OPT_SERIALIZE_NUMPY)
+        payload_size = len(payload_bytes)
         self._observe_broadcast(payload_size)
         dead = []
         for ws in list(self.active):
             try:
-                await ws.send_text(payload_json)
+                await ws.send_bytes(payload_bytes)
             except (WebSocketDisconnect, RuntimeError):
                 dead.append(ws)
             except Exception:

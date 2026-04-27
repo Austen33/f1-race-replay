@@ -87,8 +87,7 @@ class Playback:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loaded_signature: tuple | None = None
         self._snapshot_pending = False
-        self._frame_cache_idx: int | None = None
-        self._frame_cache_payload: dict | None = None
+        self._frame_cache: dict[int, dict | None] = {}
         self._standings_cache_key: tuple | None = None
         self._standings_cache: list | None = None
         self._standings_cache_hits = 0
@@ -182,14 +181,15 @@ class Playback:
         self._flag_bisect = FlagBisectByTime(loaded["track_statuses"])
         self.frame_index = 0.0
         self._last_broadcast_t_s = 0.0
-        self._frame_cache_idx = None
-        self._frame_cache_payload = None
+        self._frame_cache.clear()
         self._invalidate_standings_cache()
         self._snapshot_pending = True
 
     def _frame_at(self, loaded: dict, frame_index: int) -> dict | None:
-        if self._frame_cache_idx == frame_index and self._frame_cache_payload is not None:
-            return self._frame_cache_payload
+        if frame_index in self._frame_cache:
+            frame = self._frame_cache.pop(frame_index)
+            self._frame_cache[frame_index] = frame
+            return frame
 
         frame = None
         if loaded.get("handle") is not None:
@@ -199,8 +199,9 @@ class Playback:
             if 0 <= frame_index < len(frames):
                 frame = frames[frame_index]
 
-        self._frame_cache_idx = frame_index
-        self._frame_cache_payload = frame
+        self._frame_cache[frame_index] = frame
+        if len(self._frame_cache) > 2:
+            self._frame_cache.pop(next(iter(self._frame_cache)))
         return frame
 
     def _standings_for_frame(

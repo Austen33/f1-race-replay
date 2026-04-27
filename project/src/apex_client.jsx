@@ -20,9 +20,23 @@ async function post(path, body) {
 function openSocket(onMessage) {
   let ws;
   let retry = 0;
+  const decoder = new TextDecoder();
+  const parsePayload = async (raw) => {
+    if (typeof raw === "string") return JSON.parse(raw);
+    if (raw instanceof ArrayBuffer) return JSON.parse(decoder.decode(raw));
+    if (ArrayBuffer.isView(raw)) return JSON.parse(decoder.decode(raw));
+    if (raw && typeof raw.text === "function") return JSON.parse(await raw.text());
+    return null;
+  };
   const connect = () => {
     ws = new WebSocket(WS_BASE + "/ws/telemetry");
-    ws.onmessage = (ev) => { try { onMessage(JSON.parse(ev.data)); } catch {} };
+    ws.binaryType = "arraybuffer";
+    ws.onmessage = async (ev) => {
+      try {
+        const parsed = await parsePayload(ev.data);
+        if (parsed) onMessage(parsed);
+      } catch {}
+    };
     ws.onclose = () => {
       const delay = Math.min(1000 * (2 ** retry), 10000);
       retry = Math.min(retry + 1, 4);
