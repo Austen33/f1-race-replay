@@ -3443,6 +3443,12 @@ function Track3D({
       const h = renderer.domElement.clientHeight;
       for (const [code, entry] of driverMap) {
         const label = entry.label;
+        const labelBadge = String(entry.lastLabelStatus || "").trim().toUpperCase();
+        const hideFromTrack = labelBadge === "RET" || labelBadge === "ACC";
+        if (hideFromTrack) {
+          if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
+          continue;
+        }
         // Hide the pinned driver's own label in POV — they're the camera.
         if (inPov && code === live.pinned) {
           if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
@@ -3544,6 +3550,7 @@ function Track3D({
         const isSecondary = live.secondary === s.driver.code;
         const ring = entry.group.userData.groundHalo;
         const labelStatus = s.labelStatus ?? s.label_status ?? null;
+        const isRetired = labelStatus === "RET" || labelStatus === "ACC";
         const isDns = s.status === "OUT" && labelStatus === "DNS";
         ring.scale.setScalar(isPinned ? 1.35 : isSecondary ? 1.15 : 1);
         ring.material.color.set(
@@ -3582,8 +3589,9 @@ function Track3D({
         const status = s.status;
         const renderKey = `${status}:${labelStatus || ""}`;
         if (entry.lastRenderKey !== renderKey) {
-          const outOfPlay = isDns ? false : status === "OUT";
+          const outOfPlay = isDns ? false : (status === "OUT" || isRetired);
           const inPit = status === "PIT";
+          entry.group.visible = !outOfPlay;
           for (const m of entry.group.userData.body) m.visible = !outOfPlay;
           for (const wh of entry.group.userData.wheels) wh.visible = !outOfPlay;
           if (entry.group.userData.compound) entry.group.userData.compound.visible = !outOfPlay && !isDns;

@@ -4,6 +4,11 @@ const { TEAMS, COMPOUNDS, DRIVERS, getStints, getPitStops } = window.APEX;
 const FALLBACK_TEAM_COLOR = "#9AA3B2";
 const FALLBACK_COMPOUND_COLOR = "#FFD93A";
 
+function isOutOfPlayStanding(s) {
+  const badge = String(s?.labelStatus || "").trim().toUpperCase();
+  return s?.status === "OUT" || badge === "RET" || badge === "ACC";
+}
+
 // Map fastf1 compound strings → APEX keys
 const COMPOUND_KEY = {
   SOFT: "S", MEDIUM: "M", HARD: "H",
@@ -93,8 +98,12 @@ function StrategyStrip({ standings, totalLaps, lap }) {
 // Compact gap-to-leader visualizer (spider)
 function GapViz({ standings, pinned }) {
   const T = window.THEME;
-  const top = standings.slice(0, 10);
-  const maxGap = Math.max(...top.map(s => s.gap ?? 0), 1);
+  const running = React.useMemo(
+    () => standings.filter((s) => !isOutOfPlayStanding(s)),
+    [standings],
+  );
+  const top = running.slice(0, 10);
+  const maxGap = Math.max(...top.map((s) => s.gap ?? 0), 1);
   return (
     <div className="apex-panel-mount" style={{
       background: T.surface,
@@ -107,7 +116,8 @@ function GapViz({ standings, pinned }) {
             name: s.driver.team || "Unknown",
             color: FALLBACK_TEAM_COLOR,
           };
-          const pct = (s.gap / maxGap) * 100;
+          const gap = s.gap ?? 0;
+          const pct = (gap / maxGap) * 100;
           const isPinned = pinned === s.driver.code;
           return (
             <div key={s.driver.code} style={{
@@ -122,7 +132,7 @@ function GapViz({ standings, pinned }) {
                 <div style={{ position: "absolute", left: 0, width: `${pct}%`, height: "100%", background: team.color }}/>
               </div>
               <div style={{ color: "rgba(230,230,239,0.8)", fontVariantNumeric: "tabular-nums", textAlign: "right" }}>
-                {s.gap === 0 ? "LEADER" : `+${s.gap.toFixed(2)}`}
+                {s.pos === 1 ? "LEADER" : `+${gap.toFixed(2)}`}
               </div>
             </div>
           );

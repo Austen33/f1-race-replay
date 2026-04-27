@@ -23,6 +23,12 @@ function fmtLap(t) {
 }
 
 const SECTOR_COLORS = ["#FF1E00", "#FFD93A", "#00D9FF"];
+function outLabelForRow(s) {
+  const badge = String(s?.labelStatus || "").trim().toUpperCase();
+  if (badge === "RET" || badge === "ACC" || badge === "DNS") return badge;
+  return "DNF";
+}
+
 function sectorOf(fraction) {
   if (fraction == null) return 0;
   if (fraction < 0.33) return 0;
@@ -42,7 +48,10 @@ function Leaderboard({ standings, pinned, secondary, onPick, onShiftPick, bestLa
       height: "100%",
       overflow: "hidden",
     }}>
-      <PanelHeader title="CLASSIFICATION" meta={`${standings.filter(s => s.status !== "OUT").length}/20 CARS`} />
+      <PanelHeader
+        title="CLASSIFICATION"
+        meta={`${standings.filter((s) => s.status !== "OUT").length}/20 CARS`}
+      />
       <div style={{
         display: "grid",
         gridTemplateColumns: "24px 26px 1fr 62px 62px 58px 22px",
@@ -81,6 +90,7 @@ function LeaderboardRow({ s, pinned, secondary, bestLapCode, onPick, onShiftPick
   const isPinned = pinned === s.driver.code;
   const isSec = secondary === s.driver.code;
   const isOut = s.status === "OUT";
+  const outLabel = outLabelForRow(s);
   const isBest = bestLapCode === s.driver.code;
 
   // Detect sector transitions — pulse the row for pinned driver when they
@@ -111,6 +121,7 @@ function LeaderboardRow({ s, pinned, secondary, bestLapCode, onPick, onShiftPick
       ref={rowRef}
       className="apex-row"
       onClick={(e) => {
+        if (isOut) return;
         if (e.shiftKey) onShiftPick(s.driver.code);
         else onPick(s.driver.code);
       }}
@@ -123,7 +134,7 @@ function LeaderboardRow({ s, pinned, secondary, bestLapCode, onPick, onShiftPick
         fontFamily: T.mono,
         fontSize: 11,
         color: isOut ? T.textFaint : T.text,
-        cursor: "pointer",
+        cursor: isOut ? "default" : "pointer",
         borderLeft: isPinned ? `2px solid ${T.hot}` : isSec ? `2px solid ${T.cool}` : "2px solid transparent",
         background: isPinned
           ? "linear-gradient(90deg, rgba(255,30,0,0.12), transparent 60%)"
@@ -132,11 +143,11 @@ function LeaderboardRow({ s, pinned, secondary, bestLapCode, onPick, onShiftPick
           : "transparent",
         borderBottom: T.borderSoft,
       }}
-      onMouseEnter={(e) => { if (!isPinned && !isSec) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
-      onMouseLeave={(e) => { if (!isPinned && !isSec) e.currentTarget.style.background = "transparent"; }}
+      onMouseEnter={(e) => { if (!isOut && !isPinned && !isSec) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
+      onMouseLeave={(e) => { if (!isOut && !isPinned && !isSec) e.currentTarget.style.background = "transparent"; }}
     >
       <div style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-        {String(s.pos).padStart(2, " ")}
+        {isOut ? "--" : String(s.pos).padStart(2, " ")}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
         <div style={{ width: 3, height: 14, background: team.color }}/>
@@ -165,7 +176,7 @@ function LeaderboardRow({ s, pinned, secondary, bestLapCode, onPick, onShiftPick
         <div style={{ fontSize: 8, color: T.textFaint, letterSpacing: T.ls.label, marginTop: isOut ? 0 : 1 }}>{team.name}</div>
       </div>
       <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums", fontSize: T.fs.sm, color: isOut ? "inherit" : "rgba(230,230,239,0.85)" }}>
-        {isOut ? "DNF" : fmtGap(s.gap)}
+        {isOut ? outLabel : fmtGap(s.gap)}
       </div>
       <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums", fontSize: T.fs.sm, color: T.textMuted }}>
         {isOut ? "—" : fmtInterval(s.interval)}

@@ -488,13 +488,6 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
             dt = dt_actual
     DECEL_FULL = 50.0  # m/s² ≈ 5g, F1 peak braking, maps to 100%
 
-    driver_progress = {}
-    for code, d in drivers.items():
-        driver_progress[code] = float(d.get("dist", 0.0))
-
-    sorted_codes = sorted(driver_progress.keys(), key=lambda c: driver_progress[c], reverse=True)
-    pos_by_code = {code: i + 1 for i, code in enumerate(sorted_codes)}
-
     lap_data = loaded.get("lap_data", {})
     lap_aggregates = loaded.get("lap_aggregates", {})
     driver_meta = loaded.get("driver_meta", {})
@@ -505,15 +498,35 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
     if total_duration_s <= 0.0 and loaded.get("frames"):
         total_duration_s = float(loaded["frames"][-1]["t"])
     all_codes = list(driver_meta.keys())
+    out_badges = {"RET", "ACC", "DNS"}
 
-    standings = []
+    badge_cache = {}
     for code in all_codes:
         result_info = driver_results.get(code, {})
         telemetry_window = telemetry_ranges.get(code)
         stop_window = driver_stop_windows.get(code)
-        badge, badge_reason = _status_badge_for_driver(
+        badge_cache[code] = _status_badge_for_driver(
             result_info, telemetry_window, stop_window, float(frame.get("t", 0.0)), total_duration_s
         )
+
+    driver_progress = {}
+    for code, d in drivers.items():
+        driver_progress[code] = float(d.get("dist", 0.0))
+
+    rankable_codes = [
+        code
+        for code in driver_progress.keys()
+        if str((badge_cache.get(code) or (None, None))[0] or "").upper() not in out_badges
+    ]
+    if not rankable_codes:
+        rankable_codes = list(driver_progress.keys())
+
+    sorted_codes = sorted(rankable_codes, key=lambda c: driver_progress[c], reverse=True)
+    pos_by_code = {code: i + 1 for i, code in enumerate(sorted_codes)}
+
+    standings = []
+    for code in all_codes:
+        badge, badge_reason = badge_cache.get(code, (None, None))
 
         if code not in drivers:
             standings.append({
@@ -552,13 +565,15 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
             })
             continue
 
-        pos = pos_by_code[code]
+        pos = pos_by_code.get(code, 99)
         d = drivers[code]
         progress_m = driver_progress[code]
-        leader_progress = driver_progress[sorted_codes[0]]
+        badge_norm = str(badge or "").upper()
+        is_out_badge = badge_norm in out_badges
         gap_s = None
         interval_s = None
-        if pos > 1:
+        if (not is_out_badge) and pos > 1 and sorted_codes:
+            leader_progress = driver_progress[sorted_codes[0]]
             gap_dist = abs(leader_progress - progress_m)
             gap_s = round(gap_dist / 10.0 / 55.56, 3)
             ahead_progress = driver_progress[sorted_codes[pos - 2]]
@@ -599,7 +614,11 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
             if (current_lap_info.get("pit_in") and fraction > 0.9) or (current_lap_info.get("pit_out") and fraction < 0.1):
                 in_pit = True
 
-        status = "PIT" if in_pit else "RUN"
+        if is_out_badge:
+            status = "OUT"
+            in_pit = False
+        else:
+            status = "PIT" if in_pit else "RUN"
 
         standings.append({
             "pos": pos,

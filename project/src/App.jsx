@@ -62,11 +62,10 @@ function App() {
   const [pinned, setPinned] = React.useState(null);
   const [secondary, setSecondary] = React.useState(null);
 
-  // Auto-pin leader on first frame
-  React.useEffect(() => {
-    if (pinned || !frame?.standings?.length) return;
-    setPinned(frame.standings[0].code);
-  }, [frame?.standings, pinned]);
+  const isOutOfPlayStanding = React.useCallback((s) => {
+    const badge = String(s?.labelStatus || "").trim().toUpperCase();
+    return s?.status === "OUT" || badge === "RET" || badge === "ACC";
+  }, []);
 
   // Camera
   const [rotateX, setRotateX] = React.useState(TWEAK_DEFAULTS.tiltDefault);
@@ -178,8 +177,35 @@ function App() {
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
-  // Compute race state from live frame
+  // Compute race state from live frame using backend ordering/positions.
   const standings = React.useMemo(() => computeStandings(t, lap, totalLaps), [frame]);
+
+  // Auto-pin first active driver when selection is empty.
+  React.useEffect(() => {
+    if (pinned || standings.length === 0) return;
+    const firstActive = standings.find((s) => !isOutOfPlayStanding(s));
+    if (firstActive) setPinned(firstActive.driver.code);
+  }, [standings, pinned, isOutOfPlayStanding]);
+
+  // Keep pin/secondary attached to active, selectable drivers only.
+  React.useEffect(() => {
+    if (!standings.length) return;
+    const byCode = new Map(standings.map((s) => [s.driver.code, s]));
+    const firstActive = standings.find((s) => !isOutOfPlayStanding(s))?.driver.code ?? null;
+
+    if (pinned) {
+      const ps = byCode.get(pinned);
+      if (!ps || isOutOfPlayStanding(ps)) {
+        setPinned(firstActive);
+      }
+    }
+    if (secondary) {
+      const ss = byCode.get(secondary);
+      if (!ss || isOutOfPlayStanding(ss) || secondary === pinned) {
+        setSecondary(null);
+      }
+    }
+  }, [standings, pinned, secondary, isOutOfPlayStanding]);
   const bestLapCode = standings.length > 0
     ? standings.reduce((a, b) => {
       const av = a.bestLap > 0 ? a.bestLap : Infinity;
@@ -252,10 +278,14 @@ function App() {
   const secondaryData = secondary ? telemetryFor(secondary, t) : null;
 
   const onPick = (code) => {
+    const selected = standings.find((s) => s.driver.code === code);
+    if (!selected || isOutOfPlayStanding(selected)) return;
     if (code === pinned) { setPinned(secondary); setSecondary(null); }
     else setPinned(code);
   };
   const onShiftPick = (code) => {
+    const selected = standings.find((s) => s.driver.code === code);
+    if (!selected || isOutOfPlayStanding(selected)) return;
     if (code === pinned) return;
     if (code === secondary) setSecondary(null);
     else setSecondary(code);
