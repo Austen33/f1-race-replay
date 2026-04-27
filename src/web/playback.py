@@ -2,8 +2,6 @@ import asyncio
 import time
 from bisect import bisect_right
 
-import numpy as np
-
 from src.data import perf_metrics
 from src.f1_data import FPS
 from src.web.ws_hub import WSHub
@@ -489,49 +487,15 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
             dt = dt_actual
     DECEL_FULL = 50.0  # m/s² ≈ 5g, F1 peak braking, maps to 100%
 
-    ref_xs = geo.get("_ref_xs")
-    ref_ys = geo.get("_ref_ys")
-    ref_cumdist = geo.get("_ref_cumdist")
-    ref_total_length = geo.get("_ref_total_length", 0.0)
-    track_tree = geo.get("_track_tree")
-
     driver_progress = {}
     for code, d in drivers.items():
-        x, y = d.get("x", 0.0), d.get("y", 0.0)
-        lap = d.get("lap", 1)
-        try:
-            lap = int(lap)
-        except (ValueError, TypeError):
-            lap = 1
-
-        projected_m = 0.0
-        if track_tree is not None and ref_cumdist is not None:
-            _, idx = track_tree.query([x, y])
-            idx = int(idx)
-            if idx < len(ref_xs) - 1:
-                x1, y1 = ref_xs[idx], ref_ys[idx]
-                x2, y2 = ref_xs[idx + 1], ref_ys[idx + 1]
-                vx, vy = x2 - x1, y2 - y1
-                seg_len2 = vx * vx + vy * vy
-                if seg_len2 > 0:
-                    t = ((x - x1) * vx + (y - y1) * vy) / seg_len2
-                    t_clamped = max(0.0, min(1.0, t))
-                    proj_x = x1 + t_clamped * vx
-                    proj_y = y1 + t_clamped * vy
-                    seg_dist = float(np.sqrt((proj_x - x1) ** 2 + (proj_y - y1) ** 2))
-                    projected_m = float(ref_cumdist[idx] + seg_dist)
-                else:
-                    projected_m = float(ref_cumdist[idx])
-            else:
-                projected_m = float(ref_cumdist[idx])
-
-        progress_m = float((max(lap, 1) - 1) * ref_total_length + projected_m)
-        driver_progress[code] = progress_m
+        driver_progress[code] = float(d.get("dist", 0.0))
 
     sorted_codes = sorted(driver_progress.keys(), key=lambda c: driver_progress[c], reverse=True)
     pos_by_code = {code: i + 1 for i, code in enumerate(sorted_codes)}
 
     lap_data = loaded.get("lap_data", {})
+    lap_aggregates = loaded.get("lap_aggregates", {})
     driver_meta = loaded.get("driver_meta", {})
     driver_results = loaded.get("driver_results", {})
     telemetry_ranges = loaded.get("telemetry_ranges", {})
@@ -601,10 +565,11 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
             interval_s = round(int_dist / 10.0 / 55.56, 3)
 
         driver_laps_data = lap_data.get(code, {}).get("laps", {})
+        lap_agg = lap_aggregates.get(code, {})
         current_lap = d.get("lap", 1)
         prev_lap_no = current_lap - 1
         last_lap_s = None
-        best_lap_s = None
+        best_lap_s = lap_agg.get("best_lap_s")
         last_s1_s = None
         last_s2_s = None
         last_s3_s = None
@@ -615,27 +580,16 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
             last_s2_s = round(prev_lap["s2_s"], 3) if prev_lap.get("s2_s") is not None else None
             last_s3_s = round(prev_lap["s3_s"], 3) if prev_lap.get("s3_s") is not None else None
 
-        if driver_laps_data:
-            lap_times_vals = [lap["lap_time_s"] for lap in driver_laps_data.values() if lap.get("lap_time_s") is not None]
-            if lap_times_vals:
-                best_lap_s = round(min(lap_times_vals), 3)
-            s1_vals = [lap["s1_s"] for lap in driver_laps_data.values() if lap.get("s1_s") is not None]
-            s2_vals = [lap["s2_s"] for lap in driver_laps_data.values() if lap.get("s2_s") is not None]
-            s3_vals = [lap["s3_s"] for lap in driver_laps_data.values() if lap.get("s3_s") is not None]
-            personal_best_lap_s = round(min(lap_times_vals), 3) if lap_times_vals else None
-            personal_best_s1_s = round(min(s1_vals), 3) if s1_vals else None
-            personal_best_s2_s = round(min(s2_vals), 3) if s2_vals else None
-            personal_best_s3_s = round(min(s3_vals), 3) if s3_vals else None
-        else:
-            personal_best_lap_s = None
-            personal_best_s1_s = None
-            personal_best_s2_s = None
-            personal_best_s3_s = None
+        personal_best_lap_s = lap_agg.get("personal_best_lap_s")
+        personal_best_s1_s = lap_agg.get("personal_best_s1_s")
+        personal_best_s2_s = lap_agg.get("personal_best_s2_s")
+        personal_best_s3_s = lap_agg.get("personal_best_s3_s")
 
         drs_raw = d.get("drs", 0)
         in_drs = drs_raw in (10, 12, 14)
 
-        fraction = progress_m / ref_total_length if ref_total_length > 0 else 0.0
+        rel_dist = float(d.get("rel_dist", 0.0))
+        fraction = max(0.0, min(1.0, rel_dist))
 
         # Live branch: fallback based on lap-level PitInTime/PitOutTime and lap fraction (frame does not set in_pit)
         current_lap_info = driver_laps_data.get(current_lap)
@@ -668,7 +622,7 @@ def standings_from_frame(frame: dict, loaded: dict, geo: dict, prev_frame: dict 
             "x": float(d.get("x", 0.0)),
             "y": float(d.get("y", 0.0)),
             "lap": int(d.get("lap", 1)),
-            "rel_dist": float(d.get("rel_dist", 0.0)),
+            "rel_dist": rel_dist,
             "fraction": round(fraction, 6),
             "speed_kph": float(d.get("speed", 0.0)),
             "gear": int(d.get("gear", 0)),

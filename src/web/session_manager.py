@@ -54,6 +54,8 @@ class SessionManager:
             driver_meta = _extract_driver_meta(session)
             driver_results = _extract_driver_results(session)
             rotation = get_circuit_rotation(session)
+            lap_data = _precompute_lap_data(session)
+            lap_aggregates = _compute_lap_aggregates(lap_data)
             frames = race.get("frames")
             track_statuses = race["track_statuses"]
             if frames:
@@ -90,7 +92,8 @@ class SessionManager:
                     frames if frames is not None else handle, driver_results
                 ),
                 "event": _event_info(session, year, round_number, {"total_laps": total_laps}),
-                "lap_data": _precompute_lap_data(session),
+                "lap_data": lap_data,
+                "lap_aggregates": lap_aggregates,
                 "session_best": _compute_session_best(session),
                 "fastest_qual_lap_s": _fastest_qual_lap_s(session),
             }
@@ -562,6 +565,28 @@ def _precompute_lap_data(session):
                     stints[-1]["laps"] = lap_no - stints[-1]["start_lap"] + 1
         driver_data["stints"] = stints
         driver_data["pit_stops"] = pit_stops
+
+    return out
+
+
+def _compute_lap_aggregates(lap_data: dict) -> dict:
+    out = {}
+
+    for code, driver_data in lap_data.items():
+        laps = driver_data.get("laps", {})
+        lap_times = [lap["lap_time_s"] for lap in laps.values() if lap.get("lap_time_s") is not None]
+        s1_vals = [lap["s1_s"] for lap in laps.values() if lap.get("s1_s") is not None]
+        s2_vals = [lap["s2_s"] for lap in laps.values() if lap.get("s2_s") is not None]
+        s3_vals = [lap["s3_s"] for lap in laps.values() if lap.get("s3_s") is not None]
+
+        best_lap_s = round(min(lap_times), 3) if lap_times else None
+        out[code] = {
+            "best_lap_s": best_lap_s,
+            "personal_best_lap_s": best_lap_s,
+            "personal_best_s1_s": round(min(s1_vals), 3) if s1_vals else None,
+            "personal_best_s2_s": round(min(s2_vals), 3) if s2_vals else None,
+            "personal_best_s3_s": round(min(s3_vals), 3) if s3_vals else None,
+        }
 
     return out
 
