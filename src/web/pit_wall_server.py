@@ -1,10 +1,11 @@
 import argparse
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -53,9 +54,28 @@ def build_app(year: int, round_number: int, session_type: str, cache_dir: Path) 
     register_http(app)
     register_ws(app)
 
+    # Disable HTTP caching for frontend assets so browser reloads always pick up
+    # the newest bundle after rebuilds/restarts.
+    @app.middleware("http")
+    async def _disable_frontend_cache(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/app/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     # Serve the prototype at /app/Pit%20Wall.html
     project_dir = Path(__file__).resolve().parent.parent.parent / "project"
     if project_dir.is_dir():
+        bundle_path = project_dir / "dist" / "bundle.js"
+        bundle_sig = "missing"
+        if bundle_path.is_file():
+            try:
+                bundle_sig = hashlib.md5(bundle_path.read_bytes()).hexdigest()[:12]
+            except Exception:
+                bundle_sig = "unreadable"
+        print(f"[pit_wall] static /app -> {project_dir} (bundle md5: {bundle_sig})")
         app.mount("/app", StaticFiles(directory=str(project_dir), html=True), name="app")
 
     # Snapshot provider for WS hub — sends full state on connect

@@ -1,6 +1,8 @@
 // Right-side panels: tyre strategy, pit predictor, ghost radar, etc.
 
 const { TEAMS, COMPOUNDS, DRIVERS, getStints, getPitStops } = window.APEX;
+const FALLBACK_TEAM_COLOR = "#9AA3B2";
+const FALLBACK_COMPOUND_COLOR = "#FFD93A";
 
 // Map fastf1 compound strings → APEX keys
 const COMPOUND_KEY = {
@@ -21,7 +23,10 @@ function StrategyStrip({ standings, totalLaps, lap }) {
       <PanelHeader title="TYRE STRATEGY" meta={`LAP ${lap}/${totalLaps}`}/>
       <div style={{ padding: "6px 10px", fontFamily: T.mono }}>
         {top.map((s) => {
-          const team = TEAMS[s.driver.team];
+          const team = TEAMS[s.driver.team] || {
+            name: s.driver.team || "Unknown",
+            color: FALLBACK_TEAM_COLOR,
+          };
           const rawStints = getStints(s.driver.code);
           const pitStops = getPitStops(s.driver.code);
           // Convert real stints → { start, end, c } for rendering
@@ -53,7 +58,7 @@ function StrategyStrip({ standings, totalLaps, lap }) {
                   return (
                     <div key={i} style={{
                       position: "absolute", left: `${sx}%`, width: `${sw}%`, top: 0, bottom: 0,
-                      background: COMPOUNDS[stint.c].color,
+                      background: COMPOUNDS[stint.c]?.color || COMPOUNDS.M?.color || FALLBACK_COMPOUND_COLOR,
                       opacity: stint.end < lap ? 0.55 : stint.start > lap ? 0.25 : 0.85,
                       borderRight: "1px solid rgba(11,11,17,0.7)",
                     }}/>
@@ -98,7 +103,10 @@ function GapViz({ standings, pinned }) {
       <PanelHeader title="GAP TO LEADER"/>
       <div style={{ padding: "6px 10px", fontFamily: T.mono }}>
         {top.map((s) => {
-          const team = TEAMS[s.driver.team];
+          const team = TEAMS[s.driver.team] || {
+            name: s.driver.team || "Unknown",
+            color: FALLBACK_TEAM_COLOR,
+          };
           const pct = (s.gap / maxGap) * 100;
           const isPinned = pinned === s.driver.code;
           return (

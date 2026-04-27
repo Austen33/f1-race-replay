@@ -1,6 +1,8 @@
 // Leaderboard — left rail. Engineer-dense.
 
 const { TEAMS, COMPOUNDS } = window.APEX;
+const FALLBACK_TEAM_COLOR = "#9AA3B2";
+const FALLBACK_COMPOUND = { label: "MEDIUM", color: "#FFD93A" };
 
 function fmtGap(g) {
   if (g === 0) return "LEADER";
@@ -72,7 +74,10 @@ function Leaderboard({ standings, pinned, secondary, onPick, onShiftPick, bestLa
 
 function LeaderboardRow({ s, pinned, secondary, bestLapCode, onPick, onShiftPick }) {
   const T = window.THEME;
-  const team = TEAMS[s.driver.team];
+  const team = TEAMS[s.driver.team] || {
+    name: s.driver.team || "Unknown",
+    color: FALLBACK_TEAM_COLOR,
+  };
   const isPinned = pinned === s.driver.code;
   const isSec = secondary === s.driver.code;
   const isOut = s.status === "OUT";
@@ -185,7 +190,7 @@ function LeaderboardRow({ s, pinned, secondary, bestLapCode, onPick, onShiftPick
 
 function TyrePip({ compound, age, pit, out }) {
   if (out) return <div/>;
-  const c = COMPOUNDS[compound];
+  const c = COMPOUNDS[compound] || COMPOUNDS.M || FALLBACK_COMPOUND;
   return (
     <div title={`${c.label} · ${age} laps${pit ? " · PIT" : ""}`} style={{
       width: 18, height: 18, position: "relative",

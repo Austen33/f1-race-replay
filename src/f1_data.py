@@ -105,6 +105,10 @@ def _process_single_driver(args):
         brake_all.append(brake_lap)
         rpm_all.append(rpm_lap)
 
+        # Carry forward cumulative race distance so subsequent laps do not
+        # reset to near-zero distance.
+        total_dist_so_far = float(race_d_lap[-1]) if len(race_d_lap) else total_dist_so_far
+
     if not t_all:
         return None
 

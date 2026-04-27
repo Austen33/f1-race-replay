@@ -1705,11 +1705,12 @@ const TOD_PRESETS = {
 // Weather overlay — mutates the active TOD preset in-place so that "night +
 // rain" doesn't need its own preset. Applied once after TOD lookup.
 const WET_OVERLAY = {
-  fogDensityMult: 1.8,
-  fogTint: 0x0a0d14,       // cool blue-grey wash
-  groundDarken: 0.55,      // multiply ground albedo
-  runoffDarken: 0.45,
-  trackDarken: 0.6,
+  // Keep wet mood readable. Avoid near-black fog/terrain collapse in rain.
+  fogDensityMult: 1.12,
+  fogTint: 0x6f8399,       // lighter cool grey-blue, closer to sky/fog dry palette
+  groundDarken: 0.92,      // near-dry so terrain stays visible
+  runoffDarken: 0.76,
+  trackDarken: 0.74,
   bloomStrengthAdd: 0.1,
   bloomThresholdDrop: 0.08,
 };
@@ -1718,6 +1719,24 @@ function mulHex(hex, k) {
   const r = Math.max(0, Math.min(255, Math.round(((hex >> 16) & 0xff) * k)));
   const g = Math.max(0, Math.min(255, Math.round(((hex >> 8) & 0xff) * k)));
   const b = Math.max(0, Math.min(255, Math.round((hex & 0xff) * k)));
+  return (r << 16) | (g << 8) | b;
+}
+
+function mulHexLumaFloor(hex, k, minLuma = 0) {
+  let r = Math.max(0, Math.min(255, Math.round(((hex >> 16) & 0xff) * k)));
+  let g = Math.max(0, Math.min(255, Math.round(((hex >> 8) & 0xff) * k)));
+  let b = Math.max(0, Math.min(255, Math.round((hex & 0xff) * k)));
+  if (minLuma > 0) {
+    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if (luma <= 1e-3) {
+      r = g = b = Math.round(Math.max(0, Math.min(255, minLuma)));
+    } else if (luma < minLuma) {
+      const s = minLuma / luma;
+      r = Math.max(0, Math.min(255, Math.round(r * s)));
+      g = Math.max(0, Math.min(255, Math.round(g * s)));
+      b = Math.max(0, Math.min(255, Math.round(b * s)));
+    }
+  }
   return (r << 16) | (g << 8) | b;
 }
 
@@ -2544,9 +2563,9 @@ function Track3D({
     const disableToneMapping = search.get("trackToneMap") === "off";
     const showTrackHelpers = search.get("trackHelpers") === "1";
     const groundBaseColor = debugLayerColors ? 0x00ff00 : preset.ground.color;
-    const groundWetColor = debugLayerColors ? groundBaseColor : mulHex(preset.ground.color, WET_OVERLAY.groundDarken);
+    const groundWetColor = debugLayerColors ? groundBaseColor : mulHexLumaFloor(preset.ground.color, WET_OVERLAY.groundDarken, 76);
     const runoffDryColor = debugLayerColors ? 0x0060ff : preset.runoff.color;
-    const runoffWetColor = debugLayerColors ? runoffDryColor : mulHex(preset.runoff.color, WET_OVERLAY.runoffDarken);
+    const runoffWetColor = debugLayerColors ? runoffDryColor : mulHexLumaFloor(preset.runoff.color, WET_OVERLAY.runoffDarken, 56);
     const trackDryColor = debugLayerColors ? 0xff00ff : preset.trackTint;
     const trackWetColor = debugLayerColors ? trackDryColor : mulHex(preset.trackTint, WET_OVERLAY.trackDarken);
     const fogDryColor = preset.fog.color;
@@ -3383,7 +3402,10 @@ function Track3D({
         advanceRain(rain, dt, _windVec);
         trackMat.color.setHex(trackWetColor);
         runoffMat.color.setHex(runoffWetColor);
-        groundMat.color.setHex(groundWetColor);
+        // Do not heavily darken terrain in rain; the fog/tonemap stack already
+        // reduces perceived brightness and can otherwise look like "missing"
+        // black patches around the track.
+        groundMat.color.setHex(groundBaseColor);
         scene.fog.color.setHex(fogWetColor);
         scene.fog.density = (preset.fog.densityScale * WET_OVERLAY.fogDensityMult) / extent;
         if (bloomPass) {

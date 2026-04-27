@@ -1,6 +1,8 @@
 // Telemetry panels — right rail + driver card + compare view.
 
 const { TEAMS, COMPOUNDS, DRIVERS, lapTrace } = window.APEX;
+const FALLBACK_TEAM_COLOR = "#9AA3B2";
+const FALLBACK_COMPOUND = { label: "MEDIUM", color: "#FFD93A" };
 
 function DriverCard({ code, data, accent, secondary = false, standings = [] }) {
   const T = window.THEME;
@@ -34,10 +36,13 @@ function DriverCard({ code, data, accent, secondary = false, standings = [] }) {
       </div>
     );
   }
-  const team = TEAMS[d.team];
+  const team = TEAMS[d.team] || {
+    name: d.team || "Unknown",
+    color: FALLBACK_TEAM_COLOR,
+  };
   const live = standings.find(s => s.driver.code === code);
   const compoundKey = live?.compound || "M";
-  const compound = COMPOUNDS[compoundKey];
+  const compound = COMPOUNDS[compoundKey] || COMPOUNDS.M || FALLBACK_COMPOUND;
   return (
     <div className="apex-panel-mount" style={{
       background: T.surface,

@@ -3,6 +3,7 @@
 // safety car deployment animation, clickable cars.
 
 const { TEAMS, DRIVERS, COMPOUNDS } = window.APEX;
+const FALLBACK_TEAM_COLOR = "#9AA3B2";
 
 // Bounding box of the circuit → viewport
 function bounds(pts) {
@@ -429,7 +430,10 @@ function IsoTrack({
               }),
               ...activeCars.map((s) => {
                 const p = CIRCUIT[s.trackIdx];
-                const team = TEAMS[s.driver.team];
+                const team = TEAMS[s.driver.team] || {
+                  name: s.driver.team || "Unknown",
+                  color: FALLBACK_TEAM_COLOR,
+                };
                 const isPinned = pinned === s.driver.code;
                 const isSecondary = secondary === s.driver.code;
                 const isHover = hover === s.driver.code;
