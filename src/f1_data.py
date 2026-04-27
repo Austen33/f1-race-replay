@@ -556,6 +556,260 @@ def _weather_sparse_checkpoints(weather_resampled, num_frames: int, fps: int = F
     return checkpoints
 
 
+def build_race_cache_dataset(session, schema_version: int = 2):
+    """Compute resampled telemetry arrays and Arrow sidecar metadata."""
+    from src.data.race_store import build_lap_trace_index
+
+    drivers = session.drivers
+    if not drivers:
+        raise ValueError("Session has no drivers")
+
+    driver_codes = {num: session.get_driver(num)["Abbreviation"] for num in drivers}
+
+    driver_data = {}
+    telemetry_ranges = {}
+
+    global_t_min = None
+    global_t_max = None
+    max_lap_number = 0
+
+    # 1) Extract per-driver telemetry in parallel.
+    print(f"Processing {len(drivers)} drivers in parallel...")
+    driver_args = [(driver_no, session, driver_codes[driver_no]) for driver_no in drivers]
+    num_processes = min(cpu_count(), len(drivers))
+    with Pool(processes=num_processes) as pool:
+        results = pool.map(_process_single_driver, driver_args)
+
+    for result in results:
+        if result is None:
+            continue
+
+        code = result["code"]
+        driver_data[code] = result["data"]
+        telemetry_ranges[code] = {
+            "start_time": float(result["t_min"]),
+            "end_time": float(result["t_max"]),
+            "max_lap": int(result["max_lap"]),
+        }
+
+        t_min = result["t_min"]
+        t_max = result["t_max"]
+        max_lap_number = max(max_lap_number, result["max_lap"])
+
+        global_t_min = t_min if global_t_min is None else min(global_t_min, t_min)
+        global_t_max = t_max if global_t_max is None else max(global_t_max, t_max)
+
+    if global_t_min is None or global_t_max is None:
+        raise ValueError("No valid telemetry data found for any driver")
+
+    for code, info in telemetry_ranges.items():
+        info["start_time"] = float(info["start_time"] - global_t_min)
+        info["end_time"] = float(info["end_time"] - global_t_min)
+
+    # 2) Build a shared timeline.
+    timeline = np.arange(global_t_min, global_t_max, DT) - global_t_min
+
+    # 3) Resample each driver onto the shared timeline.
+    resampled_data = {}
+    max_tyre_life_map = {}
+
+    for code, data in driver_data.items():
+        t = data["t"] - global_t_min
+        order = np.argsort(t)
+        t_sorted = t[order]
+
+        arrays_to_resample = [
+            data["x"][order],
+            data["y"][order],
+            data["dist"][order],
+            data["rel_dist"][order],
+            data["lap"][order],
+            data["tyre"][order],
+            data["tyre_life"][order],
+            data["speed"][order],
+            data["gear"][order],
+            data["drs"][order],
+            data["throttle"][order],
+            data["brake"][order],
+            data["rpm"][order],
+        ]
+
+        resampled = [np.interp(timeline, t_sorted, arr) for arr in arrays_to_resample]
+        x_resampled, y_resampled, dist_resampled, rel_dist_resampled, lap_resampled, \
+        tyre_resampled, tyre_life_resampled, speed_resampled, gear_resampled, drs_resampled, throttle_resampled, brake_resampled, rpm_resampled = resampled
+
+        resampled_data[code] = {
+            "t": timeline,
+            "x": x_resampled,
+            "y": y_resampled,
+            "dist": dist_resampled,
+            "rel_dist": rel_dist_resampled,
+            "lap": lap_resampled,
+            "tyre": tyre_resampled,
+            "tyre_life": tyre_life_resampled,
+            "speed": speed_resampled,
+            "gear": gear_resampled,
+            "drs": drs_resampled,
+            "throttle": throttle_resampled,
+            "brake": brake_resampled,
+            "rpm": rpm_resampled,
+        }
+
+        for t_int in np.unique(tyre_resampled):
+            mask = tyre_resampled == t_int
+            c_max = np.nanmax(tyre_life_resampled[mask])
+            if not np.isnan(c_max):
+                max_tyre_life_map[int(t_int)] = max(max_tyre_life_map.get(int(t_int), 1), int(c_max))
+
+    # 4) Track statuses
+    track_status = session.track_status
+    formatted_track_statuses = []
+    for status in track_status.to_dict("records"):
+        seconds = timedelta.total_seconds(status["Time"])
+        start_time = seconds - global_t_min
+        end_time = None
+        if formatted_track_statuses:
+            formatted_track_statuses[-1]["end_time"] = start_time
+        formatted_track_statuses.append(
+            {
+                "status": status["Status"],
+                "start_time": start_time,
+                "end_time": end_time,
+            }
+        )
+
+    # 4a) Race control messages
+    formatted_rc_messages = []
+    rc_messages = getattr(session, "race_control_messages", None)
+
+    def _safe_str(val, as_int=False):
+        if val is None:
+            return ""
+        try:
+            if isinstance(val, float) and math.isnan(val):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        if as_int:
+            try:
+                return str(int(float(val)))
+            except (ValueError, TypeError):
+                return str(val)
+        return str(val)
+
+    if rc_messages is not None and not rc_messages.empty:
+        for msg in rc_messages.to_dict("records"):
+            time_val = msg["Time"]
+            if hasattr(time_val, "total_seconds"):
+                seconds = time_val.total_seconds()
+            else:
+                seconds = (time_val - session.t0_date).total_seconds()
+            msg_time = seconds - global_t_min
+
+            if msg_time > 0.0:
+                formatted_rc_messages.append({
+                    "time": round(msg_time, 3),
+                    "category": _safe_str(msg.get("Category", "")),
+                    "message": _safe_str(msg.get("Message", "")),
+                    "flag": _safe_str(msg.get("Flag", "")),
+                    "scope": _safe_str(msg.get("Scope", "")),
+                    "sector": _safe_str(msg.get("Sector", ""), as_int=True),
+                    "racing_number": _safe_str(msg.get("RacingNumber", ""), as_int=True),
+                })
+        formatted_rc_messages.sort(key=lambda m: m["time"])
+
+    # 4b) Weather checkpoints
+    weather_resampled = None
+    weather_df = getattr(session, "weather_data", None)
+    if weather_df is not None and not weather_df.empty:
+        try:
+            weather_times = weather_df["Time"].dt.total_seconds().to_numpy() - global_t_min
+            if len(weather_times) > 0:
+                order = np.argsort(weather_times)
+                weather_times = weather_times[order]
+
+                def _maybe_get(name):
+                    return weather_df[name].to_numpy()[order] if name in weather_df else None
+
+                def _resample(series):
+                    if series is None:
+                        return None
+                    return np.interp(timeline, weather_times, series)
+
+                track_temp = _resample(_maybe_get("TrackTemp"))
+                air_temp = _resample(_maybe_get("AirTemp"))
+                humidity = _resample(_maybe_get("Humidity"))
+                wind_speed = _resample(_maybe_get("WindSpeed"))
+                wind_direction = _resample(_maybe_get("WindDirection"))
+                rainfall_raw = _maybe_get("Rainfall")
+                rainfall = (
+                    _resample(rainfall_raw.astype(float))
+                    if rainfall_raw is not None
+                    else None
+                )
+
+                weather_resampled = {
+                    "track_temp": track_temp,
+                    "air_temp": air_temp,
+                    "humidity": humidity,
+                    "wind_speed": wind_speed,
+                    "wind_direction": wind_direction,
+                    "rainfall": rainfall,
+                }
+        except Exception as e:
+            print(f"Weather data could not be processed: {e}")
+
+    num_frames = len(timeline)
+    safety_car_events = _compute_safety_car_events(
+        timeline, resampled_data, formatted_track_statuses, session
+    )
+    weather_per_minute = _weather_sparse_checkpoints(
+        weather_resampled, num_frames=num_frames, fps=FPS
+    )
+    driver_colors = get_driver_colors(session)
+
+    write_arrays = {}
+    for code, d in resampled_data.items():
+        write_arrays[code] = {
+            "t_idx": np.arange(num_frames, dtype=np.uint32),
+            "x": np.asarray(d["x"], dtype=np.float32),
+            "y": np.asarray(d["y"], dtype=np.float32),
+            "dist": np.asarray(d["dist"], dtype=np.float32),
+            "rel_dist": np.asarray(d["rel_dist"], dtype=np.float32),
+            "lap": np.rint(d["lap"]).astype(np.int16),
+            "speed": np.asarray(d["speed"], dtype=np.float32),
+            "gear": np.asarray(d["gear"], dtype=np.float32).astype(np.int8),
+            "drs": np.asarray(d["drs"], dtype=np.float32).astype(np.int8),
+            "throttle": np.asarray(d["throttle"], dtype=np.float32),
+            "brake": (np.asarray(d["brake"]) > 0.0).astype(np.int8),
+            "rpm": np.asarray(d["rpm"], dtype=np.float32),
+            "tyre": np.rint(d["tyre"]).astype(np.int8),
+            "tyre_life": np.asarray(d["tyre_life"], dtype=np.float32),
+        }
+
+    meta = {
+        "schema_version": int(schema_version),
+        "fps": FPS,
+        "timeline_t0": 0.0,
+        "frame_count": int(num_frames),
+        "total_laps": int(max_lap_number),
+        "driver_codes": sorted(resampled_data.keys()),
+        "driver_colors": driver_colors,
+        "telemetry_ranges": telemetry_ranges,
+        "max_tyre_life": max_tyre_life_map,
+        "track_statuses": formatted_track_statuses,
+        "race_control_messages": formatted_rc_messages,
+        "weather_per_minute": weather_per_minute,
+        "safety_car_events": safety_car_events,
+        "lap_trace_index": build_lap_trace_index(
+            write_arrays,
+            telemetry_ranges=telemetry_ranges,
+            fps=FPS,
+        ),
+    }
+    return write_arrays, meta
+
+
 def get_race_telemetry(session, session_type="R", include_frames=True):
     started_total = time.perf_counter()
     event_name = str(session).replace(" ", "_")
@@ -569,7 +823,6 @@ def get_race_telemetry(session, session_type="R", include_frames=True):
 
     from src.data.race_store import (
         RaceHandle,
-        build_lap_trace_index,
         migrate_pickle_payload_to_arrow,
         write_race,
     )
@@ -661,280 +914,7 @@ def get_race_telemetry(session, session_type="R", include_frames=True):
     except FileNotFoundError:
         pass  # Need to compute from scratch
 
-    drivers = session.drivers
-
-    driver_codes = {num: session.get_driver(num)["Abbreviation"] for num in drivers}
-
-    driver_data = {}
-    telemetry_ranges = {}
-
-    global_t_min = None
-    global_t_max = None
-
-    max_lap_number = 0
-
-    # 1. Get all of the drivers telemetry data using multiprocessing
-    # Prepare arguments for parallel processing
-    print(f"Processing {len(drivers)} drivers in parallel...")
-    driver_args = [
-        (driver_no, session, driver_codes[driver_no]) for driver_no in drivers
-    ]
-
-    num_processes = min(cpu_count(), len(drivers))
-
-    with Pool(processes=num_processes) as pool:
-        results = pool.map(_process_single_driver, driver_args)
-
-    # Process results
-    for result in results:
-        if result is None:
-            continue
-
-        code = result["code"]
-        driver_data[code] = result["data"]
-        telemetry_ranges[code] = {
-            "start_time": float(result["t_min"]),
-            "end_time": float(result["t_max"]),
-            "max_lap": int(result["max_lap"]),
-        }
-
-        t_min = result["t_min"]
-        t_max = result["t_max"]
-        max_lap_number = max(max_lap_number, result["max_lap"])
-
-        global_t_min = t_min if global_t_min is None else min(global_t_min, t_min)
-        global_t_max = t_max if global_t_max is None else max(global_t_max, t_max)
-
-    # Ensure we have valid time bounds
-    if global_t_min is None or global_t_max is None:
-        raise ValueError("No valid telemetry data found for any driver")
-
-    for code, info in telemetry_ranges.items():
-        info["start_time"] = float(info["start_time"] - global_t_min)
-        info["end_time"] = float(info["end_time"] - global_t_min)
-
-    # 2. Create a timeline (start from zero)
-    timeline = np.arange(global_t_min, global_t_max, DT) - global_t_min
-
-    # 3. Resample each driver's telemetry (x, y, gap) onto the common timeline
-    resampled_data = {}
-    max_tyre_life_map = {}
-
-    for code, data in driver_data.items():
-        t = data["t"] - global_t_min  # Shift
-
-        # ensure sorted by time
-        order = np.argsort(t)
-        t_sorted = t[order]
-
-        # Vectorize all resampling in one operation for speed
-        arrays_to_resample = [
-            data["x"][order],
-            data["y"][order],
-            data["dist"][order],
-            data["rel_dist"][order],
-            data["lap"][order],
-            data["tyre"][order],
-            data["tyre_life"][order],
-            data["speed"][order],
-            data["gear"][order],
-            data["drs"][order],
-            data["throttle"][order],
-            data["brake"][order],
-            data["rpm"][order],
-        ]
-
-        resampled = [np.interp(timeline, t_sorted, arr) for arr in arrays_to_resample]
-        x_resampled, y_resampled, dist_resampled, rel_dist_resampled, lap_resampled, \
-        tyre_resampled, tyre_life_resampled, speed_resampled, gear_resampled, drs_resampled, throttle_resampled, brake_resampled, rpm_resampled = resampled
- 
-        resampled_data[code] = {
-            "t": timeline,
-            "x": x_resampled,
-            "y": y_resampled,
-            "dist": dist_resampled,  # race distance (metres since Lap 1 start)
-            "rel_dist": rel_dist_resampled,
-            "lap": lap_resampled,
-            "tyre": tyre_resampled,
-            "tyre_life": tyre_life_resampled,
-            "speed": speed_resampled,
-            "gear": gear_resampled,
-            "drs": drs_resampled,
-            "throttle": throttle_resampled,
-            "brake": brake_resampled,
-            "rpm": rpm_resampled,
-        }
-
-        for t_int in np.unique(tyre_resampled):
-            mask = tyre_resampled == t_int
-            c_max = np.nanmax(tyre_life_resampled[mask])
-            if not np.isnan(c_max):
-                max_tyre_life_map[int(t_int)] = max(max_tyre_life_map.get(int(t_int), 1), int(c_max))
-
-    # 4. Incorporate track status data into the timeline (for safety car, VSC, etc.)
-
-    track_status = session.track_status
-
-    formatted_track_statuses = []
-
-    for status in track_status.to_dict("records"):
-        seconds = timedelta.total_seconds(status["Time"])
-
-        start_time = seconds - global_t_min  # Shift to match timeline
-        end_time = None
-
-        # Set the end time of the previous status
-
-        if formatted_track_statuses:
-            formatted_track_statuses[-1]["end_time"] = start_time
-
-        formatted_track_statuses.append(
-            {
-                "status": status["Status"],
-                "start_time": start_time,
-                "end_time": end_time,
-            }
-        )
-
-    # 4a. Parse race control messages (flags, penalties, SC/VSC, DRS, etc.)
-    formatted_rc_messages = []
-    rc_messages = getattr(session, "race_control_messages", None)
-
-    def _safe_str(val, as_int=False):
-        """Convert a value to string, returning '' for None/NaN."""
-        if val is None:
-            return ""
-        try:
-            if isinstance(val, float) and math.isnan(val):
-                return ""
-        except (TypeError, ValueError):
-            pass
-        if as_int:
-            try:
-                return str(int(float(val)))
-            except (ValueError, TypeError):
-                return str(val)
-        return str(val)
-
-    if rc_messages is not None and not rc_messages.empty:
-        for msg in rc_messages.to_dict("records"):
-            time_val = msg["Time"]
-            if hasattr(time_val, 'total_seconds'):
-                # Timedelta (session-relative) — same as track_status
-                seconds = time_val.total_seconds()
-            else:
-                # Timestamp (absolute) — subtract the data stream origin
-                seconds = (time_val - session.t0_date).total_seconds()
-            msg_time = seconds - global_t_min
-
-            if msg_time > 0.0:
-                formatted_rc_messages.append({
-                    "time": round(msg_time, 3),
-                    "category": _safe_str(msg.get("Category", "")),
-                    "message": _safe_str(msg.get("Message", "")),
-                    "flag": _safe_str(msg.get("Flag", "")),
-                    "scope": _safe_str(msg.get("Scope", "")),
-                    "sector": _safe_str(msg.get("Sector", ""), as_int=True),
-                    "racing_number": _safe_str(msg.get("RacingNumber", ""), as_int=True),
-                })
-        formatted_rc_messages.sort(key=lambda m: m["time"])
-
-    # 4.1. Resample weather data onto the same timeline for playback
-    weather_resampled = None
-    weather_df = getattr(session, "weather_data", None)
-    if weather_df is not None and not weather_df.empty:
-        try:
-            weather_times = (
-                weather_df["Time"].dt.total_seconds().to_numpy() - global_t_min
-            )
-            if len(weather_times) > 0:
-                order = np.argsort(weather_times)
-                weather_times = weather_times[order]
-
-                def _maybe_get(name):
-                    return (
-                        weather_df[name].to_numpy()[order]
-                        if name in weather_df
-                        else None
-                    )
-
-                def _resample(series):
-                    if series is None:
-                        return None
-                    return np.interp(timeline, weather_times, series)
-
-                track_temp = _resample(_maybe_get("TrackTemp"))
-                air_temp = _resample(_maybe_get("AirTemp"))
-                humidity = _resample(_maybe_get("Humidity"))
-                wind_speed = _resample(_maybe_get("WindSpeed"))
-                wind_direction = _resample(_maybe_get("WindDirection"))
-                rainfall_raw = _maybe_get("Rainfall")
-                rainfall = (
-                    _resample(rainfall_raw.astype(float))
-                    if rainfall_raw is not None
-                    else None
-                )
-
-                weather_resampled = {
-                    "track_temp": track_temp,
-                    "air_temp": air_temp,
-                    "humidity": humidity,
-                    "wind_speed": wind_speed,
-                    "wind_direction": wind_direction,
-                    "rainfall": rainfall,
-                }
-        except Exception as e:
-            print(f"Weather data could not be processed: {e}")
-
-    num_frames = len(timeline)
-    safety_car_events = _compute_safety_car_events(
-        timeline, resampled_data, formatted_track_statuses, session
-    )
-    weather_per_minute = _weather_sparse_checkpoints(
-        weather_resampled, num_frames=num_frames, fps=FPS
-    )
-    driver_colors = get_driver_colors(session)
-
-    write_arrays = {}
-    for code, d in resampled_data.items():
-        write_arrays[code] = {
-            "t_idx": np.arange(num_frames, dtype=np.uint32),
-            "x": np.asarray(d["x"], dtype=np.float32),
-            "y": np.asarray(d["y"], dtype=np.float32),
-            "dist": np.asarray(d["dist"], dtype=np.float32),
-            "rel_dist": np.asarray(d["rel_dist"], dtype=np.float32),
-            "lap": np.rint(d["lap"]).astype(np.int16),
-            "speed": np.asarray(d["speed"], dtype=np.float32),
-            # Preserve legacy coercion semantics from int(float_value).
-            "gear": np.asarray(d["gear"], dtype=np.float32).astype(np.int8),
-            "drs": np.asarray(d["drs"], dtype=np.float32).astype(np.int8),
-            "throttle": np.asarray(d["throttle"], dtype=np.float32),
-            "brake": (np.asarray(d["brake"]) > 0.0).astype(np.int8),
-            "rpm": np.asarray(d["rpm"], dtype=np.float32),
-            "tyre": np.rint(d["tyre"]).astype(np.int8),
-            "tyre_life": np.asarray(d["tyre_life"], dtype=np.float32),
-        }
-
-    meta = {
-        "schema_version": 2,
-        "fps": FPS,
-        "timeline_t0": 0.0,
-        "frame_count": int(num_frames),
-        "total_laps": int(max_lap_number),
-        "driver_codes": sorted(resampled_data.keys()),
-        "driver_colors": driver_colors,
-        "telemetry_ranges": telemetry_ranges,
-        "max_tyre_life": max_tyre_life_map,
-        "track_statuses": formatted_track_statuses,
-        "race_control_messages": formatted_rc_messages,
-        "weather_per_minute": weather_per_minute,
-        "safety_car_events": safety_car_events,
-        "lap_trace_index": build_lap_trace_index(
-            write_arrays,
-            telemetry_ranges=telemetry_ranges,
-            fps=FPS,
-        ),
-    }
+    write_arrays, meta = build_race_cache_dataset(session, schema_version=2)
 
     print("Completed telemetry extraction...")
     print("Saving Arrow cache...")

@@ -17,6 +17,7 @@ from src.data import perf_metrics
 from src.f1_data import FPS
 from src.web.playback import MIN_PUSH_INTERVAL, Playback
 from src.web.session_manager import SessionManager
+from src.web.cache_utils import web_cache_arrow_path
 
 
 def _git_sha() -> str:
@@ -79,10 +80,11 @@ def _cache_path_from_loaded(loaded: dict) -> Path:
     handle = loaded.get("handle")
     if handle is not None:
         return Path(handle.arrow_path)
-    session = loaded.get("session")
-    event_name = str(session).replace(" ", "_")
-    suffix = "sprint" if loaded.get("session_type") == "S" else "race"
-    return Path("computed_data") / f"{event_name}_{suffix}_telemetry.pkl"
+    return web_cache_arrow_path(
+        int(loaded.get("year", 0)),
+        int(loaded.get("round", 0)),
+        str(loaded.get("session_type", "R")),
+    )
 
 
 def run_benchmark(year: int, round_number: int, session_type: str, duration_s: float) -> dict:

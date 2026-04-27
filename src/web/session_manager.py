@@ -1,15 +1,32 @@
 from pathlib import Path
+import json
 import os
+import sys
 import time
 import numpy as np
 from scipy.spatial import cKDTree
 
 import fastf1
-from src.f1_data import load_session, get_race_telemetry, get_circuit_rotation
+from src.f1_data import (
+    build_race_cache_dataset,
+    load_session,
+    get_circuit_rotation,
+)
 from src.data import perf_metrics
 from src.data.race_store import (
     RaceHandle,
-    migrate_pickle_file_to_arrow,
+    write_race,
+)
+from src.web.cache_utils import (
+    WEB_CACHE_PROFILE,
+    WEB_CACHE_SCHEMA_VERSION,
+    hydrate_runtime_geometry,
+    normalise_session_type,
+    public_geometry_payload,
+    validate_web_cache_meta,
+    web_cache_arrow_path,
+    web_cache_key,
+    web_cache_meta_path,
 )
 
 try:
@@ -27,76 +44,77 @@ def loading_state() -> dict:
 class SessionManager:
     def __init__(self, cache_dir: Path):
         self._loaded: dict | None = None
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        fastf1.Cache.enable_cache(str(cache_dir))
+        self._cache_dir = Path(cache_dir)
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        fastf1.Cache.enable_cache(str(self._cache_dir))
 
     def load(self, year: int, round_number: int, session_type: str = "R") -> dict:
+        session_type = normalise_session_type(session_type)
+        cache_path = web_cache_arrow_path(year, round_number, session_type)
+        cache_meta_path = web_cache_meta_path(cache_path)
+        force_rebuild = (
+            "--refresh-data" in sys.argv
+            or os.getenv("APEX_FORCE_WEB_CACHE_REBUILD", "0") == "1"
+        )
+
         load_started = time.perf_counter()
         _LOAD_STATE.update(
             status="loading", progress=5,
-            message=f"Loading {year} R{round_number} {session_type}",
+            message="Checking web cache",
             year=year, round=round_number,
         )
+
         try:
-            session_started = time.perf_counter()
-            session = load_session(year, round_number, session_type)
-            perf_metrics.log(f"session_load_s={time.perf_counter() - session_started:.4f}")
-            _LOAD_STATE.update(progress=30, message="Computing telemetry")
-            telemetry_started = time.perf_counter()
-            race, handle = _load_race_payload(session, session_type)
-            perf_metrics.log(f"race_cache_load_s={time.perf_counter() - telemetry_started:.4f}")
+            cache_valid = False
+            cache_reason = "cache_missing"
+            if not force_rebuild and cache_path.exists() and cache_meta_path.exists():
+                try:
+                    with cache_meta_path.open("r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    cache_valid, cache_reason = validate_web_cache_meta(
+                        meta,
+                        year=year,
+                        round_number=round_number,
+                        session_type=session_type,
+                    )
+                    if cache_valid:
+                        perf_metrics.log(
+                            "web_startup mode='warm_cache' "
+                            f"path='{cache_path}' profile='{meta.get('cache_profile')}' "
+                            f"schema={meta.get('schema_version')}"
+                        )
+                except Exception as exc:
+                    cache_reason = f"meta_read_error:{exc}"
+
+            if not cache_valid:
+                _LOAD_STATE.update(progress=45, message="Building web cache")
+                perf_metrics.log(
+                    "web_startup mode='cold_build' "
+                    f"path='{cache_path}' reason='{cache_reason}' force_rebuild={int(force_rebuild)}"
+                )
+                build_started = time.perf_counter()
+                _build_web_cache(
+                    year,
+                    round_number,
+                    session_type=session_type,
+                    cache_dir=self._cache_dir,
+                )
+                perf_metrics.log(f"web_cache_build_s={time.perf_counter() - build_started:.4f}")
+
+            _LOAD_STATE.update(progress=80, message="Hydrating replay state")
+            handle = RaceHandle(cache_path)
+            self._loaded = _hydrate_loaded_from_cache(
+                handle,
+                year=year,
+                round_number=round_number,
+                session_type=session_type,
+            )
             if psutil is not None:
                 rss_bytes = int(psutil.Process().memory_info().rss)
-                perf_metrics.log(f"rss_after_get_race_telemetry_mb={rss_bytes / (1024 * 1024):.2f}")
-            _LOAD_STATE.update(progress=70, message="Building geometry")
+                perf_metrics.log(
+                    f"rss_after_hydrate_mb={rss_bytes / (1024 * 1024):.2f}"
+                )
 
-            geometry = _extract_geometry(race, session)
-            driver_meta = _extract_driver_meta(session)
-            driver_results = _extract_driver_results(session)
-            rotation = get_circuit_rotation(session)
-            lap_data = _precompute_lap_data(session)
-            lap_aggregates = _compute_lap_aggregates(lap_data)
-            frames = race.get("frames")
-            track_statuses = race["track_statuses"]
-            if frames:
-                total_duration_s = float(frames[-1]["t"])
-            elif handle is not None and handle.frame_count > 0:
-                total_duration_s = float((handle.frame_count - 1) / max(handle.fps, 1))
-            else:
-                total_duration_s = 0.0
-            total_laps = int(race["total_laps"])
-
-            self._loaded = {
-                "year": year,
-                "round": round_number,
-                "session_type": session_type,
-                "session": session,
-                "frames": frames,
-                "handle": handle,
-                "driver_colors_hex": {
-                    k: "#{:02X}{:02X}{:02X}".format(*v)
-                    for k, v in race["driver_colors"].items()
-                },
-                "track_statuses": track_statuses,
-                "track_status_start_times": [float(e["start_time"]) for e in track_statuses],
-                "race_control_messages": race["race_control_messages"],
-                "total_laps": total_laps,
-                "total_duration_s": total_duration_s,
-                "max_tyre_life": race["max_tyre_life"],
-                "telemetry_ranges": race.get("telemetry_ranges", {}),
-                "circuit_rotation": rotation,
-                "geometry": geometry,
-                "driver_meta": driver_meta,
-                "driver_results": driver_results,
-                "driver_stop_windows": _compute_driver_stop_windows(
-                    frames if frames is not None else handle, driver_results
-                ),
-                "event": _event_info(session, year, round_number, {"total_laps": total_laps}),
-                "lap_data": lap_data,
-                "lap_aggregates": lap_aggregates,
-                "session_best": _compute_session_best(session),
-                "fastest_qual_lap_s": _fastest_qual_lap_s(session),
-            }
             perf_metrics.log(f"session_manager_load_total_s={time.perf_counter() - load_started:.4f}")
             _LOAD_STATE.update(status="ready", progress=100, message="Ready")
             return self._loaded
@@ -112,14 +130,6 @@ class SessionManager:
 # Private helpers
 # ---------------------------------------------------------------------------
 
-def _cache_paths(session, session_type: str) -> tuple[Path, Path]:
-    event_name = str(session).replace(" ", "_")
-    suffix = "sprint" if session_type == "S" else "race"
-    session_tag = "S" if session_type == "S" else "R"
-    pickle_path = Path("computed_data") / f"{event_name}_{suffix}_telemetry.pkl"
-    arrow_path = Path("computed_data") / f"{event_name}_{session_tag}.arrow"
-    return pickle_path, arrow_path
-
 
 def _rgb_triplet(value) -> tuple[int, int, int]:
     if isinstance(value, str) and value.startswith("#") and len(value) >= 7:
@@ -129,44 +139,177 @@ def _rgb_triplet(value) -> tuple[int, int, int]:
     return (128, 128, 128)
 
 
-def _load_race_payload(session, session_type: str) -> tuple[dict, RaceHandle | None]:
-    use_legacy = os.getenv("APEX_USE_LEGACY_CACHE", "0") == "1"
-    if use_legacy:
-        return get_race_telemetry(session, session_type=session_type), None
+class _DriverArraysFrameSource:
+    def __init__(self, arrays: dict[str, dict[str, np.ndarray]], frame_count: int, fps: int):
+        self._arrays = arrays
+        self.frame_count = int(frame_count)
+        self.fps = float(fps)
 
-    pickle_path, arrow_path = _cache_paths(session, session_type)
+    def column(self, driver_code: str, name: str) -> np.ndarray:
+        return self._arrays[driver_code][name]
 
-    if not arrow_path.exists():
-        if pickle_path.exists():
-            migrate_pickle_file_to_arrow(pickle_path, arrow_path)
-        else:
-            # Build Arrow cache directly without materializing dense legacy frames.
-            get_race_telemetry(session, session_type=session_type, include_frames=False)
-            if not arrow_path.exists():
-                raise FileNotFoundError(f"Arrow cache was not created at {arrow_path}")
 
-    handle = RaceHandle(arrow_path)
-    schema_version = int(handle.meta.get("schema_version", 0) or 0)
-    if schema_version < 2:
-        perf_metrics.log(
-            f"arrow_cache_schema_outdated schema={schema_version} path='{arrow_path}'"
-        )
+def _driver_colors_hex_from_meta(meta: dict) -> dict[str, str]:
+    out = {}
+    for code, color in (meta.get("driver_colors") or {}).items():
+        r, g, b = _rgb_triplet(color)
+        out[str(code)] = f"#{r:02X}{g:02X}{b:02X}"
+    return out
 
+
+def _normalise_lap_data(raw: dict | None) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for code, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        driver_payload = dict(value)
+        laps_raw = value.get("laps", {})
+        laps_out = {}
+        if isinstance(laps_raw, dict):
+            for lap_key, lap_value in laps_raw.items():
+                try:
+                    lap_no = int(lap_key)
+                except Exception:
+                    continue
+                laps_out[lap_no] = lap_value
+        driver_payload["laps"] = laps_out
+        out[str(code)] = driver_payload
+    return out
+
+
+def _hydrate_loaded_from_cache(
+    handle: RaceHandle,
+    year: int,
+    round_number: int,
+    session_type: str,
+) -> dict:
     meta = handle.meta
-    driver_colors = {
-        code: _rgb_triplet(color)
-        for code, color in (meta.get("driver_colors") or {}).items()
-    }
-    payload = {
+    key = meta.get("cache_key")
+    if not isinstance(key, dict):
+        key = web_cache_key(year, round_number, session_type)
+
+    normalized_type = normalise_session_type(key.get("session_type", session_type))
+    cache_year = int(key.get("year", year))
+    cache_round = int(key.get("round", round_number))
+
+    total_laps = int(meta.get("total_laps", 0))
+    event = meta.get("event")
+    if not isinstance(event, dict):
+        event = {
+            "event_name": "",
+            "circuit_name": "",
+            "country": "",
+            "year": cache_year,
+            "round": cache_round,
+            "date": "",
+            "total_laps": total_laps,
+        }
+
+    track_statuses = meta.get("track_statuses", []) or []
+    track_status_start_times = []
+    for entry in track_statuses:
+        try:
+            track_status_start_times.append(float(entry.get("start_time", 0.0)))
+        except Exception:
+            track_status_start_times.append(0.0)
+
+    total_duration_s = meta.get("total_duration_s")
+    if total_duration_s is None:
+        if handle.frame_count > 0:
+            total_duration_s = float((handle.frame_count - 1) / max(handle.fps, 1))
+        else:
+            total_duration_s = 0.0
+
+    geometry = hydrate_runtime_geometry(meta.get("geometry"))
+    rotation = meta.get("circuit_rotation", geometry.get("rotation_deg", 0.0))
+    lap_data = _normalise_lap_data(meta.get("lap_data"))
+
+    return {
+        "year": cache_year,
+        "round": cache_round,
+        "session_type": normalized_type,
+        "session": None,
         "frames": None,
-        "driver_colors": driver_colors,
-        "track_statuses": meta.get("track_statuses", []),
-        "race_control_messages": meta.get("race_control_messages", []),
-        "total_laps": int(meta.get("total_laps", 0)),
-        "max_tyre_life": meta.get("max_tyre_life", {}),
-        "telemetry_ranges": meta.get("telemetry_ranges", {}),
+        "handle": handle,
+        "driver_colors_hex": _driver_colors_hex_from_meta(meta),
+        "track_statuses": track_statuses,
+        "track_status_start_times": track_status_start_times,
+        "race_control_messages": meta.get("race_control_messages", []) or [],
+        "total_laps": total_laps,
+        "total_duration_s": float(total_duration_s),
+        "max_tyre_life": meta.get("max_tyre_life", {}) or {},
+        "telemetry_ranges": meta.get("telemetry_ranges", {}) or {},
+        "circuit_rotation": float(rotation),
+        "geometry": geometry,
+        "driver_meta": meta.get("driver_meta", {}) or {},
+        "driver_results": meta.get("driver_results", {}) or {},
+        "driver_stop_windows": meta.get("driver_stop_windows", {}) or {},
+        "event": event,
+        "lap_data": lap_data,
+        "lap_aggregates": meta.get("lap_aggregates", {}) or {},
+        "session_best": meta.get("session_best", {}) or {},
+        "fastest_qual_lap_s": meta.get("fastest_qual_lap_s"),
     }
-    return payload, handle
+
+
+def _build_web_cache(
+    year: int,
+    round_number: int,
+    session_type: str,
+    cache_dir: Path,
+) -> Path:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    fastf1.Cache.enable_cache(str(cache_dir))
+
+    session_started = time.perf_counter()
+    session = load_session(year, round_number, session_type)
+    perf_metrics.log(f"session_load_s={time.perf_counter() - session_started:.4f}")
+
+    telemetry_started = time.perf_counter()
+    write_arrays, meta = build_race_cache_dataset(
+        session,
+        schema_version=WEB_CACHE_SCHEMA_VERSION,
+    )
+    perf_metrics.log(f"race_cache_build_s={time.perf_counter() - telemetry_started:.4f}")
+
+    geometry = _extract_geometry(session)
+    driver_meta = _extract_driver_meta(session)
+    driver_results = _extract_driver_results(session)
+    lap_data = _precompute_lap_data(session)
+    lap_aggregates = _compute_lap_aggregates(lap_data)
+
+    total_laps = int(meta.get("total_laps", 0))
+    frame_count = int(meta.get("frame_count", 0))
+    fps = int(meta.get("fps", 60) or 60)
+    total_duration_s = float((frame_count - 1) / max(fps, 1)) if frame_count > 0 else 0.0
+    frame_source = _DriverArraysFrameSource(write_arrays, frame_count=frame_count, fps=fps)
+    driver_stop_windows = _compute_driver_stop_windows(frame_source, driver_results)
+
+    web_meta = dict(meta)
+    web_meta.update(
+        {
+            "schema_version": WEB_CACHE_SCHEMA_VERSION,
+            "cache_profile": WEB_CACHE_PROFILE,
+            "cache_key": web_cache_key(year, round_number, session_type),
+            "event": _event_info(session, year, round_number, {"total_laps": total_laps}),
+            "driver_meta": driver_meta,
+            "driver_results": driver_results,
+            "geometry": public_geometry_payload(geometry),
+            "circuit_rotation": float(get_circuit_rotation(session)),
+            "lap_data": lap_data,
+            "lap_aggregates": lap_aggregates,
+            "session_best": _compute_session_best(session),
+            "fastest_qual_lap_s": _fastest_qual_lap_s(session),
+            "driver_stop_windows": driver_stop_windows,
+            "total_duration_s": total_duration_s,
+        }
+    )
+
+    arrow_path = web_cache_arrow_path(year, round_number, session_type)
+    write_race(arrow_path, write_arrays, web_meta)
+    return arrow_path
 
 def _pick_example_lap(session):
     """Same chain as main.py:50-67 — prefer quali lap for DRS zones."""
@@ -192,7 +335,7 @@ def _pick_example_lap(session):
     return example_lap
 
 
-def _extract_geometry(race, session):
+def _extract_geometry(session):
     """Try Arcade-based builder; fall back to pure-numpy."""
     example_lap = _pick_example_lap(session)
 
@@ -203,10 +346,10 @@ def _extract_geometry(race, session):
         from src.lib.track_geometry import build_track_pure
         raw = build_track_pure(example_lap)
 
-    return _shape_geometry_payload(raw, session, race)
+    return _shape_geometry_payload(raw, session)
 
 
-def _shape_geometry_payload(raw, session, race):
+def _shape_geometry_payload(raw, session):
     (plot_x_ref, plot_y_ref,
      x_inner, y_inner,
      x_outer, y_outer,
