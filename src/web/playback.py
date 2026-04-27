@@ -748,10 +748,18 @@ def standings_from_frame(
         fraction = max(0.0, min(1.0, rel_dist))
 
         # Live branch: fallback based on lap-level PitInTime/PitOutTime and lap fraction (frame does not set in_pit)
+        # Lap 1 carries an implicit pit_out flag for everyone (formation lap),
+        # so a naive trigger lights the limiter on the grid at race start.
+        # Suppress the pit_out trigger on lap 1 unless the driver actually
+        # started from the pit lane (FastF1 reports GridPosition as NaN/None
+        # for pit-lane starts; valid grid slots are 1..N).
         current_lap_info = driver_laps_data.get(current_lap)
         in_pit = False
         if current_lap_info:
-            if (current_lap_info.get("pit_in") and fraction > 0.9) or (current_lap_info.get("pit_out") and fraction < 0.1):
+            grid_pos = (driver_results.get(code) or {}).get("grid_position")
+            started_from_pit = grid_pos is None or (isinstance(grid_pos, int) and grid_pos <= 0)
+            allow_pit_out = current_lap_info.get("pit_out") and (current_lap > 1 or started_from_pit)
+            if (current_lap_info.get("pit_in") and fraction > 0.96) or (allow_pit_out and fraction < 0.04):
                 in_pit = True
 
         if is_out_badge:

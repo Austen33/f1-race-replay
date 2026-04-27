@@ -2712,9 +2712,11 @@ function paintShiftLights(ctx, W, H, rpm) {
 
 function paintFlagLights(ctx, W, H, flagState) {
   // Small square indicators flanking the central display — fire on yellow/red.
+  // Server emits lowercase tokens (green | yellow | red | sc | vsc); upcased
+  // here so SAFETY_CAR/VIRTUAL_SC still match if a future producer changes.
   const f = (flagState || "").toUpperCase();
   let color = null;
-  if (f === "YELLOW" || f === "SAFETY_CAR" || f === "VIRTUAL_SC") color = "#ffd93a";
+  if (f === "YELLOW" || f === "SC" || f === "VSC" || f === "SAFETY_CAR" || f === "VIRTUAL_SC") color = "#ffd93a";
   else if (f === "RED") color = "#ff1e00";
   if (!color) return;
   const flash = Math.floor(performance.now() / 250) % 2 === 0;
@@ -2728,13 +2730,15 @@ function paintFlagLights(ctx, W, H, flagState) {
 }
 
 function paintFlagPill(ctx, x, y, w, h, flagState) {
+  // Server emits lowercase tokens (green | yellow | red | sc | vsc); upcased
+  // here so SAFETY_CAR/VIRTUAL_SC still match if a future producer changes.
   const f = (flagState || "GREEN").toUpperCase();
   let color = "rgba(30,255,106,0.7)";
   let label = "GREEN";
   if (f === "YELLOW") { color = "#ffd93a"; label = "YELLOW"; }
   else if (f === "RED") { color = "#ff1e00"; label = "RED"; }
-  else if (f === "SAFETY_CAR") { color = "#ffb800"; label = "SC"; }
-  else if (f === "VIRTUAL_SC") { color = "#ffb800"; label = "VSC"; }
+  else if (f === "SC" || f === "SAFETY_CAR") { color = "#ffb800"; label = "SC"; }
+  else if (f === "VSC" || f === "VIRTUAL_SC") { color = "#ffb800"; label = "VSC"; }
   ctx.fillStyle = color;
   ctx.globalAlpha = 0.18;
   ctx.fillRect(x, y, w, h);
