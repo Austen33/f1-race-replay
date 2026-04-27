@@ -1451,21 +1451,38 @@ function makeDriverMarker(team) {
       if (!child.isMesh) return;
       if (!child.material) return;
       const matName = (child.material.name || "").toLowerCase();
-      const isWheelMat = matName.includes("wheel") || matName.includes("tire") || matName.includes("tyre");
+      // Wheel materials collapse to a shared dark wheel material. Includes
+      // 'rims' (which previously slipped through and was team-tinted).
+      const isWheelMat = matName === "tyres" || matName === "tyre" ||
+        matName === "tires" || matName === "tire" || matName === "rims" ||
+        matName === "rim" || matName === "wheels" || matName === "wheel";
       if (isWheelMat) {
         child.material = getWheelMaterial(child.material);
         return;
       }
+      // Only the livery materials carry the team-coloured paint scheme. All
+      // other materials (Steer dashboard texture, carbon fibre, chrome,
+      // generic accents, mirrors, brakes, Black) keep their baked GLB look —
+      // tinting them washes carbon/chrome with team colour, and multiplying
+      // team colour by the baked livery map produces muddy blends (e.g.
+      // McLaren orange × red livery → red+orange mix on screen).
+      const isLivery = matName.startsWith("livery") || matName.startsWith("uv_map");
+      if (!isLivery) return;
       // Body material: reuse the team-cached version if we have one.
       if (cachedBodyMats && cachedBodyMats.has(child.material.uuid)) {
         child.material = cachedBodyMats.get(child.material.uuid);
         return;
       }
-      // Fresh team — clone and tint the material once, store in the cache.
+      // Fresh team — clone, drop the baked livery map, paint a flat team
+      // colour. This matches what IsoTrack shows and keeps team palettes
+      // readable across all liveries.
       if (!matMap.has(child.material.uuid)) {
         const cloned = child.material.clone();
         if (cloned.isMeshStandardMaterial || cloned.isMeshPhysicalMaterial) {
           cloned.color.copy(color);
+          cloned.map = null;
+          cloned.emissiveMap = null;
+          cloned.needsUpdate = true;
         }
         matMap.set(child.material.uuid, cloned);
       }
