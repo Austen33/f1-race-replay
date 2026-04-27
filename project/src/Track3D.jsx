@@ -3496,12 +3496,7 @@ function Track3D({
           const label = makeLabel(s.driver.code, teamColor);
           setLabelStatus(label, s.labelStatus ?? s.label_status, s.statusReason ?? s.status_reason);
           labelLayer.appendChild(label);
-          entry = {
-            group: g,
-            label,
-            prevRight: new THREE.Vector3(1, 0, 0),
-            havePrevRight: false,
-          };
+          entry = { group: g, label };
           driverMap.set(s.driver.code, entry);
         }
         if (entry.lastLabelStatus !== (s.labelStatus ?? s.label_status) || entry.lastStatusReason !== (s.statusReason ?? s.status_reason)) {
@@ -3515,16 +3510,8 @@ function Track3D({
         curve.getTangentAt(u, tmpTan);
         // Orient the car to follow the track surface in 3D (yaw + pitch)
         // so it doesn't sink into or float above the track on elevation changes.
-        _fwd.copy(tmpTan);
-        if (_fwd.lengthSq() < 1e-10) _fwd.set(1, 0, 0);
-        else _fwd.normalize();
-        entry.havePrevRight = updateStableRight(
-          _fwd,
-          _worldUp,
-          _right,
-          entry.prevRight,
-          entry.havePrevRight,
-        );
+        _fwd.copy(tmpTan).normalize();
+        _right.crossVectors(_fwd, _worldUp).normalize();
         _up.crossVectors(_right, _fwd).normalize();
         // Car local frame: +X forward, +Y up, +Z right
         _basis.makeBasis(_fwd, _up, _right);
