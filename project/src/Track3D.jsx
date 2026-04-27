@@ -2566,6 +2566,8 @@ function Track3D({
     const groundWetColor = debugLayerColors ? groundBaseColor : mulHexLumaFloor(preset.ground.color, WET_OVERLAY.groundDarken, 76);
     const runoffDryColor = debugLayerColors ? 0x0060ff : preset.runoff.color;
     const runoffWetColor = debugLayerColors ? runoffDryColor : mulHexLumaFloor(preset.runoff.color, WET_OVERLAY.runoffDarken, 56);
+    const vergeDryColor = 0x2d7a3a;
+    const vergeWetColor = debugLayerColors ? vergeDryColor : mulHexLumaFloor(vergeDryColor, WET_OVERLAY.groundDarken, 76);
     const trackDryColor = debugLayerColors ? 0xff00ff : preset.trackTint;
     const trackWetColor = debugLayerColors ? trackDryColor : mulHex(preset.trackTint, WET_OVERLAY.trackDarken);
     const fogDryColor = preset.fog.color;
@@ -2686,7 +2688,7 @@ function Track3D({
     const vergeTex = cachedTex("grass", makeGrassTexture);
     vergeTex.repeat.set(1, 90);
     const vergeMat = new THREE.MeshBasicMaterial({
-      color: 0x2d7a3a, map: vergeTex, toneMapped: false,
+      color: vergeDryColor, map: vergeTex, toneMapped: false,
     });
     const vergeL = new THREE.Mesh(
       buildEdgeLineGeometry(curve, segments, -VERGE_CENTER, GRASS_STRIP_WIDTH, 0.06, 90),
@@ -3402,6 +3404,7 @@ function Track3D({
         advanceRain(rain, dt, _windVec);
         trackMat.color.setHex(trackWetColor);
         runoffMat.color.setHex(runoffWetColor);
+        vergeMat.color.setHex(vergeWetColor);
         // Do not heavily darken terrain in rain; the fog/tonemap stack already
         // reduces perceived brightness and can otherwise look like "missing"
         // black patches around the track.
@@ -3415,6 +3418,7 @@ function Track3D({
       } else {
         trackMat.color.setHex(trackDryColor);
         runoffMat.color.setHex(runoffDryColor);
+        vergeMat.color.setHex(vergeDryColor);
         groundMat.color.setHex(groundBaseColor);
         scene.fog.color.setHex(fogDryColor);
         scene.fog.density = preset.fog.densityScale / extent;
@@ -3429,7 +3433,7 @@ function Track3D({
     // Runs every frame the labels are visible. Hot path — keeps DOM writes
     // minimal via the `_shown` cache and skips off-screen / hidden cars
     // before paying the projection cost.
-    const updateLabels = (live, inFollow, inPov) => {
+    const updateLabels = (live, inFollow, inPov, seen) => {
       if (!(live.showLabels && !inFollow)) {
         if (labelLayer.style.display !== "none") labelLayer.style.display = "none";
         return;
@@ -3444,9 +3448,9 @@ function Track3D({
           if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
           continue;
         }
-        const firstBody = entry.group.userData.body[0];
+        const isSeen = seen.has(code);
         const hasStatusBadge = !!entry.lastLabelStatus;
-        if ((!firstBody || !firstBody.visible) && !hasStatusBadge) {
+        if ((!isSeen || !entry.group.visible) && !hasStatusBadge) {
           if (label._shown !== false) { label.style.display = "none"; label._shown = false; }
           continue;
         }
@@ -3487,6 +3491,7 @@ function Track3D({
         if (!entry) {
           const g = makeDriverMarker(window.APEX.TEAMS[s.driver.team]);
           g.userData.driverCode = s.driver.code;
+          g.visible = false;
           driverGroup.add(g);
           const teamColor = window.APEX.TEAMS[s.driver.team]?.color || "#ff1e00";
           const label = makeLabel(s.driver.code, teamColor);
@@ -3525,7 +3530,9 @@ function Track3D({
           entry.group.position.set(targetX, targetY, targetZ);
           entry.group.quaternion.copy(_carTargetQuat);
           entry.smoothInit = true;
+          continue;
         } else {
+          if (!entry.group.visible) entry.group.visible = true;
           const kPos = 1 - Math.exp(-CAR_POS_SMOOTH * dtL);
           const kRot = 1 - Math.exp(-CAR_ROT_SMOOTH * dtL);
           const pos = entry.group.position;
@@ -3811,7 +3818,7 @@ function Track3D({
       vu.uStrength.value += (targetVignetteStrength - vu.uStrength.value) * kV;
       vu.uRadius.value   += (targetVignetteRadius   - vu.uRadius.value)   * kV;
 
-      updateLabels(live, inFollow, inPov);
+      updateLabels(live, inFollow, inPov, seen);
 
       // Frame ran clean — re-arm the error logger so a recurrence after a
       // healthy window gets logged again instead of being dedupe-swallowed.
