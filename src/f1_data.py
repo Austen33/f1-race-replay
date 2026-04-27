@@ -569,6 +569,7 @@ def get_race_telemetry(session, session_type="R", include_frames=True):
 
     from src.data.race_store import (
         RaceHandle,
+        build_lap_trace_index,
         migrate_pickle_payload_to_arrow,
         write_race,
     )
@@ -928,6 +929,11 @@ def get_race_telemetry(session, session_type="R", include_frames=True):
         "race_control_messages": formatted_rc_messages,
         "weather_per_minute": weather_per_minute,
         "safety_car_events": safety_car_events,
+        "lap_trace_index": build_lap_trace_index(
+            write_arrays,
+            telemetry_ranges=telemetry_ranges,
+            fps=FPS,
+        ),
     }
 
     print("Completed telemetry extraction...")

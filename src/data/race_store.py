@@ -45,6 +45,87 @@ def _as_dtype(arr: np.ndarray, dtype) -> np.ndarray:
     return np.asarray(arr).astype(dtype, copy=False)
 
 
+def _lap_range_bounds(
+    code: str,
+    arr: dict[str, np.ndarray],
+    telemetry_ranges: dict | None,
+    fps: int,
+) -> tuple[int, int] | None:
+    lap_arr = np.asarray(arr.get("lap", ()))
+    if lap_arr.size == 0:
+        return None
+
+    start_idx = 0
+    end_idx = int(lap_arr.size - 1)
+    info = (telemetry_ranges or {}).get(code) or {}
+
+    start_time = info.get("start_time")
+    if start_time is not None:
+        start_idx = int(math.ceil(max(0.0, float(start_time)) * fps - 1e-9))
+
+    end_time = info.get("end_time")
+    if end_time is not None:
+        end_idx = int(math.floor(max(0.0, float(end_time)) * fps + 1e-9))
+
+    start_idx = max(0, min(start_idx, int(lap_arr.size - 1)))
+    end_idx = max(start_idx, min(end_idx, int(lap_arr.size - 1)))
+    return start_idx, end_idx
+
+
+def build_lap_trace_index(
+    driver_arrays: dict[str, dict[str, np.ndarray]],
+    telemetry_ranges: dict | None = None,
+    fps: int = FPS_DEFAULT,
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Precompute per-driver lap slice bounds for fast lap-trace retrieval."""
+    out: dict[str, dict[str, dict[str, int]]] = {}
+
+    for code, arr in driver_arrays.items():
+        bounds = _lap_range_bounds(code, arr, telemetry_ranges, fps)
+        if bounds is None:
+            continue
+        start_idx, end_idx = bounds
+        lap_arr = np.rint(np.asarray(arr["lap"])[start_idx:end_idx + 1]).astype(np.int32, copy=False)
+        if lap_arr.size == 0:
+            continue
+
+        driver_out: dict[str, dict[str, int]] = {}
+        run_start = start_idx
+        current_lap = int(lap_arr[0])
+        for offset in range(1, lap_arr.size):
+            lap_no = int(lap_arr[offset])
+            if lap_no == current_lap:
+                continue
+            driver_out[str(current_lap)] = {
+                "start_idx": int(run_start),
+                "end_idx": int(start_idx + offset - 1),
+            }
+            run_start = start_idx + offset
+            current_lap = lap_no
+
+        driver_out[str(current_lap)] = {
+            "start_idx": int(run_start),
+            "end_idx": int(end_idx),
+        }
+        out[code] = driver_out
+
+    return out
+
+
+def _empty_lap_trace_payload(code: str, lap: int) -> dict:
+    return {
+        "code": code,
+        "lap": int(lap),
+        "fraction": [],
+        "speed": [],
+        "throttle": [],
+        "brake": [],
+        "gear": [],
+        "rpm": [],
+        "drs": [],
+    }
+
+
 def write_race(path: Path, driver_arrays: dict, meta: dict) -> None:
     """Write Arrow + sidecar metadata atomically."""
     path = Path(path)
@@ -208,9 +289,18 @@ def sparse_safety_car_from_frames(frames: list[dict]) -> list[dict]:
     return events
 
 
-def build_meta_from_pickle_payload(payload: dict, fps: int = FPS_DEFAULT) -> dict:
+def build_meta_from_pickle_payload(
+    payload: dict,
+    fps: int = FPS_DEFAULT,
+    driver_arrays: dict[str, dict[str, np.ndarray]] | None = None,
+) -> dict:
     frames = payload.get("frames") or []
     driver_codes = sorted({code for f in frames for code in f.get("drivers", {})})
+    lap_trace_index = build_lap_trace_index(
+        driver_arrays or build_driver_arrays_from_frames(frames, fps=fps),
+        telemetry_ranges=payload.get("telemetry_ranges", {}),
+        fps=fps,
+    )
     return {
         "schema_version": 1,
         "fps": int(fps),
@@ -225,13 +315,14 @@ def build_meta_from_pickle_payload(payload: dict, fps: int = FPS_DEFAULT) -> dic
         "race_control_messages": payload.get("race_control_messages", []),
         "weather_per_minute": sparse_weather_from_frames(frames, fps=fps),
         "safety_car_events": sparse_safety_car_from_frames(frames),
+        "lap_trace_index": lap_trace_index,
     }
 
 
 def migrate_pickle_payload_to_arrow(payload: dict, arrow_path: Path, fps: int = FPS_DEFAULT) -> Path:
     frames = payload.get("frames") or []
     driver_arrays = build_driver_arrays_from_frames(frames, fps=fps)
-    meta = build_meta_from_pickle_payload(payload, fps=fps)
+    meta = build_meta_from_pickle_payload(payload, fps=fps, driver_arrays=driver_arrays)
     write_race(arrow_path, driver_arrays, meta)
     return Path(arrow_path).with_suffix(".arrow")
 
@@ -269,6 +360,36 @@ class RaceHandle:
                 idx = batch.schema.get_field_index(col)
                 arrs[col] = batch.column(idx).to_numpy(zero_copy_only=False)
             self._driver_arrays[code] = arrs
+
+        raw_lap_index = self.meta.get("lap_trace_index")
+        if raw_lap_index:
+            self._lap_trace_index = {
+                str(code): {
+                    int(lap): {
+                        "start_idx": int(bounds["start_idx"]),
+                        "end_idx": int(bounds["end_idx"]),
+                    }
+                    for lap, bounds in laps.items()
+                    if isinstance(bounds, dict)
+                    and "start_idx" in bounds
+                    and "end_idx" in bounds
+                }
+                for code, laps in raw_lap_index.items()
+                if isinstance(laps, dict)
+            }
+        else:
+            self._lap_trace_index = {
+                code: {
+                    int(lap): bounds
+                    for lap, bounds in laps.items()
+                }
+                for code, laps in build_lap_trace_index(
+                    self._driver_arrays,
+                    telemetry_ranges=self.meta.get("telemetry_ranges", {}),
+                    fps=self.fps,
+                ).items()
+            }
+        self._lap_trace_cache: dict[tuple[str, int], dict] = {}
 
         self._weather = self.meta.get("weather_per_minute", []) or []
         self._weather_idx = [int(w["frame_idx"]) for w in self._weather]
@@ -375,3 +496,59 @@ class RaceHandle:
         if name not in self._driver_arrays[driver_code]:
             raise KeyError(f"Unknown column '{name}'")
         return self._driver_arrays[driver_code][name]
+
+    def lap_trace(self, driver_code: str, lap: int, decel_full: float = 50.0) -> dict:
+        key = (str(driver_code), int(lap))
+        cached = self._lap_trace_cache.get(key)
+        if cached is not None:
+            return cached
+
+        arr = self._driver_arrays.get(str(driver_code))
+        if arr is None:
+            return _empty_lap_trace_payload(str(driver_code), int(lap))
+
+        bounds = (self._lap_trace_index.get(str(driver_code)) or {}).get(int(lap))
+        if not bounds:
+            return _empty_lap_trace_payload(str(driver_code), int(lap))
+
+        start_idx = max(0, int(bounds["start_idx"]))
+        end_idx = min(int(bounds["end_idx"]), int(len(arr["lap"]) - 1))
+        if end_idx < start_idx:
+            return _empty_lap_trace_payload(str(driver_code), int(lap))
+
+        s = slice(start_idx, end_idx + 1)
+        fraction = np.clip(np.asarray(arr["rel_dist"][s], dtype=np.float64), 0.0, 1.0)
+        speed = np.asarray(arr["speed"][s], dtype=np.float64)
+        throttle = np.asarray(arr["throttle"][s], dtype=np.float64)
+        gear = np.asarray(arr["gear"][s], dtype=np.int64)
+        rpm = np.asarray(arr["rpm"][s], dtype=np.float64)
+        drs = np.asarray(arr["drs"][s], dtype=np.int64)
+        brake_raw = np.asarray(arr["brake"][s], dtype=np.int64)
+        t_idx = np.asarray(arr["t_idx"][s], dtype=np.float64)
+
+        brake = np.zeros(brake_raw.size, dtype=np.float64)
+        if brake_raw.size:
+            brake[0] = 100.0 if bool(brake_raw[0]) else 0.0
+            for i in range(1, brake_raw.size):
+                if not bool(brake_raw[i]):
+                    continue
+                dt = max(1e-6, float(t_idx[i] - t_idx[i - 1]) / float(max(self.fps, 1)))
+                decel = ((float(speed[i - 1]) - float(speed[i])) / 3.6) / dt
+                if decel <= 0.0:
+                    brake[i] = 15.0
+                else:
+                    brake[i] = max(0.0, min(100.0, (decel / float(decel_full)) * 100.0))
+
+        payload = {
+            "code": str(driver_code),
+            "lap": int(lap),
+            "fraction": [round(float(x), 5) for x in fraction],
+            "speed": [round(float(x), 2) for x in speed],
+            "throttle": [round(float(x), 2) for x in throttle],
+            "brake": [round(float(x), 2) for x in brake],
+            "gear": [int(x) for x in gear],
+            "rpm": [round(float(x), 1) for x in rpm],
+            "drs": [int(x) for x in drs],
+        }
+        self._lap_trace_cache[key] = payload
+        return payload

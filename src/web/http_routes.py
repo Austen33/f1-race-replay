@@ -140,8 +140,8 @@ def session_results(request: Request):
 @router.get("/session/lap_telemetry/{code}/{lap}")
 def session_lap_telemetry(code: str, lap: int, request: Request):
     """Return the full telemetry trace for (driver, lap) as parallel arrays,
-    sliced from the cached race frames. Frontend uses this instead of rebuilding
-    a sparse trace from live WebSocket frames."""
+    using cache-backed lap slices when available. Frontend uses this instead of
+    rebuilding a sparse trace from live WebSocket frames."""
     from src.web.playback import _brake_intensity_pct
     DECEL_FULL = 50.0  # m/s² ≈ 5g, matches playback.standings_from_frame
 
@@ -150,6 +150,8 @@ def session_lap_telemetry(code: str, lap: int, request: Request):
     handle = loaded.get("handle")
     if not frames and handle is None:
         return {"fraction": [], "speed": [], "throttle": [], "brake": [], "gear": [], "rpm": [], "drs": []}
+    if handle is not None and hasattr(handle, "lap_trace"):
+        return handle.lap_trace(code, lap, decel_full=DECEL_FULL)
 
     fraction, speed, throttle, brake, gear, rpm, drs = [], [], [], [], [], [], []
     prev_d = None
