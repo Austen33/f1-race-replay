@@ -63,6 +63,20 @@ const CAR_SURFACE_CLEARANCE = 0.03;
 // Fixed-size ground halo so distant cars still read as markers even when the
 // body shrinks below a pixel. Does not scale with the car model.
 const HALO_RADIUS = 6.5;
+const TRACK3D_CAR_TUNE = Object.freeze({
+  yawDeg: 90.000,
+  scaleMultiplier: 2.510,
+});
+
+const TRACK3D_POV_TUNE = Object.freeze({
+  eyeForward: 0.430,
+  eyeRight: 0.000,
+  upDown: -1.170,
+  eyeHeight: 3.100,
+  lookAhead: 64.000,
+  lookHeight: -0.020,
+  baseFov: 75.000,
+});
 
 function detectUnitScale(circuit) {
   let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
@@ -1316,6 +1330,69 @@ function addIndicatorOverlays(g, color) {
   g.userData.compound = compound;
 }
 
+function computeLocalBounds(root, targets = null) {
+  if (!root) return null;
+  root.updateMatrixWorld(true);
+  const rootInv = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const out = new THREE.Box3();
+  const meshBox = new THREE.Box3();
+  const rel = new THREE.Matrix4();
+  let hasBounds = false;
+  const includeMesh = (obj) => {
+    if (!obj?.isMesh || !obj.geometry) return;
+    if (!obj.geometry.boundingBox) obj.geometry.computeBoundingBox();
+    if (!obj.geometry.boundingBox) return;
+    meshBox.copy(obj.geometry.boundingBox);
+    rel.multiplyMatrices(rootInv, obj.matrixWorld);
+    meshBox.applyMatrix4(rel);
+    if (!hasBounds) {
+      out.copy(meshBox);
+      hasBounds = true;
+    } else {
+      out.union(meshBox);
+    }
+  };
+  if (Array.isArray(targets) && targets.length > 0) {
+    for (const t of targets) {
+      if (!t) continue;
+      t.traverse(includeMesh);
+    }
+  } else {
+    root.traverse(includeMesh);
+  }
+  return hasBounds ? out : null;
+}
+
+function applyDriverModelTune(modelRoot, wheels, fitScale) {
+  if (!modelRoot || !Number.isFinite(fitScale)) return;
+  const tune = TRACK3D_CAR_TUNE;
+  modelRoot.position.set(0, 0, 0);
+  modelRoot.rotation.set(0, THREE.MathUtils.degToRad(tune.yawDeg), 0);
+  modelRoot.scale.setScalar(fitScale * tune.scaleMultiplier);
+  const bbox = computeLocalBounds(modelRoot);
+  if (!bbox) return;
+  const bboxSize = bbox.getSize(new THREE.Vector3());
+  const center = bbox.getCenter(new THREE.Vector3());
+  modelRoot.position.x -= center.x;
+  modelRoot.position.z -= center.z;
+  const wheelBounds = (Array.isArray(wheels) && wheels.length > 0)
+    ? computeLocalBounds(modelRoot, wheels)
+    : null;
+  // Guard against bad wheel classification: if the inferred wheel plane is
+  // too far above the model's true lower bound, use the full-model bound so
+  // scaling never sinks the car below the track.
+  let contactY = bbox.min.y;
+  if (wheelBounds) {
+    const wheelContactY = wheelBounds.min.y;
+    const safeDelta = Math.max(0.25, bboxSize.y * 0.3);
+    if (wheelContactY - bbox.min.y <= safeDelta) {
+      contactY = wheelContactY;
+    }
+  }
+  modelRoot.position.y -= contactY;
+  modelRoot.updateMatrixWorld(true);
+}
+
 // Create a driver marker using the GLB model. Returns a group immediately
 // with a placeholder; the GLB model is attached asynchronously once loaded.
 // The userData contract is fully compatible with the animation loop.
@@ -1422,30 +1499,8 @@ function makeDriverMarker(team) {
     const size = bbox.getSize(new THREE.Vector3());
     const scaleX = CAR_LENGTH / Math.max(size.x, 0.01);
     const scaleZ = CAR_WIDTH / Math.max(size.z, 0.01);
-    const scale = Math.min(scaleX, scaleZ);
-    clone.scale.setScalar(scale);
-    // Rotate 180° so the model faces +X (forward). The GLB's default
-    // forward is -X, so a Y-axis flip aligns it with the scene convention.
-    clone.rotation.y = Math.PI;
-    // Recompute bbox after scaling/rotation to centre the model in X/Z and
-    // anchor Y to the wheel contact plane.
-    clone.updateMatrixWorld(true);
-    const bbox2 = new THREE.Box3().setFromObject(clone);
-    const center = bbox2.getCenter(new THREE.Vector3());
-    clone.position.x -= center.x;
-    clone.position.z -= center.z;
-    // Anchor the clone so the lowest wheel point sits at local Y=0. This is a
-    // geometry-derived contact plane (no magic offsets), so placement on track
-    // only needs one global clearance value.
-    let contactY = Infinity;
-    if (wheels.length > 0) {
-      for (const wheel of wheels) {
-        const wheelBox = new THREE.Box3().setFromObject(wheel);
-        if (wheelBox.min.y < contactY) contactY = wheelBox.min.y;
-      }
-    }
-    if (!Number.isFinite(contactY)) contactY = bbox2.min.y;
-    clone.position.y -= contactY;
+    const fitScale = Math.min(scaleX, scaleZ);
+    applyDriverModelTune(clone, wheels, fitScale);
 
     g.add(clone);
     g.userData.body = body;
@@ -1453,6 +1508,8 @@ function makeDriverMarker(team) {
     g.userData.wheels = wheels;
     g.userData.wheelMats = wheelMats;
     g.userData.wheelsAreSeparateMeshes = wheelsAreSeparateMeshes;
+    g.userData.modelRoot = clone;
+    g.userData.modelFitScale = fitScale;
   }).catch(() => {
     // GLB failed — use the primitive fallback.
     const fallback = makeFallbackMarker(team);
@@ -3264,12 +3321,7 @@ function Track3D({
     const CAR_ROT_SMOOTH = 18.0;
 
     // --- POV (first-person / cockpit) state ---
-    const POV_EYE_HEIGHT  = 3.100;
-    const POV_EYE_FORWARD = 0.700;
-    const POV_LOOK_AHEAD  = 64.0;
-    const POV_LOOK_HEIGHT = 1.150;
-    const POV_FOV         = 89.0;
-    const POV_SMOOTH_ROT  = 12.0;
+    const POV_SMOOTH_ROT = 12.0;
     const pov = {
       smoothedForward: null,
       smoothedUp: null,
@@ -3765,18 +3817,21 @@ function Track3D({
           }
           const fwd = pov.smoothedForward;
           const up = pov.smoothedUp;
+          const povTune = TRACK3D_POV_TUNE;
           _cameraRight.crossVectors(fwd, up).normalize();
           up.crossVectors(_cameraRight, fwd).normalize();
 
           _eyeWorld.copy(pinnedEntry.group.position)
-            .addScaledVector(fwd, POV_EYE_FORWARD)
-            .addScaledVector(up, POV_EYE_HEIGHT);
+            .addScaledVector(fwd, povTune.eyeForward)
+            .addScaledVector(_cameraRight, povTune.eyeRight)
+            .addScaledVector(up, povTune.eyeHeight + povTune.upDown);
           camera.position.copy(_eyeWorld);
           camera.up.copy(up);
 
           _lookWorld.copy(pinnedEntry.group.position)
-            .addScaledVector(fwd, POV_LOOK_AHEAD)
-            .addScaledVector(up, POV_LOOK_HEIGHT);
+            .addScaledVector(fwd, povTune.lookAhead)
+            .addScaledVector(_cameraRight, povTune.eyeRight)
+            .addScaledVector(up, povTune.lookHeight + povTune.upDown);
           camera.lookAt(_lookWorld);
 
           controls.enabled = false;
@@ -3787,7 +3842,7 @@ function Track3D({
           const sCurve = sNorm * sNorm * (3 - 2 * sNorm);
           targetVignetteStrength = preset.vignette.base + sCurve * 0.3;
           targetVignetteRadius = 1.0 - sCurve * 0.22;
-          const targetFov = POV_FOV + sCurve * 6;
+          const targetFov = povTune.baseFov + sCurve * 6;
           camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-3 * dtL));
           camera.updateProjectionMatrix();
         } else {
