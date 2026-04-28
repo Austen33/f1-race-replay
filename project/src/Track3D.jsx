@@ -60,7 +60,7 @@ import {
   mulHex,
   mulHexLumaFloor,
   detectTimeOfDay,
-  buildVoidBackdrop,
+  buildSkyDome,
   buildStarField,
   sampleTrackFrameAt,
   makeTracksidePlacard,
@@ -202,9 +202,8 @@ function Track3D({
     const fogDryColor = preset.fog.color;
     const fogWetColor = WET_OVERLAY.fogTint;
     const scene = new THREE.Scene();
-    // Background colour matches the void edge so the very first frame (and any
-    // tiny shader miss) doesn't flash a different tone before fog kicks in.
-    scene.background = new THREE.Color(preset.void.edge);
+    // Match background to the sky horizon so any tiny first-frame gap blends.
+    scene.background = new THREE.Color(preset.sky?.horizon ?? preset.void.edge);
 
     // Hemisphere fill + a single key directional light. With no terrain or
     // sky to bounce light off, the lighting model is much simpler than before.
@@ -257,19 +256,17 @@ function Track3D({
     );
     sun.target.position.copy(center);
 
-    // ── Layer 1: void backdrop ─────────────────────────────────────────────
-    // Large inverted gradient sphere. Combined with FogExp2 and a vignette
-    // post-pass it gives the camera a sense of infinite, dim space without
-    // needing a sky or horizon.
-    const backdrop = buildVoidBackdrop(extent * 6, preset);
-    backdrop.position.copy(center);
-    scene.add(backdrop);
+    // ── Layer 1: sky dome ──────────────────────────────────────────────────
+    const sky = buildSkyDome(extent * 4, sunDir, preset);
+    sky.position.copy(center);
+    scene.add(sky);
 
     // Optional: subtle stars at night only, just inside the backdrop. They
     // add a hint of "dome of space" without committing to a full sky.
     let stars = null;
-    if ((preset.starStrength || 0) > 0.01) {
-      stars = buildStarField(extent * 5.5, 1400, preset.starStrength);
+    const starStrength = preset.sky?.starStrength ?? preset.starStrength ?? 0;
+    if (starStrength > 0.01) {
+      stars = buildStarField(extent * 3.8, 1800, starStrength);
       stars.position.copy(center);
       scene.add(stars);
     }

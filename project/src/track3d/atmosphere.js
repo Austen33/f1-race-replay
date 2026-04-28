@@ -20,6 +20,18 @@ import * as THREE from "three";
 // soft circular wash of the gradient ever shows through.
 const TOD_PRESETS = {
   day: {
+    sky: {
+      zenith: 0x2e6db5,
+      horizon: 0xb8d4e8,
+      ground: 0x7a8090,
+      sunColor: 0xffe8b0,
+      sunDisc: 2.2,
+      hazeTint: 1.0,
+      starStrength: 0.0,
+      horizonGlow: 0xffd080,
+      horizonGlowStrength: 0.28,
+      cloudStrength: 0.55,
+    },
     void: { center: 0x1c2330, edge: 0x070a12 },
     sun: { dir: [0.55, 0.65, -0.45], color: 0xfff0cc, intensity: 1.4 },
     hemi: { sky: 0xbcd4ff, ground: 0x121620, intensity: 0.7 },
@@ -34,6 +46,18 @@ const TOD_PRESETS = {
     starStrength: 0.0,
   },
   dusk: {
+    sky: {
+      zenith: 0x121933,
+      horizon: 0x703845,
+      ground: 0x100f18,
+      sunColor: 0xffb889,
+      sunDisc: 3.4,
+      hazeTint: 1.45,
+      starStrength: 0.22,
+      horizonGlow: 0xff9a66,
+      horizonGlowStrength: 0.55,
+      cloudStrength: 0.0,
+    },
     void: { center: 0x231627, edge: 0x07050a },
     sun: { dir: [0.45, 0.55, -0.7], color: 0xffc194, intensity: 1.2 },
     hemi: { sky: 0xa39abb, ground: 0x14101a, intensity: 0.45 },
@@ -48,6 +72,18 @@ const TOD_PRESETS = {
     starStrength: 0.25,
   },
   night: {
+    sky: {
+      zenith: 0x04060c,
+      horizon: 0x14182a,
+      ground: 0x04050a,
+      sunColor: 0xffd9a8,
+      sunDisc: 0.0,
+      hazeTint: 1.0,
+      starStrength: 1.0,
+      horizonGlow: 0xffb070,
+      horizonGlowStrength: 0.4,
+      cloudStrength: 0.0,
+    },
     void: { center: 0x0a0e1c, edge: 0x02030a },
     sun: { dir: [0.25, 0.95, -0.15], color: 0xe8ecff, intensity: 0.9 },
     hemi: { sky: 0x324164, ground: 0x070a12, intensity: 0.4 },
@@ -146,6 +182,103 @@ function buildVoidBackdrop(radius, preset) {
         float t = abs(vDir.y);
         float k = smoothstep(0.0, 0.85, t);
         gl_FragColor = vec4(mix(uCenter, uEdge, k), 1.0);
+      }
+    `,
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = -10;
+  return mesh;
+}
+
+function buildSkyDome(radius, sunDir, preset) {
+  const geom = new THREE.SphereGeometry(radius, 48, 24);
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    uniforms: {
+      uZenith: { value: new THREE.Color(preset.sky.zenith) },
+      uHorizon: { value: new THREE.Color(preset.sky.horizon) },
+      uGround: { value: new THREE.Color(preset.sky.ground) },
+      uSunDir: { value: sunDir.clone().normalize() },
+      uSunColor: { value: new THREE.Color(preset.sky.sunColor) },
+      uSunSize: { value: 0.9985 },
+      uSunDisc: { value: preset.sky.sunDisc },
+      uHazeTint: { value: preset.sky.hazeTint },
+      uHorizonGlow: { value: new THREE.Color(preset.sky.horizonGlow || 0x000000) },
+      uHorizonGlowStrength: { value: preset.sky.horizonGlowStrength || 0.0 },
+      uCloudStrength: { value: preset.sky.cloudStrength ?? 0.0 },
+    },
+    vertexShader: `
+      varying vec3 vDir;
+      void main() {
+        vDir = normalize(position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vDir;
+      uniform vec3 uZenith;
+      uniform vec3 uHorizon;
+      uniform vec3 uGround;
+      uniform vec3 uSunDir;
+      uniform vec3 uSunColor;
+      uniform float uSunSize;
+      uniform float uSunDisc;
+      uniform float uHazeTint;
+      uniform vec3 uHorizonGlow;
+      uniform float uHorizonGlowStrength;
+      uniform float uCloudStrength;
+
+      float hash(vec2 p) {
+        p = fract(p * vec2(127.1, 311.7));
+        p += dot(p, p + 43.21);
+        return fract(p.x * p.y);
+      }
+      float smoothNoise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(
+          mix(hash(i), hash(i + vec2(1,0)), u.x),
+          mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), u.x),
+          u.y
+        );
+      }
+      float clouds(vec3 d) {
+        if (d.y < 0.04) return 0.0;
+        vec2 uv = d.xz / (d.y + 0.15) * 1.4;
+        float n = smoothNoise(uv * 2.2) * 0.62
+                + smoothNoise(uv * 4.8) * 0.28
+                + smoothNoise(uv * 9.5) * 0.10;
+        float c = smoothstep(0.48, 0.72, n);
+        float horizonFade = smoothstep(0.04, 0.20, d.y);
+        return c * horizonFade;
+      }
+
+      void main() {
+        vec3 d = normalize(vDir);
+        float t = clamp(d.y, -1.0, 1.0);
+        vec3 sky = (t > 0.0)
+          ? mix(uHorizon, uZenith, smoothstep(0.0, 0.50, t))
+          : mix(uHorizon, uGround, smoothstep(0.0, -0.25, t));
+        float haze = exp(-abs(t) * 5.5);
+        sky = mix(sky, uHorizon * uHazeTint, haze * 0.28);
+        float glow = pow(max(0.0, 1.0 - abs(t)), 8.0);
+        sky += uHorizonGlow * (glow * uHorizonGlowStrength);
+        if (uCloudStrength > 0.001) {
+          float c = clouds(d);
+          float sunLit = max(0.0, dot(d, normalize(uSunDir))) * 0.3 + 0.7;
+          vec3 cloudColor = mix(vec3(0.82, 0.86, 0.90), vec3(1.0, 0.98, 0.94) * sunLit, 0.5);
+          sky = mix(sky, cloudColor, c * uCloudStrength);
+        }
+        if (uSunDisc > 0.001) {
+          float sd = max(0.0, dot(d, normalize(uSunDir)));
+          float disc = smoothstep(uSunSize, uSunSize + 0.0008, sd);
+          float halo = pow(sd, 64.0) * 0.40 + pow(sd, 6.0) * 0.08;
+          sky += uSunColor * (disc * uSunDisc + halo);
+        }
+        gl_FragColor = vec4(sky, 1.0);
       }
     `,
   });
@@ -428,6 +561,7 @@ export {
   mulHex,
   mulHexLumaFloor,
   detectTimeOfDay,
+  buildSkyDome,
   buildVoidBackdrop,
   buildStarField,
   sampleTrackFrameAt,
