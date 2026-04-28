@@ -119,7 +119,48 @@ const TRACK3D_POV_TUNE = Object.freeze({
   baseFov: 75.000,
 });
 
-function hasClosePlanarPass(points, threshold) {
+const DEFAULT_BRIDGE_SKIRT_TUNE = Object.freeze({
+  halfSpanMinM: 44,
+  halfSpanMaxM: 205,
+  halfSpanWidthFactor: 0.57,
+  sinFloor: 0.24,
+  radiusMinM: 28,
+  radiusMaxM: 82,
+  radiusFactor: 0.86,
+  branchInnerRatio: 0.54,
+  radialInnerRatio: 0.68,
+});
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function sanitizeBridgeSkirtTune(raw) {
+  const src = raw || {};
+  const t = {
+    halfSpanMinM: Number.isFinite(src.halfSpanMinM) ? src.halfSpanMinM : DEFAULT_BRIDGE_SKIRT_TUNE.halfSpanMinM,
+    halfSpanMaxM: Number.isFinite(src.halfSpanMaxM) ? src.halfSpanMaxM : DEFAULT_BRIDGE_SKIRT_TUNE.halfSpanMaxM,
+    halfSpanWidthFactor: Number.isFinite(src.halfSpanWidthFactor) ? src.halfSpanWidthFactor : DEFAULT_BRIDGE_SKIRT_TUNE.halfSpanWidthFactor,
+    sinFloor: Number.isFinite(src.sinFloor) ? src.sinFloor : DEFAULT_BRIDGE_SKIRT_TUNE.sinFloor,
+    radiusMinM: Number.isFinite(src.radiusMinM) ? src.radiusMinM : DEFAULT_BRIDGE_SKIRT_TUNE.radiusMinM,
+    radiusMaxM: Number.isFinite(src.radiusMaxM) ? src.radiusMaxM : DEFAULT_BRIDGE_SKIRT_TUNE.radiusMaxM,
+    radiusFactor: Number.isFinite(src.radiusFactor) ? src.radiusFactor : DEFAULT_BRIDGE_SKIRT_TUNE.radiusFactor,
+    branchInnerRatio: Number.isFinite(src.branchInnerRatio) ? src.branchInnerRatio : DEFAULT_BRIDGE_SKIRT_TUNE.branchInnerRatio,
+    radialInnerRatio: Number.isFinite(src.radialInnerRatio) ? src.radialInnerRatio : DEFAULT_BRIDGE_SKIRT_TUNE.radialInnerRatio,
+  };
+  t.halfSpanMinM = clamp(t.halfSpanMinM, 8, 220);
+  t.halfSpanMaxM = clamp(t.halfSpanMaxM, t.halfSpanMinM + 4, 360);
+  t.halfSpanWidthFactor = clamp(t.halfSpanWidthFactor, 0.05, 1.8);
+  t.sinFloor = clamp(t.sinFloor, 0.05, 0.95);
+  t.radiusMinM = clamp(t.radiusMinM, 8, 220);
+  t.radiusMaxM = clamp(t.radiusMaxM, t.radiusMinM + 4, 360);
+  t.radiusFactor = clamp(t.radiusFactor, 0.2, 2.2);
+  t.branchInnerRatio = clamp(t.branchInnerRatio, 0.05, 0.95);
+  t.radialInnerRatio = clamp(t.radialInnerRatio, 0.05, 0.95);
+  return t;
+}
+
+function hasClosePlanarPass(points, threshold, maxYDelta = 4) {
   const n = points.length;
   if (n < 12) return false;
   const step = Math.max(1, Math.floor(n / 240));
@@ -134,50 +175,413 @@ function hasClosePlanarPass(points, threshold) {
       const b = points[j];
       const dx = a.x - b.x;
       const dz = a.z - b.z;
-      if (dx * dx + dz * dz < threshold2) return true;
+      if (dx * dx + dz * dz < threshold2 && Math.abs(a.y - b.y) < maxYDelta) return true;
     }
   }
   return false;
 }
 
-function liftSuzukaBridgeBranch(curve, circuitName) {
-  if (!/suzuka/i.test(circuitName || "")) return;
-  const pts = curve.points || [];
-  const n = pts.length;
-  if (n < 24) return;
-  const minGap = Math.max(8, Math.floor(n * 0.12));
-  let bestA = -1;
-  let bestB = -1;
-  let bestD2 = Infinity;
+function wrap01(v) {
+  return ((v % 1) + 1) % 1;
+}
+
+function wrapDist01(a, b) {
+  const d = Math.abs(wrap01(a) - wrap01(b));
+  return Math.min(d, 1 - d);
+}
+
+function segmentIntersectionXZ(a0, a1, b0, b1, eps = 1e-6) {
+  const rX = a1.x - a0.x;
+  const rZ = a1.z - a0.z;
+  const sX = b1.x - b0.x;
+  const sZ = b1.z - b0.z;
+  const denom = rX * sZ - rZ * sX;
+  if (Math.abs(denom) < eps) return null;
+  const qpx = b0.x - a0.x;
+  const qpz = b0.z - a0.z;
+  const t = (qpx * sZ - qpz * sX) / denom;
+  const u = (qpx * rZ - qpz * rX) / denom;
+  if (t <= eps || t >= 1 - eps || u <= eps || u >= 1 - eps) return null;
+  return {
+    t,
+    u,
+    x: a0.x + rX * t,
+    z: a0.z + rZ * t,
+  };
+}
+
+function estimatePlanarTurn(points, idx) {
+  const n = points.length;
+  if (n < 3) return Infinity;
+  const p0 = points[(idx - 1 + n) % n];
+  const p1 = points[idx % n];
+  const p2 = points[(idx + 1) % n];
+  const aX = p1.x - p0.x;
+  const aZ = p1.z - p0.z;
+  const bX = p2.x - p1.x;
+  const bZ = p2.z - p1.z;
+  const aLen = Math.hypot(aX, aZ);
+  const bLen = Math.hypot(bX, bZ);
+  if (aLen < 1e-6 || bLen < 1e-6) return Infinity;
+  const dot = Math.max(-1, Math.min(1, (aX * bX + aZ * bZ) / (aLen * bLen)));
+  return Math.acos(dot);
+}
+
+function findSelfCrossovers(curveSamples) {
+  const points = curveSamples.slice();
+  if (points.length >= 2 && points[0].distanceToSquared(points[points.length - 1]) < 1e-6) {
+    points.pop();
+  }
+  const n = points.length;
+  if (n < 24) return [];
+  const minGap = Math.max(10, Math.floor(n * 0.07));
+  const dedupeRadius2 = 26 * 26;
+  const crossings = [];
   for (let i = 0; i < n; i++) {
-    const a = pts[i];
+    const a0 = points[i];
+    const a1 = points[(i + 1) % n];
+    const aMinX = Math.min(a0.x, a1.x);
+    const aMaxX = Math.max(a0.x, a1.x);
+    const aMinZ = Math.min(a0.z, a1.z);
+    const aMaxZ = Math.max(a0.z, a1.z);
     for (let j = i + minGap; j < n; j++) {
-      const gap = Math.min(j - i, n - (j - i));
-      if (gap < minGap) continue;
-      const b = pts[j];
-      const dx = a.x - b.x;
-      const dz = a.z - b.z;
-      const d2 = dx * dx + dz * dz;
-      if (d2 < bestD2) {
-        bestD2 = d2;
-        bestA = i;
-        bestB = j;
+      const rawGap = j - i;
+      const ringGap = Math.min(rawGap, n - rawGap);
+      if (ringGap < minGap || rawGap >= n - 1) continue;
+      const b0 = points[j];
+      const b1 = points[(j + 1) % n];
+      const bMinX = Math.min(b0.x, b1.x);
+      const bMaxX = Math.max(b0.x, b1.x);
+      const bMinZ = Math.min(b0.z, b1.z);
+      const bMaxZ = Math.max(b0.z, b1.z);
+      if (aMaxX < bMinX || bMaxX < aMinX || aMaxZ < bMinZ || bMaxZ < aMinZ) continue;
+      const hit = segmentIntersectionXZ(a0, a1, b0, b1);
+      if (!hit) continue;
+      let isDuplicate = false;
+      for (const c of crossings) {
+        const dx = c.x - hit.x;
+        const dz = c.z - hit.z;
+        if (dx * dx + dz * dz < dedupeRadius2) {
+          isDuplicate = true;
+          break;
+        }
       }
+      if (isDuplicate) continue;
+      const aDX = a1.x - a0.x;
+      const aDZ = a1.z - a0.z;
+      const bDX = b1.x - b0.x;
+      const bDZ = b1.z - b0.z;
+      const aLen = Math.hypot(aDX, aDZ);
+      const bLen = Math.hypot(bDX, bDZ);
+      const dot = (aLen > 1e-6 && bLen > 1e-6)
+        ? Math.max(-1, Math.min(1, (aDX * bDX + aDZ * bDZ) / (aLen * bLen)))
+        : 0;
+      const yA = a0.y + (a1.y - a0.y) * hit.t;
+      const yB = b0.y + (b1.y - b0.y) * hit.u;
+      crossings.push({
+        x: hit.x,
+        z: hit.z,
+        uA: (i + hit.t) / n,
+        uB: (j + hit.u) / n,
+        yA,
+        yB,
+        segA: i,
+        segB: j,
+        angle: Math.acos(Math.abs(dot)),
+      });
     }
   }
-  if (bestA < 0 || bestB < 0 || bestD2 > 90 * 90) return;
-  if (Math.abs(pts[bestA].y - pts[bestB].y) > 5) return;
-  const centerIdx = Math.max(bestA, bestB);
-  const span = Math.max(10, Math.floor(n * 0.035));
-  const lift = 14;
+  return crossings;
+}
+
+function addBellOffset(offsets, centerU, amplitude, sigmaU) {
+  const n = offsets.length;
+  if (!n || !Number.isFinite(amplitude) || Math.abs(amplitude) < 1e-4) return;
+  const center = wrap01(centerU);
+  const sigma = Math.max(0.003, sigmaU);
+  const cutoff = 2.6;
   for (let i = 0; i < n; i++) {
-    const raw = Math.abs(i - centerIdx);
-    const wrapped = Math.min(raw, n - raw);
-    if (wrapped > span * 2.5) continue;
-    const t = wrapped / span;
-    pts[i].y += lift * Math.exp(-0.5 * t * t);
+    const d = wrapDist01(i / n, center);
+    const t = d / sigma;
+    if (t > cutoff) continue;
+    offsets[i] += amplitude * Math.exp(-0.5 * t * t);
   }
+}
+
+function sampleSpacedLoop(curve, sampleCount) {
+  const samples = curve.getSpacedPoints(sampleCount);
+  if (samples.length >= 2 && samples[0].distanceToSquared(samples[samples.length - 1]) < 1e-6) {
+    samples.pop();
+  }
+  return samples;
+}
+
+function smoothstep01(t) {
+  const x = clamp(t, 0, 1);
+  return x * x * (3 - 2 * x);
+}
+
+function carveSkirtAtCrossings(
+  skirtGeom,
+  basePositions,
+  segments,
+  crossings,
+  curveLength,
+  tune = DEFAULT_BRIDGE_SKIRT_TUNE,
+) {
+  if (!skirtGeom || !basePositions || segments < 2) return;
+  const posAttr = skirtGeom.getAttribute("position");
+  if (!posAttr) return;
+  const arr = posAttr.array;
+  arr.set(basePositions);
+  if (!crossings?.length) {
+    posAttr.needsUpdate = true;
+    skirtGeom.computeVertexNormals();
+    return;
+  }
+  const totalLen = Math.max(1, curveLength || 1);
+  const t = sanitizeBridgeSkirtTune(tune);
+  for (let i = 0; i <= segments; i++) {
+    const base = i * 12;
+    const cx = (arr[base + 0] + arr[base + 3]) * 0.5;
+    const cz = (arr[base + 2] + arr[base + 5]) * 0.5;
+    const u = i / segments;
+    let carve = 0;
+    for (const c of crossings) {
+      const sinA = Math.max(t.sinFloor, Math.sin(Math.max(0.02, c.angle)));
+      const halfSpanM = Math.min(
+        t.halfSpanMaxM,
+        Math.max(t.halfSpanMinM, (TRACK_WIDTH + RUNOFF_WIDTH * t.halfSpanWidthFactor) / sinA),
+      );
+      const outerU = halfSpanM / totalLen;
+      const innerU = outerU * t.branchInnerRatio;
+      const radius = Math.min(t.radiusMaxM, Math.max(t.radiusMinM, halfSpanM * t.radiusFactor));
+      const innerR = radius * t.radialInnerRatio;
+      const dx = cx - c.x;
+      const dz = cz - c.z;
+      const dR = Math.hypot(dx, dz);
+      if (dR > radius) continue;
+      // Carve only the overpass branch; never cut the lower branch skirt.
+      const dU = wrapDist01(u, c.overU);
+      if (dU > outerU) continue;
+      let wU = 1;
+      if (dU > innerU) wU = 1 - smoothstep01((dU - innerU) / Math.max(1e-6, outerU - innerU));
+      let wR = 1;
+      if (dR > innerR) wR = 1 - smoothstep01((dR - innerR) / Math.max(1e-6, radius - innerR));
+      carve = Math.max(carve, wU * wR);
+    }
+    if (carve <= 1e-4) continue;
+    const yTopInner = arr[base + 1];
+    const yTopOuter = arr[base + 4];
+    const yBotInner = arr[base + 7];
+    const yBotOuter = arr[base + 10];
+    arr[base + 7] = yBotInner + (yTopInner - yBotInner) * carve;
+    arr[base + 10] = yBotOuter + (yTopOuter - yBotOuter) * carve;
+  }
+  posAttr.needsUpdate = true;
+  skirtGeom.computeVertexNormals();
+}
+
+function sanitizeCrossingWindows(crossings, minDeltaU = 0.004) {
+  if (!crossings?.length) return [];
+  const out = [];
+  for (const c of crossings) {
+    let duplicate = false;
+    for (const e of out) {
+      const duA = wrapDist01(c.uA, e.uA) + wrapDist01(c.uB, e.uB);
+      const duB = wrapDist01(c.uA, e.uB) + wrapDist01(c.uB, e.uA);
+      if (Math.min(duA, duB) < minDeltaU) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) out.push(c);
+  }
+  return out;
+}
+
+function resolveOverpassBranch(crossing, samples) {
+  let overU = crossing.uA;
+  let underU = crossing.uB;
+  let overY = crossing.yA;
+  let underY = crossing.yB;
+  const yDelta = crossing.yA - crossing.yB;
+  if (Math.abs(yDelta) >= 0.35) {
+    if (yDelta < 0) {
+      overU = crossing.uB;
+      underU = crossing.uA;
+      overY = crossing.yB;
+      underY = crossing.yA;
+    }
+    return { overU, underU, overY, underY };
+  }
+  // Fallback for near-flat data: pick the straighter branch as overpass.
+  const turnA = estimatePlanarTurn(samples, crossing.segA);
+  const turnB = estimatePlanarTurn(samples, crossing.segB);
+  if (turnB + 0.02 < turnA || (Math.abs(turnA - turnB) <= 0.02 && crossing.uB > crossing.uA)) {
+    overU = crossing.uB;
+    underU = crossing.uA;
+    overY = crossing.yB;
+    underY = crossing.yA;
+  }
+  return { overU, underU, overY, underY };
+}
+
+function buildBridgeSkirtDebugPanel(mount, tune, onApply) {
+  const panel = document.createElement("div");
+  Object.assign(panel.style, {
+    position: "absolute", top: "12px", right: "286px",
+    display: "none",
+    fontFamily: "JetBrains Mono, monospace",
+    fontSize: "11px",
+    color: "#e6e6ef",
+    padding: "10px 12px",
+    background: "rgba(11,11,17,0.92)",
+    border: "1px solid rgba(0,217,255,0.35)",
+    borderRadius: "4px",
+    backdropFilter: "blur(6px)",
+    WebkitBackdropFilter: "blur(6px)",
+    pointerEvents: "auto",
+    zIndex: 6,
+    width: "280px",
+    boxShadow: "0 4px 20px rgba(0,0,0,0.5)",
+  });
+  panel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <div style="font-weight:800;letter-spacing:0.13em;color:#00d9ff;">BRIDGE SKIRT TUNE</div>
+      <div data-act="close" style="cursor:pointer;color:rgba(180,180,200,0.6);padding:0 4px;">×</div>
+    </div>
+    <div style="font-size:9px;color:rgba(180,180,200,0.55);letter-spacing:0.12em;margin-bottom:8px;">PRESS B TO TOGGLE</div>
+    <div data-rows></div>
+    <div style="display:flex;gap:6px;margin-top:10px;">
+      <button data-act="copy" style="flex:1;font-family:inherit;font-size:10px;background:#1a1a26;color:#e6e6ef;border:1px solid rgba(255,255,255,0.15);padding:6px;cursor:pointer;letter-spacing:0.08em;">COPY VALUES</button>
+      <button data-act="reset" style="flex:1;font-family:inherit;font-size:10px;background:#1a1a26;color:#e6e6ef;border:1px solid rgba(255,255,255,0.15);padding:6px;cursor:pointer;letter-spacing:0.08em;">RESET</button>
+    </div>
+    <div data-status style="font-size:9px;color:rgba(180,180,200,0.55);letter-spacing:0.10em;margin-top:6px;min-height:12px;"></div>
+  `;
+  mount.appendChild(panel);
+
+  const rowsEl = panel.querySelector("[data-rows]");
+  const statusEl = panel.querySelector("[data-status]");
+  const defaults = { ...DEFAULT_BRIDGE_SKIRT_TUNE };
+  const rows = [
+    { key: "halfSpanMinM", label: "span min (m)", min: 8, max: 220, step: 1 },
+    { key: "halfSpanMaxM", label: "span max (m)", min: 16, max: 360, step: 1 },
+    { key: "halfSpanWidthFactor", label: "span factor", min: 0.05, max: 1.8, step: 0.01 },
+    { key: "sinFloor", label: "sin floor", min: 0.05, max: 0.95, step: 0.01 },
+    { key: "radiusMinM", label: "radius min (m)", min: 8, max: 220, step: 1 },
+    { key: "radiusMaxM", label: "radius max (m)", min: 16, max: 360, step: 1 },
+    { key: "radiusFactor", label: "radius factor", min: 0.2, max: 2.2, step: 0.01 },
+    { key: "branchInnerRatio", label: "u inner ratio", min: 0.05, max: 0.95, step: 0.01 },
+    { key: "radialInnerRatio", label: "r inner ratio", min: 0.05, max: 0.95, step: 0.01 },
+  ];
+
+  const refs = {};
+  const refreshUI = () => {
+    const safe = sanitizeBridgeSkirtTune(tune);
+    Object.assign(tune, safe);
+    for (const r of rows) {
+      const ref = refs[r.key];
+      const v = tune[r.key];
+      if (!ref) continue;
+      ref.input.value = String(v);
+      ref.val.textContent = Number(v).toFixed(r.step < 1 ? 2 : 0);
+    }
+  };
+
+  for (const r of rows) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:5px;";
+    row.innerHTML = `
+      <div style="width:118px;font-size:10px;color:rgba(180,180,200,0.7);letter-spacing:0.05em;">${r.label}</div>
+      <input type="range" min="${r.min}" max="${r.max}" step="${r.step}" value="${tune[r.key]}" style="flex:1;accent-color:#00d9ff;">
+      <div data-val style="width:44px;text-align:right;font-size:10px;color:#f6f6fa;font-variant-numeric:tabular-nums;">0</div>
+    `;
+    const input = row.querySelector("input");
+    const val = row.querySelector("[data-val]");
+    input.addEventListener("input", () => {
+      tune[r.key] = parseFloat(input.value);
+      refreshUI();
+      onApply && onApply();
+    });
+    refs[r.key] = { input, val };
+    rowsEl.appendChild(row);
+  }
+  refreshUI();
+
+  panel.querySelector("[data-act=close]").addEventListener("click", () => {
+    panel.style.display = "none";
+  });
+
+  panel.querySelector("[data-act=copy]").addEventListener("click", () => {
+    const safe = sanitizeBridgeSkirtTune(tune);
+    const lines = [];
+    lines.push("window.APEX.BRIDGE_SKIRT_TUNE = {");
+    for (const r of rows) {
+      const v = safe[r.key];
+      lines.push(`  ${r.key}: ${typeof v === "number" ? v.toFixed(3) : v},`);
+    }
+    lines.push("};");
+    const text = lines.join("\n");
+    navigator.clipboard?.writeText(text).then(
+      () => { statusEl.textContent = "COPIED · paste into Track3D defaults"; },
+      () => { statusEl.textContent = "COPY FAILED · see console"; console.log(text); },
+    );
+    setTimeout(() => { statusEl.textContent = ""; }, 2400);
+  });
+
+  panel.querySelector("[data-act=reset]").addEventListener("click", () => {
+    Object.assign(tune, defaults);
+    refreshUI();
+    onApply && onApply();
+    statusEl.textContent = "RESET";
+    setTimeout(() => { statusEl.textContent = ""; }, 1000);
+  });
+
+  const toggle = () => {
+    panel.style.display = (panel.style.display === "none") ? "block" : "none";
+  };
+
+  return { root: panel, toggle, refreshUI };
+}
+
+function applyAutoBridgeTunnels(curve) {
+  const pts = curve.points || [];
+  const n = pts.length;
+  if (n < 24) return 0;
+
+  const sampleCount = Math.max(320, Math.min(1000, n * 2));
+  const samples = sampleSpacedLoop(curve, sampleCount);
+  const crossings = findSelfCrossovers(samples);
+  if (!crossings.length) return 0;
+
+  const offsets = new Float32Array(n);
+  let applied = 0;
+  for (const c of crossings.slice(0, 4)) {
+    // Ignore near-parallel self-contacts; these are usually lane loops that
+    // do not need vertical splitting.
+    if (c.angle < Math.PI * 0.12) continue;
+    const { overU, underU, overY, underY } = resolveOverpassBranch(c, samples);
+
+    const currentClearance = overY - underY;
+    const targetClearance = 9.5;
+    const needed = targetClearance - currentClearance;
+    if (needed <= 0.6) continue;
+
+    const overLift = Math.min(14, Math.max(3.5, needed * 0.72));
+    const underDrop = Math.min(6.5, Math.max(0, needed - overLift));
+    const shallowFactor = 1 - Math.min(c.angle, Math.PI * 0.5) / (Math.PI * 0.5);
+    const sigmaU = 0.016 + shallowFactor * 0.018;
+
+    addBellOffset(offsets, overU, overLift, sigmaU);
+    addBellOffset(offsets, underU, -underDrop, sigmaU * 1.1);
+    applied++;
+  }
+
+  if (!applied) return 0;
+  for (let i = 0; i < n; i++) pts[i].y += offsets[i];
   curve.updateArcLengths();
+  return applied;
 }
 
 
@@ -256,6 +660,10 @@ function Track3D({
     const debugLayerColors = search.get("trackDebug") === "1";
     const disableToneMapping = search.get("trackToneMap") === "off";
     const showTrackHelpers = search.get("trackHelpers") === "1";
+    const showBridgeDebug = search.get("bridgeDebug") === "1";
+    const bridgeSkirtTune = sanitizeBridgeSkirtTune(window.APEX?.BRIDGE_SKIRT_TUNE || DEFAULT_BRIDGE_SKIRT_TUNE);
+    if (!window.APEX) window.APEX = {};
+    window.APEX.BRIDGE_SKIRT_TUNE = bridgeSkirtTune;
     const runoffDryColor = debugLayerColors ? 0x0060ff : preset.runoff.color;
     const runoffWetColor = debugLayerColors ? runoffDryColor : mulHexLumaFloor(preset.runoff.color, WET_OVERLAY.runoffDarken, 56);
     const trackDryColor = debugLayerColors ? 0xff00ff : preset.trackTint;
@@ -287,7 +695,7 @@ function Track3D({
     }
     if (!Number.isFinite(zMin)) zMin = 0;
     const curve = buildCenterlineCurve(circuit, zMin * scale, scale);
-    liftSuzukaBridgeBranch(curve, circuitName);
+    const autoBridgeCount = applyAutoBridgeTunnels(curve);
     const segments = Math.min(2000, Math.max(400, circuit.length * 2));
 
     const bb = new THREE.Box3();
@@ -296,8 +704,12 @@ function Track3D({
     const center = bb.getCenter(new THREE.Vector3());
     const size = bb.getSize(new THREE.Vector3());
     const extent = Math.max(size.x, size.z, 100);
-    const hasPlanarOverlap = hasClosePlanarPass(samplePts, RUNOFF_WIDTH * 3.5);
-    const disableOuterDecor = hasPlanarOverlap || /(zandvoort|suzuka)/i.test(circuitName || "");
+    const crossoverSamples = sampleSpacedLoop(curve, Math.max(360, Math.min(1200, segments)));
+    const selfCrossings = sanitizeCrossingWindows(findSelfCrossovers(crossoverSamples))
+      .map((c) => ({ ...c, ...resolveOverpassBranch(c, crossoverSamples) }));
+    const selfCrossingCount = selfCrossings.length;
+    const hasPlanarOverlap = hasClosePlanarPass(samplePts, RUNOFF_WIDTH * 3.5, 4.2);
+    const disableOuterDecor = hasPlanarOverlap || /zandvoort/i.test(circuitName || "");
     const curveLength = curve.getLength();
     const bboxInfo = {
       cx: center.x, cy: center.y, cz: center.z,
@@ -383,6 +795,20 @@ function Track3D({
       TRACK_BASE_Y + 0.01,
       SKIRT_DEPTH_DEFAULT,
     );
+    const skirtBasePositions = skirtGeom.getAttribute("position")?.array?.slice() || null;
+    const applySkirtCarve = () => {
+      carveSkirtAtCrossings(
+        skirtGeom,
+        skirtBasePositions,
+        segments,
+        selfCrossings,
+        curveLength,
+        bridgeSkirtTune,
+      );
+    };
+    if (selfCrossingCount > 0 || autoBridgeCount > 0) {
+      applySkirtCarve();
+    }
     const skirtMat = new THREE.MeshBasicMaterial({
       vertexColors: true,
       side: THREE.DoubleSide,
@@ -976,6 +1402,10 @@ function Track3D({
     });
 
     const wheelHudDebug = buildWheelHudDebugPanel(mount, reapplyWheelHud);
+    const bridgeSkirtDebug = buildBridgeSkirtDebugPanel(mount, bridgeSkirtTune, () => {
+      if (selfCrossingCount > 0 || autoBridgeCount > 0) applySkirtCarve();
+    });
+    if (showBridgeDebug) bridgeSkirtDebug.toggle();
     const onDebugKey = (e) => {
       if (e.key === "w" || e.key === "W") {
         // Don't fire if user is typing in an input field.
@@ -983,6 +1413,11 @@ function Track3D({
         const tag = t && t.tagName;
         if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
         wheelHudDebug.toggle();
+      } else if (e.key === "b" || e.key === "B") {
+        const t = e.target;
+        const tag = t && t.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
+        bridgeSkirtDebug.toggle();
       }
     };
     window.addEventListener("keydown", onDebugKey);
@@ -1755,6 +2190,7 @@ function Track3D({
       wheelHud.dispose();
       window.removeEventListener("keydown", onDebugKey);
       wheelHudDebug.root.remove();
+      bridgeSkirtDebug.root.remove();
       composer.dispose();
       renderTarget.dispose();
       // envTex is module-cached (getRoomEnvironment) — do NOT dispose here.
