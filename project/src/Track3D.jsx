@@ -427,124 +427,6 @@ function resolveOverpassBranch(crossing, samples) {
   return { overU, underU, overY, underY };
 }
 
-function buildBridgeSkirtDebugPanel(mount, tune, onApply) {
-  const panel = document.createElement("div");
-  Object.assign(panel.style, {
-    position: "absolute", top: "12px", right: "286px",
-    display: "none",
-    fontFamily: "JetBrains Mono, monospace",
-    fontSize: "11px",
-    color: "#e6e6ef",
-    padding: "10px 12px",
-    background: "rgba(11,11,17,0.92)",
-    border: "1px solid rgba(0,217,255,0.35)",
-    borderRadius: "4px",
-    backdropFilter: "blur(6px)",
-    WebkitBackdropFilter: "blur(6px)",
-    pointerEvents: "auto",
-    zIndex: 6,
-    width: "280px",
-    boxShadow: "0 4px 20px rgba(0,0,0,0.5)",
-  });
-  panel.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-      <div style="font-weight:800;letter-spacing:0.13em;color:#00d9ff;">BRIDGE SKIRT TUNE</div>
-      <div data-act="close" style="cursor:pointer;color:rgba(180,180,200,0.6);padding:0 4px;">×</div>
-    </div>
-    <div style="font-size:9px;color:rgba(180,180,200,0.55);letter-spacing:0.12em;margin-bottom:8px;">PRESS B TO TOGGLE</div>
-    <div data-rows></div>
-    <div style="display:flex;gap:6px;margin-top:10px;">
-      <button data-act="copy" style="flex:1;font-family:inherit;font-size:10px;background:#1a1a26;color:#e6e6ef;border:1px solid rgba(255,255,255,0.15);padding:6px;cursor:pointer;letter-spacing:0.08em;">COPY VALUES</button>
-      <button data-act="reset" style="flex:1;font-family:inherit;font-size:10px;background:#1a1a26;color:#e6e6ef;border:1px solid rgba(255,255,255,0.15);padding:6px;cursor:pointer;letter-spacing:0.08em;">RESET</button>
-    </div>
-    <div data-status style="font-size:9px;color:rgba(180,180,200,0.55);letter-spacing:0.10em;margin-top:6px;min-height:12px;"></div>
-  `;
-  mount.appendChild(panel);
-
-  const rowsEl = panel.querySelector("[data-rows]");
-  const statusEl = panel.querySelector("[data-status]");
-  const defaults = { ...DEFAULT_BRIDGE_SKIRT_TUNE };
-  const rows = [
-    { key: "halfSpanMinM", label: "span min (m)", min: 8, max: 220, step: 1 },
-    { key: "halfSpanMaxM", label: "span max (m)", min: 16, max: 360, step: 1 },
-    { key: "halfSpanWidthFactor", label: "span factor", min: 0.05, max: 1.8, step: 0.01 },
-    { key: "sinFloor", label: "sin floor", min: 0.05, max: 0.95, step: 0.01 },
-    { key: "radiusMinM", label: "radius min (m)", min: 8, max: 220, step: 1 },
-    { key: "radiusMaxM", label: "radius max (m)", min: 16, max: 360, step: 1 },
-    { key: "radiusFactor", label: "radius factor", min: 0.2, max: 2.2, step: 0.01 },
-    { key: "branchInnerRatio", label: "u inner ratio", min: 0.05, max: 0.95, step: 0.01 },
-    { key: "radialInnerRatio", label: "r inner ratio", min: 0.05, max: 0.95, step: 0.01 },
-  ];
-
-  const refs = {};
-  const refreshUI = () => {
-    const safe = sanitizeBridgeSkirtTune(tune);
-    Object.assign(tune, safe);
-    for (const r of rows) {
-      const ref = refs[r.key];
-      const v = tune[r.key];
-      if (!ref) continue;
-      ref.input.value = String(v);
-      ref.val.textContent = Number(v).toFixed(r.step < 1 ? 2 : 0);
-    }
-  };
-
-  for (const r of rows) {
-    const row = document.createElement("div");
-    row.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:5px;";
-    row.innerHTML = `
-      <div style="width:118px;font-size:10px;color:rgba(180,180,200,0.7);letter-spacing:0.05em;">${r.label}</div>
-      <input type="range" min="${r.min}" max="${r.max}" step="${r.step}" value="${tune[r.key]}" style="flex:1;accent-color:#00d9ff;">
-      <div data-val style="width:44px;text-align:right;font-size:10px;color:#f6f6fa;font-variant-numeric:tabular-nums;">0</div>
-    `;
-    const input = row.querySelector("input");
-    const val = row.querySelector("[data-val]");
-    input.addEventListener("input", () => {
-      tune[r.key] = parseFloat(input.value);
-      refreshUI();
-      onApply && onApply();
-    });
-    refs[r.key] = { input, val };
-    rowsEl.appendChild(row);
-  }
-  refreshUI();
-
-  panel.querySelector("[data-act=close]").addEventListener("click", () => {
-    panel.style.display = "none";
-  });
-
-  panel.querySelector("[data-act=copy]").addEventListener("click", () => {
-    const safe = sanitizeBridgeSkirtTune(tune);
-    const lines = [];
-    lines.push("window.APEX.BRIDGE_SKIRT_TUNE = {");
-    for (const r of rows) {
-      const v = safe[r.key];
-      lines.push(`  ${r.key}: ${typeof v === "number" ? v.toFixed(3) : v},`);
-    }
-    lines.push("};");
-    const text = lines.join("\n");
-    navigator.clipboard?.writeText(text).then(
-      () => { statusEl.textContent = "COPIED · paste into Track3D defaults"; },
-      () => { statusEl.textContent = "COPY FAILED · see console"; console.log(text); },
-    );
-    setTimeout(() => { statusEl.textContent = ""; }, 2400);
-  });
-
-  panel.querySelector("[data-act=reset]").addEventListener("click", () => {
-    Object.assign(tune, defaults);
-    refreshUI();
-    onApply && onApply();
-    statusEl.textContent = "RESET";
-    setTimeout(() => { statusEl.textContent = ""; }, 1000);
-  });
-
-  const toggle = () => {
-    panel.style.display = (panel.style.display === "none") ? "block" : "none";
-  };
-
-  return { root: panel, toggle, refreshUI };
-}
-
 function applyAutoBridgeTunnels(curve) {
   const pts = curve.points || [];
   const n = pts.length;
@@ -660,7 +542,6 @@ function Track3D({
     const debugLayerColors = search.get("trackDebug") === "1";
     const disableToneMapping = search.get("trackToneMap") === "off";
     const showTrackHelpers = search.get("trackHelpers") === "1";
-    const showBridgeDebug = search.get("bridgeDebug") === "1";
     const bridgeSkirtTune = sanitizeBridgeSkirtTune(window.APEX?.BRIDGE_SKIRT_TUNE || DEFAULT_BRIDGE_SKIRT_TUNE);
     if (!window.APEX) window.APEX = {};
     window.APEX.BRIDGE_SKIRT_TUNE = bridgeSkirtTune;
@@ -1402,10 +1283,6 @@ function Track3D({
     });
 
     const wheelHudDebug = buildWheelHudDebugPanel(mount, reapplyWheelHud);
-    const bridgeSkirtDebug = buildBridgeSkirtDebugPanel(mount, bridgeSkirtTune, () => {
-      if (selfCrossingCount > 0 || autoBridgeCount > 0) applySkirtCarve();
-    });
-    if (showBridgeDebug) bridgeSkirtDebug.toggle();
     const onDebugKey = (e) => {
       if (e.key === "w" || e.key === "W") {
         // Don't fire if user is typing in an input field.
@@ -1413,11 +1290,6 @@ function Track3D({
         const tag = t && t.tagName;
         if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
         wheelHudDebug.toggle();
-      } else if (e.key === "b" || e.key === "B") {
-        const t = e.target;
-        const tag = t && t.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA" || (t && t.isContentEditable)) return;
-        bridgeSkirtDebug.toggle();
       }
     };
     window.addEventListener("keydown", onDebugKey);
@@ -2190,7 +2062,6 @@ function Track3D({
       wheelHud.dispose();
       window.removeEventListener("keydown", onDebugKey);
       wheelHudDebug.root.remove();
-      bridgeSkirtDebug.root.remove();
       composer.dispose();
       renderTarget.dispose();
       // envTex is module-cached (getRoomEnvironment) — do NOT dispose here.
