@@ -59,20 +59,21 @@ const TOD_PRESETS = {
       horizonGlow: 0xffb070, horizonGlowStrength: 0.4,
     },
     // Under stadium lights → key comes from high overhead, cool white.
-    sun: { dir: [0.25, 0.95, -0.15], color: 0xe8ecff, intensity: 1.1 },
-    hemi: { sky: 0x2c395a, ground: 0x0a0a10, intensity: 0.4 },
-    fog: { color: 0x08090e, densityScale: 1.0 },
-    ground: { color: 0x3c5832 },
+    sun: { dir: [0.25, 0.95, -0.15], color: 0xe8ecff, intensity: 1.0 },
+    hemi: { sky: 0x324164, ground: 0x11141c, intensity: 0.5 },
+    fog: { color: 0x0c1017, densityScale: 0.92 },
+    ground: { color: 0x4d6242, unlit: true },
     runoff: { color: 0x1f1f25 },
     trackTint: 0xd8dbe6,
     exposure: 1.0,
-    bloom: { strength: 0.4, threshold: 0.78, radius: 0.6 },
-    vignette: { base: 0.4, tint: 0x04050a },
+    bloom: { strength: 0.2, threshold: 0.9, radius: 0.5 },
+    vignette: { base: 0.34, tint: 0x04050a },
     kerb: { emissive: 0x140000, emissiveIntensity: 0.12 },
-    // Stadium light ring: 8 floodlight pylons around the bbox, each a
-    // low-intensity cool-white PointLight. Kept cheap — no shadows — since the
-    // sun directional already carries the cast-shadow budget.
-    stadiumLights: { count: 8, color: 0xf0f4ff, intensity: 0.8, heightFactor: 0.35, radiusFactor: 1.1 },
+    grandstands: false,
+    // The warm horizon glow already sells the venue; dropping the stadium
+    // pylons entirely avoids visible black poles at long range and removes
+    // the last major bloom-heavy night-only accent.
+    stadiumLights: null,
   },
 };
 
@@ -323,10 +324,10 @@ function buildStarField(radius, count = 1500, strength = 1.0) {
   return pts;
 }
 
-// Stadium floodlight ring for night races. A ring of PointLights around the
-// bbox perimeter plus matching emissive pylon cap meshes so the bloom pass
-// has obvious bright dots to smear. Shadowless — the sun directional carries
-// the shadow budget.
+// Stadium floodlight ring for night races. The visible pylon caps are the
+// important part: they provide the night-race silhouettes and bloom streaks.
+// Real PointLights are optional because they are expensive in forward-rendered
+// scenes with lots of MeshStandardMaterial fragments.
 function buildStadiumLights(center, extent, yBase, config) {
   const g = new THREE.Group();
   const lights = [];
@@ -338,10 +339,13 @@ function buildStadiumLights(center, extent, yBase, config) {
   const pylonMat = new THREE.MeshBasicMaterial({ color: 0x181a20 });
   const pylonInst = new THREE.InstancedMesh(pylonGeom, pylonMat, config.count);
   const capGeom = new THREE.BoxGeometry(18, 3, 6);
-  const capMat = new THREE.MeshBasicMaterial({ color: 0xf4f7ff, toneMapped: false });
+  const capColor = new THREE.Color(config.color || 0xf4f7ff)
+    .multiplyScalar(config.capIntensity || 1.0);
+  const capMat = new THREE.MeshBasicMaterial({ color: capColor, toneMapped: false });
   const capInst = new THREE.InstancedMesh(capGeom, capMat, config.count);
   const dummy = new THREE.Object3D();
   const lightRange = extent * 1.4;
+  const enableLiveLights = config.liveLights !== false && (config.intensity || 0) > 0;
   for (let i = 0; i < config.count; i++) {
     const a = (i / config.count) * Math.PI * 2 + 0.15;
     const px = center.x + Math.cos(a) * radius;
@@ -358,10 +362,12 @@ function buildStadiumLights(center, extent, yBase, config) {
     dummy.lookAt(center.x, yBase + height, center.z);
     dummy.updateMatrix();
     capInst.setMatrixAt(i, dummy.matrix);
-    const pl = new THREE.PointLight(config.color, config.intensity, lightRange, 1.6);
-    pl.position.set(px, yBase + height * 0.95, pz);
-    g.add(pl);
-    lights.push(pl);
+    if (enableLiveLights) {
+      const pl = new THREE.PointLight(config.color, config.intensity, lightRange, 1.6);
+      pl.position.set(px, yBase + height * 0.95, pz);
+      g.add(pl);
+      lights.push(pl);
+    }
   }
   pylonInst.instanceMatrix.needsUpdate = true;
   capInst.instanceMatrix.needsUpdate = true;

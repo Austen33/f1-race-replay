@@ -273,7 +273,9 @@ function Track3D({
     // track always reads as on top of the terrain.
     const standsY = bb.min.y - 0.4;
     scene.add(buildHorizonHills(center, extent, standsY));
-    scene.add(buildGrandstands(center, extent, standsY));
+    if (preset.grandstands !== false) {
+      scene.add(buildGrandstands(center, extent, standsY));
+    }
 
     // Stadium lights ring (night only) — 8 floodlight pylons around the bbox.
     if (preset.stadiumLights) {
@@ -286,10 +288,23 @@ function Track3D({
     const grassTex = cachedTex("grass", makeGrassTexture);
     grassTex.repeat.set((extent * 6) / 120, (extent * 6) / 120);
     const groundGeom = buildTerrainGeometry(curve, center, extent, bb.min.y - 1.6);
-    const groundMat = new THREE.MeshLambertMaterial({
-      color: groundBaseColor, map: grassTex,
-      polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 4,
-    });
+    const groundMat = preset.ground.unlit
+      ? new THREE.MeshBasicMaterial({
+        color: groundBaseColor,
+        map: grassTex,
+        fog: true,
+        toneMapped: false,
+        polygonOffset: true,
+        polygonOffsetFactor: 4,
+        polygonOffsetUnits: 4,
+      })
+      : new THREE.MeshLambertMaterial({
+        color: groundBaseColor,
+        map: grassTex,
+        polygonOffset: true,
+        polygonOffsetFactor: 4,
+        polygonOffsetUnits: 4,
+      });
     const ground = new THREE.Mesh(groundGeom, groundMat);
     ground.position.set(center.x, 0, center.z);
     ground.receiveShadow = false;
@@ -1577,6 +1592,19 @@ function Track3D({
       }
 
       updateWeather(live, dt);
+
+      // Cockpit and chase cams read harsher than orbit because bright kerbs,
+      // barriers and spec hits occupy much more of the screen. Keep the same
+      // overall look, but tame the bloom specifically for these cameras.
+      if (bloomPass) {
+        if (inPov) {
+          bloomPass.strength *= 0.45;
+          bloomPass.threshold = Math.min(1.0, bloomPass.threshold + 0.08);
+        } else if (inFollow) {
+          bloomPass.strength *= 0.7;
+          bloomPass.threshold = Math.min(1.0, bloomPass.threshold + 0.04);
+        }
+      }
 
       // Tick star twinkle.
       if (stars) stars.material.uniforms.uTime.value += dt;
