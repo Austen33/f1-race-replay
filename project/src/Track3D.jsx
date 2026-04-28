@@ -119,6 +119,67 @@ const TRACK3D_POV_TUNE = Object.freeze({
   baseFov: 75.000,
 });
 
+function hasClosePlanarPass(points, threshold) {
+  const n = points.length;
+  if (n < 12) return false;
+  const step = Math.max(1, Math.floor(n / 240));
+  const minGap = Math.max(12, Math.floor(n * 0.035));
+  const threshold2 = threshold * threshold;
+  for (let i = 0; i < n; i += step) {
+    const a = points[i];
+    for (let j = i + minGap; j < n; j += step) {
+      const rawGap = j - i;
+      const gap = Math.min(rawGap, n - rawGap);
+      if (gap < minGap) continue;
+      const b = points[j];
+      const dx = a.x - b.x;
+      const dz = a.z - b.z;
+      if (dx * dx + dz * dz < threshold2) return true;
+    }
+  }
+  return false;
+}
+
+function liftSuzukaBridgeBranch(curve, circuitName) {
+  if (!/suzuka/i.test(circuitName || "")) return;
+  const pts = curve.points || [];
+  const n = pts.length;
+  if (n < 24) return;
+  const minGap = Math.max(8, Math.floor(n * 0.12));
+  let bestA = -1;
+  let bestB = -1;
+  let bestD2 = Infinity;
+  for (let i = 0; i < n; i++) {
+    const a = pts[i];
+    for (let j = i + minGap; j < n; j++) {
+      const gap = Math.min(j - i, n - (j - i));
+      if (gap < minGap) continue;
+      const b = pts[j];
+      const dx = a.x - b.x;
+      const dz = a.z - b.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        bestA = i;
+        bestB = j;
+      }
+    }
+  }
+  if (bestA < 0 || bestB < 0 || bestD2 > 90 * 90) return;
+  if (Math.abs(pts[bestA].y - pts[bestB].y) > 5) return;
+  const centerIdx = Math.max(bestA, bestB);
+  const span = Math.max(10, Math.floor(n * 0.035));
+  const lift = 14;
+  for (let i = 0; i < n; i++) {
+    const raw = Math.abs(i - centerIdx);
+    const wrapped = Math.min(raw, n - raw);
+    if (wrapped > span * 2.5) continue;
+    const t = wrapped / span;
+    pts[i].y += lift * Math.exp(-0.5 * t * t);
+  }
+  curve.updateArcLengths();
+}
+
 
 
 
@@ -226,6 +287,7 @@ function Track3D({
     }
     if (!Number.isFinite(zMin)) zMin = 0;
     const curve = buildCenterlineCurve(circuit, zMin * scale, scale);
+    liftSuzukaBridgeBranch(curve, circuitName);
     const segments = Math.min(2000, Math.max(400, circuit.length * 2));
 
     const bb = new THREE.Box3();
@@ -234,6 +296,8 @@ function Track3D({
     const center = bb.getCenter(new THREE.Vector3());
     const size = bb.getSize(new THREE.Vector3());
     const extent = Math.max(size.x, size.z, 100);
+    const hasPlanarOverlap = hasClosePlanarPass(samplePts, RUNOFF_WIDTH * 3.5);
+    const disableOuterDecor = hasPlanarOverlap || /(zandvoort|suzuka)/i.test(circuitName || "");
     const curveLength = curve.getLength();
     const bboxInfo = {
       cx: center.x, cy: center.y, cz: center.z,
@@ -368,7 +432,7 @@ function Track3D({
     runoffTex.repeat.set(2, 80);
     const runoffMat = new THREE.MeshBasicMaterial({
       color: runoffDryColor, map: runoffTex, toneMapped: false,
-      transparent: true, opacity: 0.85, depthWrite: false,
+      transparent: hasPlanarOverlap, opacity: hasPlanarOverlap ? 0.85 : 1.0, depthWrite: !hasPlanarOverlap,
     });
     const runoffL = new THREE.Mesh(
       buildEdgeLineGeometry(curve, segments, -RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, TRACK_TOP_Y - 0.02, 80, RUNOFF_INNER + 0.05),
@@ -380,7 +444,10 @@ function Track3D({
     );
     runoffL.receiveShadow = false; runoffR.receiveShadow = false;
     runoffL.renderOrder = 2; runoffR.renderOrder = 2;
-    scene.add(runoffL); scene.add(runoffR);
+    if (!disableOuterDecor) {
+      scene.add(runoffL);
+      scene.add(runoffR);
+    }
 
     // Everything that was previously layered via tiny Y offsets on a flat
     // ribbon now has to live on the top face of the extruded track slab.
@@ -457,14 +524,60 @@ function Track3D({
     const barrierOffset = Math.max(18, RUNOFF_INNER + RUNOFF_STRIP_WIDTH + 2.8);
     const barrierTex = cachedTex("armco", makeArmcoTexture);
     barrierTex.repeat.set(1, 20);
+    const armcoHeight = 1.2;
+    const armcoWidth = 0.35;
+
+    const APRON_INNER = RUNOFF_INNER + RUNOFF_STRIP_WIDTH;
+    const APRON_OUTER = Math.max(APRON_INNER + 0.05, barrierOffset - armcoWidth * 0.5);
+    const APRON_WIDTH = Math.max(0, APRON_OUTER - APRON_INNER);
+    if (!disableOuterDecor && APRON_WIDTH > 0.02) {
+      const APRON_CENTER = APRON_INNER + APRON_WIDTH * 0.5;
+      const apronMat = new THREE.MeshBasicMaterial({
+        color: 0xb4bbc9,
+        toneMapped: false,
+        side: THREE.DoubleSide,
+        transparent: false,
+        opacity: 1.0,
+        depthWrite: true,
+      });
+      const apronL = new THREE.Mesh(
+        buildEdgeLineGeometry(
+          curve,
+          segments,
+          -APRON_CENTER,
+          APRON_WIDTH,
+          TRACK_TOP_Y - 0.018,
+          70,
+          APRON_INNER + 0.05,
+        ),
+        apronMat,
+      );
+      const apronR = new THREE.Mesh(
+        buildEdgeLineGeometry(
+          curve,
+          segments,
+          +APRON_CENTER,
+          APRON_WIDTH,
+          TRACK_TOP_Y - 0.018,
+          70,
+          APRON_INNER + 0.05,
+        ),
+        apronMat,
+      );
+      apronL.receiveShadow = false;
+      apronR.receiveShadow = false;
+      apronL.renderOrder = 1;
+      apronR.renderOrder = 1;
+      scene.add(apronL);
+      scene.add(apronR);
+    }
+
     const barrierMat = new THREE.MeshBasicMaterial({
       color: 0xffffff,
       map: barrierTex,
       toneMapped: false,
       side: THREE.DoubleSide,
     });
-    const armcoHeight = 1.2;
-    const armcoWidth = 0.35;
     // Barriers/fences sit on the same plane as the ribbon top — there is no
     // ground beneath the track in the abstract scene, so anchoring at
     // TRACK_TOP_Y keeps them flush with kerbs and runoff.
@@ -479,8 +592,10 @@ function Track3D({
     );
     barrierL.renderOrder = 2;
     barrierR.renderOrder = 2;
-    scene.add(barrierL);
-    scene.add(barrierR);
+    if (!disableOuterDecor) {
+      scene.add(barrierL);
+      scene.add(barrierR);
+    }
 
     const fenceMat = new THREE.MeshBasicMaterial({
       color: 0xd9e5ef,
@@ -503,8 +618,10 @@ function Track3D({
     );
     fenceL.renderOrder = 2;
     fenceR.renderOrder = 2;
-    scene.add(fenceL);
-    scene.add(fenceR);
+    if (!disableOuterDecor) {
+      scene.add(fenceL);
+      scene.add(fenceR);
+    }
 
     const cornerRanges = buildCornerRanges(curve, 720);
     const tracksideGroup = new THREE.Group();
@@ -538,41 +655,43 @@ function Track3D({
     const brakingDistances = [150, 100, 50];
     const brakingOffset = barrierOffset + 2.8;
     const cornerOffset = barrierOffset + 4.4;
-    for (let i = 0; i < cornerRanges.length; i++) {
-      const c = cornerRanges[i];
-      const side = c.sign >= 0 ? 1 : -1;
-      for (const dist of brakingDistances) {
-        const u = ((c.startU - dist / Math.max(curveLength, 1)) % 1 + 1) % 1;
+    if (!disableOuterDecor) {
+      for (let i = 0; i < cornerRanges.length; i++) {
+        const c = cornerRanges[i];
+        const side = c.sign >= 0 ? 1 : -1;
+        for (const dist of brakingDistances) {
+          const u = ((c.startU - dist / Math.max(curveLength, 1)) % 1 + 1) % 1;
+          placeTrackside(
+            makeTracksidePlacard(String(dist), {
+              width: 1.8,
+              height: 1.25,
+              postHeight: 2.5,
+              bg: "#F4F4F6",
+              fg: "#10131A",
+              border: "#10131A",
+            }),
+            u,
+            side,
+            brakingOffset,
+            0.04,
+          );
+        }
         placeTrackside(
-          makeTracksidePlacard(String(dist), {
-            width: 1.8,
-            height: 1.25,
-            postHeight: 2.5,
-            bg: "#F4F4F6",
-            fg: "#10131A",
-            border: "#10131A",
+          makeTracksidePlacard(`T${i + 1}`, {
+            width: 2.0,
+            height: 1.35,
+            postHeight: 2.9,
+            bg: "#11151D",
+            fg: "#F4F4F6",
+            border: "#F4F4F6",
+            accent: "#FF5A36",
           }),
-          u,
+          c.apexU,
           side,
-          brakingOffset,
-          0.04,
+          cornerOffset,
+          0.06,
         );
       }
-      placeTrackside(
-        makeTracksidePlacard(`T${i + 1}`, {
-          width: 2.0,
-          height: 1.35,
-          postHeight: 2.9,
-          bg: "#11151D",
-          fg: "#F4F4F6",
-          border: "#F4F4F6",
-          accent: "#FF5A36",
-        }),
-        c.apexU,
-        side,
-        cornerOffset,
-        0.06,
-      );
     }
 
     const gravelTex = cachedTex("gravel", makeGravelTexture);
@@ -585,22 +704,24 @@ function Track3D({
     });
     const gravelInner = RUNOFF_INNER + RUNOFF_STRIP_WIDTH + 1.3;
     const gravelWidth = 5.5;
-    for (const c of cornerRanges) {
-      const side = c.sign >= 0 ? 1 : -1;
-      const gravelOffset = side * (gravelInner + gravelWidth * 0.5);
-      const gravelGeom = buildPartialEdgeLineGeometry(
-        curve,
-        segments,
-        c.startU,
-        c.endU,
-        gravelOffset,
-        gravelWidth,
-        TRACK_TOP_Y - 0.03,
-        28,
-      );
-      const gravel = new THREE.Mesh(gravelGeom, gravelMat);
-      gravel.renderOrder = 1;
-      scene.add(gravel);
+    if (!disableOuterDecor) {
+      for (const c of cornerRanges) {
+        const side = c.sign >= 0 ? 1 : -1;
+        const gravelOffset = side * (gravelInner + gravelWidth * 0.5);
+        const gravelGeom = buildPartialEdgeLineGeometry(
+          curve,
+          segments,
+          c.startU,
+          c.endU,
+          gravelOffset,
+          gravelWidth,
+          TRACK_TOP_Y - 0.03,
+          28,
+        );
+        const gravel = new THREE.Mesh(gravelGeom, gravelMat);
+        gravel.renderOrder = 1;
+        scene.add(gravel);
+      }
     }
 
     const skidMat = new THREE.MeshBasicMaterial({
@@ -646,28 +767,32 @@ function Track3D({
         const m = buildDRSZoneMesh(curve, segments, circuit.length, z, side);
         m.position.y = ABOVE_TRACK(0.42, 0.03);
         scene.add(m);
-        placeTrackside(
-          makeTracksidePlacard("DRS", {
-            width: 2.2,
-            height: 1.3,
-            postHeight: 2.6,
-            bg: "#16B35E",
-            fg: "#08110B",
-            border: "#E6FFF1",
-          }),
-          u,
-          side,
-          brakingOffset - 0.6,
-          0.04,
-        );
+        if (!disableOuterDecor) {
+          placeTrackside(
+            makeTracksidePlacard("DRS", {
+              width: 2.2,
+              height: 1.3,
+              postHeight: 2.6,
+              bg: "#16B35E",
+              fg: "#08110B",
+              border: "#E6FFF1",
+            }),
+            u,
+            side,
+            brakingOffset - 0.6,
+            0.04,
+          );
+        }
       }
     }
 
-    for (const sector of window.APEX.SECTORS || []) {
-      if (sector.idx == null) continue;
-      const u = Math.max(0, Math.min(1, sector.idx / Math.max(1, circuit.length - 1)));
-      for (const side of [+1, -1]) {
-        placeTrackside(makeMarshalPanel(sector.color || "#F4F4F6"), u, side, barrierOffset + 1.2, 0.04);
+    if (!disableOuterDecor) {
+      for (const sector of window.APEX.SECTORS || []) {
+        if (sector.idx == null) continue;
+        const u = Math.max(0, Math.min(1, sector.idx / Math.max(1, circuit.length - 1)));
+        for (const side of [+1, -1]) {
+          placeTrackside(makeMarshalPanel(sector.color || "#F4F4F6"), u, side, barrierOffset + 1.2, 0.04);
+        }
       }
     }
     scene.add(tracksideGroup);
