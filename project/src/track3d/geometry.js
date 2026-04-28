@@ -129,6 +129,49 @@ function updateStableRight(tan, up, right, prevRight, havePrevRight) {
   return true;
 }
 
+// Clamp an XZ point so it never sits closer than `minClearance` to any sampled
+// centerline frame point. This is a build-time guard for offset ribbons on
+// tight/co-located sections where a simple normal-offset can fold inward.
+function clampPointToMinClearanceXZ(x, z, fp, count, minClearance, fallbackX, fallbackZ, out) {
+  let bestD2 = Infinity;
+  let nearX = x;
+  let nearZ = z;
+  for (let j = 0; j < count; j++) {
+    const cx = fp[j * 3 + 0];
+    const cz = fp[j * 3 + 2];
+    const dx = x - cx;
+    const dz = z - cz;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < bestD2) {
+      bestD2 = d2;
+      nearX = cx;
+      nearZ = cz;
+    }
+  }
+  const minD2 = minClearance * minClearance;
+  if (bestD2 >= minD2) {
+    out.x = x;
+    out.z = z;
+    return;
+  }
+  let ox = x - nearX;
+  let oz = z - nearZ;
+  let len = Math.hypot(ox, oz);
+  if (len < 1e-6) {
+    ox = fallbackX;
+    oz = fallbackZ;
+    len = Math.hypot(ox, oz);
+    if (len < 1e-6) {
+      ox = 1;
+      oz = 0;
+      len = 1;
+    }
+  }
+  const s = minClearance / len;
+  out.x = nearX + ox * s;
+  out.z = nearZ + oz * s;
+}
+
 // Ribbon of constant half-width along the curve. `yLift` puts layered ribbons
 // (runoff, track, kerbs) on separate tiny y-planes to avoid z-fighting.
 // `uvRepeat` controls how many times the texture tiles along the length.
@@ -388,24 +431,41 @@ function buildExtrudedRibbonGeometry(curve, segments, halfWidth, baseY, thicknes
 // the centerline by `offset` with a small `width`. Used for both edge
 // stripes and for the runoff parallel strips. `uvRepeat` controls how many
 // times a mapped texture tiles along the length.
-function buildEdgeLineGeometry(curve, segments, offset, width, yLift, uvRepeat = 1) {
+function buildEdgeLineGeometry(curve, segments, offset, width, yLift, uvRepeat = 1, minClearance = null) {
   const positions = new Float32Array((segments + 1) * 2 * 3);
   const uvs = new Float32Array((segments + 1) * 2 * 2);
   const indices = [];
   const half = width * 0.5;
   const frames = sampleCurveFrames(curve, segments);
   const fp = frames.points, fr = frames.rights;
+  const hasMinClearance = Number.isFinite(minClearance) && minClearance > 0;
+  const clampedInner = { x: 0, z: 0 };
+  const clampedOuter = { x: 0, z: 0 };
   for (let i = 0; i <= segments; i++) {
     const t = i / segments;
     const px = fp[i * 3], py = fp[i * 3 + 1], pz = fp[i * 3 + 2];
     const rx = fr[i * 3], rz = fr[i * 3 + 2];
     const inner = offset - half, outer = offset + half;
-    positions[i * 6 + 0] = px + rx * inner;
+    let innerX = px + rx * inner;
+    let innerZ = pz + rz * inner;
+    let outerX = px + rx * outer;
+    let outerZ = pz + rz * outer;
+    if (hasMinClearance) {
+      clampPointToMinClearanceXZ(
+        innerX, innerZ, fp, frames.count, minClearance, rx, rz, clampedInner,
+      );
+      clampPointToMinClearanceXZ(
+        outerX, outerZ, fp, frames.count, minClearance, rx, rz, clampedOuter,
+      );
+      innerX = clampedInner.x; innerZ = clampedInner.z;
+      outerX = clampedOuter.x; outerZ = clampedOuter.z;
+    }
+    positions[i * 6 + 0] = innerX;
     positions[i * 6 + 1] = py + yLift;
-    positions[i * 6 + 2] = pz + rz * inner;
-    positions[i * 6 + 3] = px + rx * outer;
+    positions[i * 6 + 2] = innerZ;
+    positions[i * 6 + 3] = outerX;
     positions[i * 6 + 4] = py + yLift;
-    positions[i * 6 + 5] = pz + rz * outer;
+    positions[i * 6 + 5] = outerZ;
     uvs[i * 4 + 0] = 0; uvs[i * 4 + 1] = t * uvRepeat;
     uvs[i * 4 + 2] = 1; uvs[i * 4 + 3] = t * uvRepeat;
     if (i < segments) {
@@ -642,7 +702,7 @@ function buildRacingLineMesh(curve, segments) {
 
 function buildTerrainGeometry(curve, center, extent, floorY) {
   const size = extent * 6;
-  const segs = Math.max(56, Math.min(112, Math.round(extent / 18)));
+  const segs = Math.max(80, Math.min(180, Math.round(extent / 12)));
   const geom = new THREE.PlaneGeometry(size, size, segs, segs);
   geom.rotateX(-Math.PI / 2);
 
@@ -650,7 +710,9 @@ function buildTerrainGeometry(curve, center, extent, floorY) {
   const frames = sampleCurveFrames(curve, sampleSegs);
   const fp = frames.points;
   const count = frames.count;
-  const influenceRadius = Math.max(90, extent * 0.24);
+  // Wider influence so terrain rises gradually across valleys between sections
+  // at different elevations — prevents sky gaps when looking across the circuit.
+  const influenceRadius = Math.max(120, extent * 0.45);
   const pos = geom.attributes.position;
 
   for (let i = 0; i < pos.count; i++) {
@@ -661,6 +723,7 @@ function buildTerrainGeometry(curve, center, extent, floorY) {
 
     let bestD2 = Infinity;
     let nearestY = floorY;
+    let maxNearbyY = floorY;
     for (let j = 0; j < count; j++) {
       const dx = worldX - fp[j * 3 + 0];
       const dz = worldZ - fp[j * 3 + 2];
@@ -669,20 +732,107 @@ function buildTerrainGeometry(curve, center, extent, floorY) {
         bestD2 = d2;
         nearestY = fp[j * 3 + 1];
       }
+      if (d2 < influenceRadius * influenceRadius && fp[j * 3 + 1] > maxNearbyY) {
+        maxNearbyY = fp[j * 3 + 1];
+      }
     }
 
     const dist = Math.sqrt(bestD2);
     const radial = Math.min(1, Math.hypot(x, z) / (size * 0.5));
     const base = floorY - radial * radial * 10;
+
+    // Gap-zone lift: terrain vertices that are far from their nearest track
+    // point (the "gap" between two sections at very different heights) keep
+    // base near floorY even when an elevated section is visible nearby — this
+    // raises base toward the highest section's elevation as dist grows, so
+    // cross-valley sky gaps are partially filled without touching near-track
+    // vertices (gapBlend is 0 when dist <= fillThreshold).
+    const fillThreshold = Math.max(50, extent * 0.15);
+    const gapBlend = dist > fillThreshold
+      ? Math.min(1, (dist - fillThreshold) / Math.max(1, influenceRadius - fillThreshold))
+      : 0;
+    const baseLifted = base + (maxNearbyY - floorY) * gapBlend * 0.55;
+
     const nearTrack = nearestY - 1.35 - Math.min(8, dist * 0.08);
     const t = Math.max(0, Math.min(1, 1 - dist / influenceRadius));
     const blend = t * t * (3 - 2 * t);
     const undulation =
       (Math.sin(worldX * 0.0055 + worldZ * 0.003) * 0.45 +
        Math.sin(worldZ * 0.0085 - worldX * 0.004) * 0.28) * (0.25 + radial * 0.75);
-    pos.setY(i, base * (1 - blend) + nearTrack * blend + undulation);
+    pos.setY(i, baseLifted * (1 - blend) + nearTrack * blend + undulation);
   }
 
+  geom.computeVertexNormals();
+  return geom;
+}
+
+// Embankment wall that hangs from the bottom of the track slab down to a fixed
+// world-space floor Y. Unlike buildVerticalRibbonGeometry (whose bottom is
+// relative to each centerline point), this bottom is absolute — so a 60 m
+// elevated section gets a 60 m tall wall and a flat section gets a 2 m wall.
+// Only inner + outer walls are emitted (no top/bottom caps).
+function buildTrackEmbankmentGeometry(
+  curve,
+  segments,
+  offset,
+  width,
+  floorY,
+  baseY = 0.4,
+  minClearance = null,
+  uvRepeat = 80,
+) {
+  const half = width * 0.5;
+  const positions = new Float32Array((segments + 1) * 4 * 3);
+  const uvs = new Float32Array((segments + 1) * 4 * 2);
+  const indices = [];
+  const frames = sampleCurveFrames(curve, segments);
+  const fp = frames.points, fr = frames.rights;
+  const hasMinClearance = Number.isFinite(minClearance) && minClearance > 0;
+  const clampedInner = { x: 0, z: 0 };
+  const clampedOuter = { x: 0, z: 0 };
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const px = fp[i * 3], py = fp[i * 3 + 1], pz = fp[i * 3 + 2];
+    const rx = fr[i * 3], rz = fr[i * 3 + 2];
+    const inner = offset - half;
+    const outer = offset + half;
+    const yTop = py + baseY;
+    const yBot = Math.min(yTop - 0.1, floorY);
+    let innerX = px + rx * inner;
+    let innerZ = pz + rz * inner;
+    let outerX = px + rx * outer;
+    let outerZ = pz + rz * outer;
+    if (hasMinClearance) {
+      clampPointToMinClearanceXZ(
+        innerX, innerZ, fp, frames.count, minClearance, rx, rz, clampedInner,
+      );
+      clampPointToMinClearanceXZ(
+        outerX, outerZ, fp, frames.count, minClearance, rx, rz, clampedOuter,
+      );
+      innerX = clampedInner.x; innerZ = clampedInner.z;
+      outerX = clampedOuter.x; outerZ = clampedOuter.z;
+    }
+    const base = i * 12;
+    positions[base + 0] = innerX; positions[base + 1] = yBot; positions[base + 2] = innerZ;
+    positions[base + 3] = outerX; positions[base + 4] = yBot; positions[base + 5] = outerZ;
+    positions[base + 6] = innerX; positions[base + 7] = yTop; positions[base + 8] = innerZ;
+    positions[base + 9]  = outerX; positions[base + 10] = yTop; positions[base + 11] = outerZ;
+    const uvBase = i * 8;
+    const v = t * uvRepeat;
+    uvs[uvBase + 0] = 0; uvs[uvBase + 1] = v;
+    uvs[uvBase + 2] = 1; uvs[uvBase + 3] = v;
+    uvs[uvBase + 4] = 0; uvs[uvBase + 5] = v + 0.35;
+    uvs[uvBase + 6] = 1; uvs[uvBase + 7] = v + 0.35;
+    if (i < segments) {
+      const a = i * 4, b = (i + 1) * 4;
+      indices.push(a, b, a + 2, a + 2, b, b + 2);
+      indices.push(a + 1, a + 3, b + 1, a + 3, b + 3, b + 1);
+    }
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  geom.setIndex(indices);
   geom.computeVertexNormals();
   return geom;
 }
@@ -706,4 +856,5 @@ export {
   buildStartFinishMesh,
   buildRacingLineMesh,
   buildTerrainGeometry,
+  buildTrackEmbankmentGeometry,
 };

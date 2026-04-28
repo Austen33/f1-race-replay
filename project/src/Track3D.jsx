@@ -73,6 +73,7 @@ import {
   buildStartFinishMesh,
   buildRacingLineMesh,
   buildTerrainGeometry,
+  buildTrackEmbankmentGeometry,
   makeDriverMarker,
   makeSafetyCarMarker,
 } from "./track3d/index.js";
@@ -184,10 +185,11 @@ function Track3D({
     const disableToneMapping = search.get("trackToneMap") === "off";
     const showTrackHelpers = search.get("trackHelpers") === "1";
     const groundBaseColor = debugLayerColors ? 0x00ff00 : preset.ground.color;
+    const grassBlendColor = debugLayerColors ? groundBaseColor : 0x5b874b;
     const groundWetColor = debugLayerColors ? groundBaseColor : mulHexLumaFloor(preset.ground.color, WET_OVERLAY.groundDarken, 76);
     const runoffDryColor = debugLayerColors ? 0x0060ff : preset.runoff.color;
     const runoffWetColor = debugLayerColors ? runoffDryColor : mulHexLumaFloor(preset.runoff.color, WET_OVERLAY.runoffDarken, 56);
-    const vergeDryColor = 0x2d7a3a;
+    const vergeDryColor = grassBlendColor;
     const vergeWetColor = debugLayerColors ? vergeDryColor : mulHexLumaFloor(vergeDryColor, WET_OVERLAY.groundDarken, 76);
     const trackDryColor = debugLayerColors ? 0xff00ff : preset.trackTint;
     const trackWetColor = debugLayerColors ? trackDryColor : mulHex(preset.trackTint, WET_OVERLAY.trackDarken);
@@ -327,11 +329,11 @@ function Track3D({
       color: vergeDryColor, map: vergeTex, toneMapped: false,
     });
     const vergeL = new THREE.Mesh(
-      buildEdgeLineGeometry(curve, segments, -VERGE_CENTER, GRASS_STRIP_WIDTH, 0.06, 90),
+      buildEdgeLineGeometry(curve, segments, -VERGE_CENTER, GRASS_STRIP_WIDTH, 0.06, 90, VERGE_INNER + 0.05),
       vergeMat,
     );
     const vergeR = new THREE.Mesh(
-      buildEdgeLineGeometry(curve, segments, +VERGE_CENTER, GRASS_STRIP_WIDTH, 0.06, 90),
+      buildEdgeLineGeometry(curve, segments, +VERGE_CENTER, GRASS_STRIP_WIDTH, 0.06, 90, VERGE_INNER + 0.05),
       vergeMat,
     );
     vergeL.receiveShadow = false; vergeR.receiveShadow = false;
@@ -347,11 +349,11 @@ function Track3D({
       color: runoffDryColor, map: runoffTex, toneMapped: false,
     });
     const runoffL = new THREE.Mesh(
-      buildEdgeLineGeometry(curve, segments, -RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, 0.05, 80),
+      buildEdgeLineGeometry(curve, segments, -RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, 0.05, 80, RUNOFF_INNER + 0.05),
       runoffMat,
     );
     const runoffR = new THREE.Mesh(
-      buildEdgeLineGeometry(curve, segments, +RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, 0.05, 80),
+      buildEdgeLineGeometry(curve, segments, +RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, 0.05, 80, RUNOFF_INNER + 0.05),
       runoffMat,
     );
     runoffL.receiveShadow = false; runoffR.receiveShadow = false;
@@ -403,6 +405,35 @@ function Track3D({
     const track = new THREE.Mesh(trackGeom, trackMat);
     track.renderOrder = 2;
     scene.add(track);
+
+    // Embankment walls — placed just outside the runoff boundary (RUNOFF_WIDTH)
+    // so they never overlap kerb/verge/runoff strips. Top is flush with the outer
+    // runoff surface (yLift 0.06). Bottom is at a fixed world floor so on an
+    // elevated section the wall is as tall as the elevation delta, closing the
+    // "see sky under the track" gap without touching any inner geometry.
+    const EMBANKMENT_FLOOR = bb.min.y - 2.0;
+    const EMBANKMENT_OFFSET = RUNOFF_WIDTH + 0.15;
+    const embankTex = cachedTex("grass", makeGrassTexture);
+    embankTex.repeat.set(1, 85);
+    const embankMat = new THREE.MeshBasicMaterial({
+      color: vergeDryColor,
+      map: embankTex,
+      side: THREE.DoubleSide,
+      fog: true,
+      toneMapped: false,
+    });
+    const embankL = new THREE.Mesh(
+      buildTrackEmbankmentGeometry(curve, segments, -EMBANKMENT_OFFSET, 0.3, EMBANKMENT_FLOOR, 0.06, RUNOFF_WIDTH + 0.02),
+      embankMat,
+    );
+    const embankR = new THREE.Mesh(
+      buildTrackEmbankmentGeometry(curve, segments, +EMBANKMENT_OFFSET, 0.3, EMBANKMENT_FLOOR, 0.06, RUNOFF_WIDTH + 0.02),
+      embankMat,
+    );
+    embankL.renderOrder = 1;
+    embankR.renderOrder = 1;
+    scene.add(embankL);
+    scene.add(embankR);
 
     // Everything that was previously layered via tiny Y offsets on a flat
     // ribbon now has to live on the top face of the extruded track slab.
@@ -1078,6 +1109,7 @@ function Track3D({
         trackMat.color.setHex(trackWetColor);
         runoffMat.color.setHex(runoffWetColor);
         vergeMat.color.setHex(vergeWetColor);
+        embankMat.color.setHex(vergeWetColor);
         // Do not heavily darken terrain in rain; the fog/tonemap stack already
         // reduces perceived brightness and can otherwise look like "missing"
         // black patches around the track.
@@ -1092,6 +1124,7 @@ function Track3D({
         trackMat.color.setHex(trackDryColor);
         runoffMat.color.setHex(runoffDryColor);
         vergeMat.color.setHex(vergeDryColor);
+        embankMat.color.setHex(vergeDryColor);
         groundMat.color.setHex(groundBaseColor);
         scene.fog.color.setHex(fogDryColor);
         scene.fog.density = preset.fog.densityScale / extent;
