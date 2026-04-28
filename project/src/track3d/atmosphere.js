@@ -1,89 +1,73 @@
 import * as THREE from "three";
 
 // ───────────────────────────────────────────────────────────────────────────
-// Atmosphere — sky, grandstand rim, rain.
+// Atmosphere — void backdrop, grid plane material, time-of-day mood, rain.
 // ───────────────────────────────────────────────────────────────────────────
+//
+// The 3D track view is intentionally abstract: tracks float through a dark
+// vignetted void over a grid reference plane, like the SVG overhead view
+// promoted into 3D. There is no terrain, no horizon, no sky — only fog, a
+// gradient backdrop, the grid, the skirt, and the ribbon itself. Time-of-day
+// presets still drive overall mood (cool day blue, warm dusk amber, deep
+// night) but only via fog tone, ambient/key light colour and post-fx tuning.
 
-// Time-of-day presets. F1 has day, twilight and night races, so we key a
-// handful of scene parameters (sky gradient, sun intensity/angle, hemi fill,
-// fog, post FX) off the circuit name. Unknown circuits default to "day".
+// Time-of-day presets. F1 has day, twilight and night races, so we key
+// fog colour, key/fill light colour and post-fx mood off the circuit name.
+// Unknown circuits default to "day". `void.center/edge` define the gradient
+// backdrop the camera sees through the fog: `center` is the colour roughly
+// at eye-level looking outward (where the camera frames the action), `edge`
+// is the colour at the dome's poles. With FogExp2 layered on top, only a
+// soft circular wash of the gradient ever shows through.
 const TOD_PRESETS = {
   day: {
-    sceneBg: 0xc8dff0,
-    sky: {
-      // Richer blue zenith, slightly warmer horizon, and a soft golden glow
-      // band so the horizon reads as sun-lit air rather than haze washout.
-      // Sun lowered to ~40° elevation so its disc + halo are visible in frame.
-      zenith: 0x2e6db5, horizon: 0xb8d4e8, ground: 0x7a8090,
-      sunColor: 0xffe8b0, sunDisc: 2.2, hazeTint: 1.0, starStrength: 0.0,
-      horizonGlow: 0xffd080, horizonGlowStrength: 0.28, cloudStrength: 0.55,
-    },
-    sun: { dir: [0.55, 0.65, -0.45], color: 0xfff0cc, intensity: 2.1 },
-    hemi: { sky: 0xbcd4ff, ground: 0x6a6d78, intensity: 0.9 },
-    fog: { color: 0xbdcedd, densityScale: 0.5 },
-    ground: { color: 0x6c9b58 },
+    void: { center: 0x1c2330, edge: 0x070a12 },
+    sun: { dir: [0.55, 0.65, -0.45], color: 0xfff0cc, intensity: 1.4 },
+    hemi: { sky: 0xbcd4ff, ground: 0x121620, intensity: 0.7 },
+    fog: { color: 0x0c111a, fadeStart: 0.22, fadeEnd: 1.0 },
     runoff: { color: 0x3a3a42 },
     trackTint: 0xf2f3fa,
-    exposure: 0.95,
-    bloom: { strength: 0.22, threshold: 0.95, radius: 0.55 },
-    vignette: { base: 0.28, tint: 0x0a0b10 },
+    grid: { color: 0x3c4a66, accentColor: 0x6c8bcc, cellSize: 30, accentEvery: 5 },
+    exposure: 0.98,
+    bloom: { strength: 0.24, threshold: 0.95, radius: 0.55 },
+    vignette: { base: 0.34, tint: 0x05070d },
     kerb: { emissive: 0x000000, emissiveIntensity: 0.0 },
-    stadiumLights: null,
+    starStrength: 0.0,
   },
   dusk: {
-    sceneBg: 0x1a1826,
-    sky: {
-      zenith: 0x121933, horizon: 0x703845, ground: 0x100f18,
-      sunColor: 0xffb889, sunDisc: 3.4, hazeTint: 1.45, starStrength: 0.22,
-      horizonGlow: 0xff9a66, horizonGlowStrength: 0.55,
-    },
-    sun: { dir: [0.45, 0.55, -0.7], color: 0xffc194, intensity: 1.6 },
-    hemi: { sky: 0xa39abb, ground: 0x3b2f3a, intensity: 0.55 },
-    fog: { color: 0x23202c, densityScale: 0.9 },
-    ground: { color: 0x4f6f3f },
+    void: { center: 0x231627, edge: 0x07050a },
+    sun: { dir: [0.45, 0.55, -0.7], color: 0xffc194, intensity: 1.2 },
+    hemi: { sky: 0xa39abb, ground: 0x14101a, intensity: 0.45 },
+    fog: { color: 0x100b18, fadeStart: 0.20, fadeEnd: 0.95 },
     runoff: { color: 0x2a2a31 },
     trackTint: 0xe8eaf2,
-    exposure: 0.98,
+    grid: { color: 0x4a3a5a, accentColor: 0xc88c70, cellSize: 30, accentEvery: 5 },
+    exposure: 1.0,
     bloom: { strength: 0.32, threshold: 0.88, radius: 0.55 },
-    vignette: { base: 0.38, tint: 0x07080e },
+    vignette: { base: 0.42, tint: 0x07080e },
     kerb: { emissive: 0x0a0000, emissiveIntensity: 0.05 },
-    stadiumLights: null,
+    starStrength: 0.25,
   },
   night: {
-    sceneBg: 0x05060c,
-    sky: {
-      zenith: 0x04060c, horizon: 0x14182a, ground: 0x04050a,
-      sunColor: 0xffd9a8, sunDisc: 0.0, hazeTint: 1.0, starStrength: 1.0,
-      // Warm city-glow band along the horizon — what really sells a night
-      // stadium race, pushes the black wall away from the viewer.
-      horizonGlow: 0xffb070, horizonGlowStrength: 0.4,
-    },
-    // Under stadium lights → key comes from high overhead, cool white.
-    sun: { dir: [0.25, 0.95, -0.15], color: 0xe8ecff, intensity: 1.0 },
-    hemi: { sky: 0x324164, ground: 0x11141c, intensity: 0.5 },
-    fog: { color: 0x0c1017, densityScale: 0.92 },
-    ground: { color: 0x4d6242, unlit: true },
+    void: { center: 0x0a0e1c, edge: 0x02030a },
+    sun: { dir: [0.25, 0.95, -0.15], color: 0xe8ecff, intensity: 0.9 },
+    hemi: { sky: 0x324164, ground: 0x070a12, intensity: 0.4 },
+    fog: { color: 0x05060c, fadeStart: 0.20, fadeEnd: 0.95 },
     runoff: { color: 0x1f1f25 },
     trackTint: 0xd8dbe6,
-    exposure: 1.0,
-    bloom: { strength: 0.2, threshold: 0.9, radius: 0.5 },
-    vignette: { base: 0.34, tint: 0x04050a },
+    grid: { color: 0x202a44, accentColor: 0x4a6cb0, cellSize: 30, accentEvery: 5 },
+    exposure: 1.05,
+    bloom: { strength: 0.22, threshold: 0.9, radius: 0.5 },
+    vignette: { base: 0.42, tint: 0x02030a },
     kerb: { emissive: 0x140000, emissiveIntensity: 0.12 },
-    grandstands: false,
-    // The warm horizon glow already sells the venue; dropping the stadium
-    // pylons entirely avoids visible black poles at long range and removes
-    // the last major bloom-heavy night-only accent.
-    stadiumLights: null,
+    starStrength: 1.0,
   },
 };
 
 // Weather overlay — mutates the active TOD preset in-place so that "night +
 // rain" doesn't need its own preset. Applied once after TOD lookup.
 const WET_OVERLAY = {
-  // Keep wet mood readable. Avoid near-black fog/terrain collapse in rain.
-  fogDensityMult: 1.12,
-  fogTint: 0x6f8399,       // lighter cool grey-blue, closer to sky/fog dry palette
-  groundDarken: 0.92,      // near-dry so terrain stays visible
+  fogDensityMult: 1.18,
+  fogTint: 0x222a36,
   runoffDarken: 0.76,
   trackDarken: 0.74,
   bloomStrengthAdd: 0.1,
@@ -129,27 +113,21 @@ function detectTimeOfDay(circuitName) {
   return "day";
 }
 
-// Procedural sky: zenith → horizon → ground gradient, soft sun disc + glow,
-// and sparse procedural stars (strength driven by the time-of-day preset, so
-// day races render a clean sky). Full sphere (BackSide) so the chase camera
-// can pitch up freely.
-function buildSkyDome(radius, sunDir, preset) {
-  const geom = new THREE.SphereGeometry(radius, 48, 24);
+// Void backdrop. A large inverted sphere with a radial-from-camera gradient
+// shader, mimicking the SVG view's "darker at edges" vignette but in 3D.
+// Unlike a sky dome it has no horizon line, no sun, and no clouds — exponential
+// fog in the scene blends everything past mid-range into the dome's edge tone
+// so the world feels open without committing to a sky. Render order is set
+// so it draws first, behind everything else.
+function buildVoidBackdrop(radius, preset) {
+  const geom = new THREE.SphereGeometry(radius, 32, 16);
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
+    fog: false,
     uniforms: {
-      uZenith:    { value: new THREE.Color(preset.sky.zenith) },
-      uHorizon:   { value: new THREE.Color(preset.sky.horizon) },
-      uGround:    { value: new THREE.Color(preset.sky.ground) },
-      uSunDir:    { value: sunDir.clone().normalize() },
-      uSunColor:  { value: new THREE.Color(preset.sky.sunColor) },
-      uSunSize:   { value: 0.9985 },
-      uSunDisc:   { value: preset.sky.sunDisc },
-      uHazeTint:  { value: preset.sky.hazeTint },
-      uHorizonGlow: { value: new THREE.Color(preset.sky.horizonGlow || 0x000000) },
-      uHorizonGlowStrength: { value: preset.sky.horizonGlowStrength || 0.0 },
-      uCloudStrength: { value: preset.sky.cloudStrength ?? 0.0 },
+      uCenter: { value: new THREE.Color(preset.void.center) },
+      uEdge: { value: new THREE.Color(preset.void.edge) },
     },
     vertexShader: `
       varying vec3 vDir;
@@ -160,85 +138,21 @@ function buildSkyDome(radius, sunDir, preset) {
     `,
     fragmentShader: `
       varying vec3 vDir;
-      uniform vec3 uZenith;
-      uniform vec3 uHorizon;
-      uniform vec3 uGround;
-      uniform vec3 uSunDir;
-      uniform vec3 uSunColor;
-      uniform float uSunSize;
-      uniform float uSunDisc;
-      uniform float uHazeTint;
-      uniform vec3 uHorizonGlow;
-      uniform float uHorizonGlowStrength;
-      uniform float uCloudStrength;
-
-      // Cheap 2-octave hash-based cloud layer. No textures, no uniforms beyond
-      // the strength scalar. Uses the normalised sphere direction so the clouds
-      // are fixed in sky-space (they don't swim as the camera moves).
-      float hash(vec2 p) {
-        p = fract(p * vec2(127.1, 311.7));
-        p += dot(p, p + 43.21);
-        return fract(p.x * p.y);
-      }
-      float smoothNoise(vec2 p) {
-        vec2 i = floor(p);
-        vec2 f = fract(p);
-        vec2 u = f * f * (3.0 - 2.0 * f);
-        return mix(
-          mix(hash(i),           hash(i + vec2(1,0)), u.x),
-          mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), u.x),
-          u.y
-        );
-      }
-      float clouds(vec3 d) {
-        // Project upper hemisphere onto a flat plane then tile.
-        if (d.y < 0.04) return 0.0;
-        vec2 uv = d.xz / (d.y + 0.15) * 1.4;
-        float n = smoothNoise(uv * 2.2) * 0.62
-                + smoothNoise(uv * 4.8) * 0.28
-                + smoothNoise(uv * 9.5) * 0.10;
-        // Threshold so we get puffy breaks rather than a uniform layer.
-        float c = smoothstep(0.48, 0.72, n);
-        // Fade clouds toward the horizon so they don't slice the gradient.
-        float horizonFade = smoothstep(0.04, 0.20, d.y);
-        return c * horizonFade;
-      }
-
+      uniform vec3 uCenter;
+      uniform vec3 uEdge;
       void main() {
-        vec3 d = normalize(vDir);
-        float t = clamp(d.y, -1.0, 1.0);
-        // Sky-vertical gradient — tighter smoothstep keeps the deep zenith blue
-        // from washing out too quickly toward the horizon.
-        vec3 sky = (t > 0.0)
-          ? mix(uHorizon, uZenith, smoothstep(0.0, 0.50, t))
-          : mix(uHorizon, uGround, smoothstep(0.0, -0.25, t));
-        // Haze concentrated at the horizon — reduced multiplier so the gradient
-        // survives in the upper sky.
-        float haze = exp(-abs(t) * 5.5);
-        sky = mix(sky, uHorizon * uHazeTint, haze * 0.28);
-        // Horizon glow band.
-        float glow = pow(max(0.0, 1.0 - abs(t)), 8.0);
-        sky += uHorizonGlow * (glow * uHorizonGlowStrength);
-        // Procedural cloud layer (day only via uCloudStrength).
-        if (uCloudStrength > 0.001) {
-          float c = clouds(d);
-          // Lit side of clouds picks up a little sun warmth.
-          float sunLit = max(0.0, dot(d, normalize(uSunDir))) * 0.3 + 0.7;
-          vec3 cloudColor = mix(vec3(0.82, 0.86, 0.90), vec3(1.0, 0.98, 0.94) * sunLit, 0.5);
-          sky = mix(sky, cloudColor, c * uCloudStrength);
-        }
-        // Sun disc + bloom-friendly glow (disabled at night via uSunDisc=0).
-        if (uSunDisc > 0.001) {
-          float sd = max(0.0, dot(d, normalize(uSunDir)));
-          float disc = smoothstep(uSunSize, uSunSize + 0.0008, sd);
-          float halo = pow(sd, 64.0) * 0.40 + pow(sd, 6.0) * 0.08;
-          sky += uSunColor * (disc * uSunDisc + halo);
-        }
-        gl_FragColor = vec4(sky, 1.0);
+        // Soft polar gradient: brightest near horizon (|y| ~ 0), darkest at
+        // the zenith and nadir. Looks like infinite depth without a horizon.
+        float t = abs(vDir.y);
+        float k = smoothstep(0.0, 0.85, t);
+        gl_FragColor = vec4(mix(uCenter, uEdge, k), 1.0);
       }
     `,
   });
-  return new THREE.Mesh(geom, mat);
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = -10;
+  return mesh;
 }
 
 // Procedural star field as a Points cloud on the upper hemisphere. Uniform
@@ -322,148 +236,6 @@ function buildStarField(radius, count = 1500, strength = 1.0) {
   pts.frustumCulled = false;
   pts.renderOrder = -1;
   return pts;
-}
-
-// Stadium floodlight ring for night races. The visible pylon caps are the
-// important part: they provide the night-race silhouettes and bloom streaks.
-// Real PointLights are optional because they are expensive in forward-rendered
-// scenes with lots of MeshStandardMaterial fragments.
-function buildStadiumLights(center, extent, yBase, config) {
-  const g = new THREE.Group();
-  const lights = [];
-  const height = extent * config.heightFactor;
-  const radius = extent * config.radiusFactor;
-  // Pylons + caps batched into one InstancedMesh each so the whole ring is
-  // 2 draw calls (plus the PointLights, which can't be instanced).
-  const pylonGeom = new THREE.BoxGeometry(4, height, 4);
-  const pylonMat = new THREE.MeshBasicMaterial({ color: 0x181a20 });
-  const pylonInst = new THREE.InstancedMesh(pylonGeom, pylonMat, config.count);
-  const capGeom = new THREE.BoxGeometry(18, 3, 6);
-  const capColor = new THREE.Color(config.color || 0xf4f7ff)
-    .multiplyScalar(config.capIntensity || 1.0);
-  const capMat = new THREE.MeshBasicMaterial({ color: capColor, toneMapped: false });
-  const capInst = new THREE.InstancedMesh(capGeom, capMat, config.count);
-  const dummy = new THREE.Object3D();
-  const lightRange = extent * 1.4;
-  const enableLiveLights = config.liveLights !== false && (config.intensity || 0) > 0;
-  for (let i = 0; i < config.count; i++) {
-    const a = (i / config.count) * Math.PI * 2 + 0.15;
-    const px = center.x + Math.cos(a) * radius;
-    const pz = center.z + Math.sin(a) * radius;
-    // Pylon: vertical box at the perimeter.
-    dummy.position.set(px, yBase + height * 0.5, pz);
-    dummy.rotation.set(0, 0, 0);
-    dummy.scale.set(1, 1, 1);
-    dummy.updateMatrix();
-    pylonInst.setMatrixAt(i, dummy.matrix);
-    // Cap: oriented to face the centre.
-    const capPos = new THREE.Vector3(px, yBase + height, pz);
-    dummy.position.copy(capPos);
-    dummy.lookAt(center.x, yBase + height, center.z);
-    dummy.updateMatrix();
-    capInst.setMatrixAt(i, dummy.matrix);
-    if (enableLiveLights) {
-      const pl = new THREE.PointLight(config.color, config.intensity, lightRange, 1.6);
-      pl.position.set(px, yBase + height * 0.95, pz);
-      g.add(pl);
-      lights.push(pl);
-    }
-  }
-  pylonInst.instanceMatrix.needsUpdate = true;
-  capInst.instanceMatrix.needsUpdate = true;
-  g.add(pylonInst);
-  g.add(capInst);
-  g.userData.lights = lights;
-  return g;
-}
-
-// Rolling-hills horizon silhouette built as a single radial fan: smoother and
-// reads better through fog than a wall of cubes. Two layered rings — closer
-// hills slightly warmer/lighter, distant ones nearly the sky tone for depth.
-function buildHorizonHills(center, extent, yBase) {
-  const g = new THREE.Group();
-  const layers = [
-    { radius: extent * 1.4,  hMin: 14, hMax: 70,  color: 0x141520, segs: 192 },
-    { radius: extent * 2.6,  hMin: 28, hMax: 120, color: 0x0f1018, segs: 144 },
-    { radius: extent * 4.2,  hMin: 60, hMax: 200, color: 0x0a0b13, segs: 96  },
-  ];
-  for (const L of layers) {
-    const N = L.segs;
-    // (N+1) outer ring verts + 1 center vert; we still build it as a flat ring
-    // anchored at yBase, so the inner edge sits on the ground.
-    const outer = new Float32Array((N + 1) * 3);
-    const inner = new Float32Array((N + 1) * 3);
-    for (let i = 0; i <= N; i++) {
-      const a = (i / N) * Math.PI * 2;
-      // Two-octave sin-noise for a soft hilly profile.
-      const n = 0.5 + 0.5 * Math.sin(a * 3.7 + L.radius * 0.001)
-                * Math.cos(a * 1.9 + L.radius * 0.0017);
-      const n2 = 0.5 + 0.5 * Math.sin(a * 11.3) * 0.6;
-      const h = L.hMin + (L.hMax - L.hMin) * (n * 0.7 + n2 * 0.3);
-      const cosA = Math.cos(a), sinA = Math.sin(a);
-      // inner vertex at yBase
-      inner[i * 3 + 0] = center.x + cosA * L.radius;
-      inner[i * 3 + 1] = yBase;
-      inner[i * 3 + 2] = center.z + sinA * L.radius;
-      // outer (top) vertex pushed up by `h`
-      outer[i * 3 + 0] = center.x + cosA * L.radius;
-      outer[i * 3 + 1] = yBase + h;
-      outer[i * 3 + 2] = center.z + sinA * L.radius;
-    }
-    const positions = new Float32Array((N + 1) * 6);
-    positions.set(inner, 0);
-    positions.set(outer, (N + 1) * 3);
-    const indices = [];
-    for (let i = 0; i < N; i++) {
-      const a = i, b = i + 1, c = (N + 1) + i, d = (N + 1) + i + 1;
-      indices.push(a, c, b, b, c, d);
-    }
-    const geom = new THREE.BufferGeometry();
-    geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geom.setIndex(indices);
-    geom.computeVertexNormals();
-    const mat = new THREE.MeshBasicMaterial({ color: L.color, fog: true });
-    g.add(new THREE.Mesh(geom, mat));
-  }
-  return g;
-}
-
-// Closer-in grandstand silhouette: low boxes scattered on the inner ring.
-// Only ~24 of them so they read as accents, not a fence.
-//
-// Single InstancedMesh: 22 boxes batched into one draw call instead of 22.
-// Per-instance matrix carries position/rotation/scale; per-instance colour
-// gives the accent mix without unique materials.
-function buildGrandstands(center, extent, yBase) {
-  const radius = extent * 1.15;
-  const count = 22;
-  const baseColor = new THREE.Color(0x1c1d28);
-  const accentColor = new THREE.Color(0x322438);
-  // Unit box; each instance scales it to (w, h, d).
-  const geom = new THREE.BoxGeometry(1, 1, 1);
-  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  const inst = new THREE.InstancedMesh(geom, mat, count);
-  const dummy = new THREE.Object3D();
-  for (let i = 0; i < count; i++) {
-    const a = (i / count) * Math.PI * 2 + Math.random() * 0.1;
-    const r = radius * (0.92 + Math.random() * 0.18);
-    const h = 8 + Math.random() * 14;
-    const w = 50 + Math.random() * 90;
-    const d = 22 + Math.random() * 30;
-    dummy.position.set(
-      center.x + Math.cos(a) * r,
-      yBase + h * 0.5,
-      center.z + Math.sin(a) * r,
-    );
-    dummy.rotation.set(0, -a + Math.PI * 0.5 + (Math.random() - 0.5) * 0.4, 0);
-    dummy.scale.set(w, h, d);
-    dummy.updateMatrix();
-    inst.setMatrixAt(i, dummy.matrix);
-    inst.setColorAt(i, Math.random() > 0.7 ? accentColor : baseColor);
-  }
-  inst.instanceMatrix.needsUpdate = true;
-  if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
-  return inst;
 }
 
 const TRACKSIDE_WORLD_UP = new THREE.Vector3(0, 1, 0);
@@ -656,11 +428,8 @@ export {
   mulHex,
   mulHexLumaFloor,
   detectTimeOfDay,
-  buildSkyDome,
+  buildVoidBackdrop,
   buildStarField,
-  buildStadiumLights,
-  buildHorizonHills,
-  buildGrandstands,
   sampleTrackFrameAt,
   makeTracksidePlacard,
   makeMarshalPanel,

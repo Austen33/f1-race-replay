@@ -700,138 +700,89 @@ function buildRacingLineMesh(curve, segments) {
   return line;
 }
 
-function buildTerrainGeometry(curve, center, extent, floorY) {
-  const size = extent * 6;
-  const segs = Math.max(80, Math.min(180, Math.round(extent / 12)));
-  const geom = new THREE.PlaneGeometry(size, size, segs, segs);
+// Flat reference plane at a fixed world-space Y. Carries UVs scaled in metres
+// so a procedural grid shader can draw lines with a known cell size without
+// needing to know the plane's size. The plane never bends to follow track
+// elevation — that's the whole point of the abstract direction: tracks float
+// over a void; the grid is just a motion / scale reference.
+function buildGridPlane(center, extent, baseY) {
+  const size = extent * 8;
+  const geom = new THREE.PlaneGeometry(size, size, 1, 1);
   geom.rotateX(-Math.PI / 2);
-
-  const sampleSegs = Math.max(180, Math.min(480, Math.round(extent * 0.16)));
-  const frames = sampleCurveFrames(curve, sampleSegs);
-  const fp = frames.points;
-  const count = frames.count;
-  // Wider influence so terrain rises gradually across valleys between sections
-  // at different elevations — prevents sky gaps when looking across the circuit.
-  const influenceRadius = Math.max(120, extent * 0.45);
-  const pos = geom.attributes.position;
-
-  for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i);
-    const z = pos.getZ(i);
-    const worldX = center.x + x;
-    const worldZ = center.z + z;
-
-    let bestD2 = Infinity;
-    let nearestY = floorY;
-    let maxNearbyY = floorY;
-    for (let j = 0; j < count; j++) {
-      const dx = worldX - fp[j * 3 + 0];
-      const dz = worldZ - fp[j * 3 + 2];
-      const d2 = dx * dx + dz * dz;
-      if (d2 < bestD2) {
-        bestD2 = d2;
-        nearestY = fp[j * 3 + 1];
-      }
-      if (d2 < influenceRadius * influenceRadius && fp[j * 3 + 1] > maxNearbyY) {
-        maxNearbyY = fp[j * 3 + 1];
-      }
-    }
-
-    const dist = Math.sqrt(bestD2);
-    const radial = Math.min(1, Math.hypot(x, z) / (size * 0.5));
-    const base = floorY - radial * radial * 10;
-
-    // Gap-zone lift: terrain vertices that are far from their nearest track
-    // point (the "gap" between two sections at very different heights) keep
-    // base near floorY even when an elevated section is visible nearby — this
-    // raises base toward the highest section's elevation as dist grows, so
-    // cross-valley sky gaps are partially filled without touching near-track
-    // vertices (gapBlend is 0 when dist <= fillThreshold).
-    const fillThreshold = Math.max(50, extent * 0.15);
-    const gapBlend = dist > fillThreshold
-      ? Math.min(1, (dist - fillThreshold) / Math.max(1, influenceRadius - fillThreshold))
-      : 0;
-    const baseLifted = base + (maxNearbyY - floorY) * gapBlend * 0.55;
-
-    const nearTrack = nearestY - 1.35 - Math.min(8, dist * 0.08);
-    const t = Math.max(0, Math.min(1, 1 - dist / influenceRadius));
-    const blend = t * t * (3 - 2 * t);
-    const undulation =
-      (Math.sin(worldX * 0.0055 + worldZ * 0.003) * 0.45 +
-       Math.sin(worldZ * 0.0085 - worldX * 0.004) * 0.28) * (0.25 + radial * 0.75);
-    pos.setY(i, baseLifted * (1 - blend) + nearTrack * blend + undulation);
-  }
-
-  geom.computeVertexNormals();
+  // UVs are 0..1 across the plane; multiplying by `size` in the shader gives
+  // metres directly, so cell size is tunable without rebuilding geometry.
+  geom.translate(center.x, baseY, center.z);
+  geom.userData = { size };
   return geom;
 }
 
-// Embankment wall that hangs from the bottom of the track slab down to a fixed
-// world-space floor Y. Unlike buildVerticalRibbonGeometry (whose bottom is
-// relative to each centerline point), this bottom is absolute — so a 60 m
-// elevated section gets a 60 m tall wall and a flat section gets a 2 m wall.
-// Only inner + outer walls are emitted (no top/bottom caps).
-function buildTrackEmbankmentGeometry(
-  curve,
-  segments,
-  offset,
-  width,
-  floorY,
-  baseY = 0.4,
-  minClearance = null,
-  uvRepeat = 80,
-) {
-  const half = width * 0.5;
+// Skirt: a thin extruded wall hanging straight down from the ribbon's outer
+// edges to `depth` metres below the track surface. Inherits the ribbon's
+// elevation per-vertex, so on banked or climbing sections it tilts and rises
+// with the ribbon for free. Only the two outer side walls are emitted — the
+// top is hidden by the ribbon and the bottom is never seen.
+//
+// `halfWidth` should match the track ribbon's outer edge (TRACK_WIDTH +
+// KERB_WIDTH if you want the skirt to fall outside the kerbs, or TRACK_WIDTH
+// to tuck it under). `topYOffset` lifts the top edge so it sits flush with
+// the bottom of the extruded ribbon.
+function buildRibbonSkirt(curve, segments, halfWidth, topYOffset, depth) {
   const positions = new Float32Array((segments + 1) * 4 * 3);
   const uvs = new Float32Array((segments + 1) * 4 * 2);
   const indices = [];
   const frames = sampleCurveFrames(curve, segments);
   const fp = frames.points, fr = frames.rights;
-  const hasMinClearance = Number.isFinite(minClearance) && minClearance > 0;
-  const clampedInner = { x: 0, z: 0 };
-  const clampedOuter = { x: 0, z: 0 };
   for (let i = 0; i <= segments; i++) {
     const t = i / segments;
     const px = fp[i * 3], py = fp[i * 3 + 1], pz = fp[i * 3 + 2];
     const rx = fr[i * 3], rz = fr[i * 3 + 2];
-    const inner = offset - half;
-    const outer = offset + half;
-    const yTop = py + baseY;
-    const yBot = Math.min(yTop - 0.1, floorY);
-    let innerX = px + rx * inner;
-    let innerZ = pz + rz * inner;
-    let outerX = px + rx * outer;
-    let outerZ = pz + rz * outer;
-    if (hasMinClearance) {
-      clampPointToMinClearanceXZ(
-        innerX, innerZ, fp, frames.count, minClearance, rx, rz, clampedInner,
-      );
-      clampPointToMinClearanceXZ(
-        outerX, outerZ, fp, frames.count, minClearance, rx, rz, clampedOuter,
-      );
-      innerX = clampedInner.x; innerZ = clampedInner.z;
-      outerX = clampedOuter.x; outerZ = clampedOuter.z;
-    }
+    const yTop = py + topYOffset;
+    const yBot = yTop - depth;
     const base = i * 12;
-    positions[base + 0] = innerX; positions[base + 1] = yBot; positions[base + 2] = innerZ;
-    positions[base + 3] = outerX; positions[base + 4] = yBot; positions[base + 5] = outerZ;
-    positions[base + 6] = innerX; positions[base + 7] = yTop; positions[base + 8] = innerZ;
-    positions[base + 9]  = outerX; positions[base + 10] = yTop; positions[base + 11] = outerZ;
+    // 0: inner top, 1: outer top, 2: inner bot, 3: outer bot
+    positions[base + 0] = px - rx * halfWidth;
+    positions[base + 1] = yTop;
+    positions[base + 2] = pz - rz * halfWidth;
+    positions[base + 3] = px + rx * halfWidth;
+    positions[base + 4] = yTop;
+    positions[base + 5] = pz + rz * halfWidth;
+    positions[base + 6] = px - rx * halfWidth;
+    positions[base + 7] = yBot;
+    positions[base + 8] = pz - rz * halfWidth;
+    positions[base + 9]  = px + rx * halfWidth;
+    positions[base + 10] = yBot;
+    positions[base + 11] = pz + rz * halfWidth;
+    // V is vertical position along the wall (0 at top, 1 at bottom) so the
+    // material can fade or gradient bake without sampling y in the shader.
     const uvBase = i * 8;
-    const v = t * uvRepeat;
-    uvs[uvBase + 0] = 0; uvs[uvBase + 1] = v;
-    uvs[uvBase + 2] = 1; uvs[uvBase + 3] = v;
-    uvs[uvBase + 4] = 0; uvs[uvBase + 5] = v + 0.35;
-    uvs[uvBase + 6] = 1; uvs[uvBase + 7] = v + 0.35;
+    uvs[uvBase + 0] = t; uvs[uvBase + 1] = 0;
+    uvs[uvBase + 2] = t; uvs[uvBase + 3] = 0;
+    uvs[uvBase + 4] = t; uvs[uvBase + 5] = 1;
+    uvs[uvBase + 6] = t; uvs[uvBase + 7] = 1;
     if (i < segments) {
       const a = i * 4, b = (i + 1) * 4;
-      indices.push(a, b, a + 2, a + 2, b, b + 2);
-      indices.push(a + 1, a + 3, b + 1, a + 3, b + 3, b + 1);
+      // Left wall (normal points -right): inner top → inner bot.
+      indices.push(a + 0, a + 2, b + 0, a + 2, b + 2, b + 0);
+      // Right wall (normal points +right): outer top → outer bot.
+      indices.push(a + 1, b + 1, a + 3, a + 3, b + 1, b + 3);
     }
+  }
+  // Per-vertex colours: lighter at top, darker at bottom. Sells the "track is
+  // sitting on something" illusion without modelling that something.
+  const colors = new Float32Array((segments + 1) * 4 * 3);
+  for (let i = 0; i <= segments; i++) {
+    const base = i * 12;
+    // top (lighter, 0.32) — sits flush with the ribbon edge in shadow
+    colors[base + 0] = 0.32; colors[base + 1] = 0.34; colors[base + 2] = 0.40;
+    colors[base + 3] = 0.32; colors[base + 4] = 0.34; colors[base + 5] = 0.40;
+    // bottom (darker, ~0.06) — fades into the void
+    colors[base + 6] = 0.06; colors[base + 7] = 0.07; colors[base + 8] = 0.10;
+    colors[base + 9] = 0.06; colors[base + 10] = 0.07; colors[base + 11] = 0.10;
   }
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geom.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
   geom.setIndex(indices);
   geom.computeVertexNormals();
   return geom;
@@ -855,6 +806,6 @@ export {
   buildSectorGate,
   buildStartFinishMesh,
   buildRacingLineMesh,
-  buildTerrainGeometry,
-  buildTrackEmbankmentGeometry,
+  buildGridPlane,
+  buildRibbonSkirt,
 };

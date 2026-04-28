@@ -2,13 +2,27 @@
 // modes. Everything in this file reasons in metres once `detectUnitScale`
 // normalises the incoming FastF1 coordinates.
 //
-// Layout order along the lifecycle:
-//  1. textures.js (procedural canvas textures — asphalt, kerb, concrete)
-//  2. curve + ribbon helpers (centerline, track, kerbs, DRS stripes, sectors)
-//  3. car marker factory (chassis + wheels + wings + halos + lights)
-//  4. atmosphere (sky dome, grandstand silhouette rim, rain particles)
-//  5. POV HUD (speed/gear/throttle/brake/DRS overlay for follow cam)
-//  6. Track3D component (scene build on geoVersion, animation loop reads refs)
+// Direction: the world is intentionally abstract. Tracks float through a dark
+// vignetted void over a procedural grid plane, with a thin extruded skirt
+// hanging off the ribbon's outer edges to hide the gap to the grid below.
+// There is no terrain, no horizon, no sky, no per-track elevation sampling —
+// a flat grid plane and exponential fog do the heavy lifting. Crossover
+// circuits (Suzuka), hill climbs (Spielberg) and banking (Zandvoort) all
+// "just work" because nothing in the world cares about Z except the ribbon.
+//
+// Layer order:
+//  1. void backdrop (gradient sphere) + FogExp2
+//  2. flat grid reference plane (procedural shader, distance-faded)
+//  3. ribbon skirt (extruded outer wall hanging from the ribbon)
+//  4. track ribbon + kerbs + edges + paint
+//  5. cars + labels
+//
+// Lifecycle:
+//  • textures.js (procedural canvas textures, grid shader material factory)
+//  • geometry.js (curve, ribbon, kerbs, DRS, sectors, grid plane, skirt)
+//  • atmosphere.js (void backdrop, TOD presets, rain, trackside placards)
+//  • cars.js (chassis + wheels + wings + halos + lights)
+//  • Track3D component (scene build on geoVersion, animation loop reads refs)
 //
 // React re-renders never touch the canvas: every per-frame input (standings,
 // pinned driver, view mode, weather) is pushed through a ref the animation
@@ -30,12 +44,12 @@ import {
   CAR_SURFACE_CLEARANCE,
   makeAsphaltTexture,
   makeRunoffAsphaltTexture,
-  makeGrassTexture,
   makeGravelTexture,
   makeArmcoTexture,
   makeAsphaltNormalMap,
   makeKerbStripeTexture,
   cachedTex,
+  buildGridShaderMaterial,
   getRoomEnvironment,
   clearRoomEnvironmentCache,
   makeLabelLayer,
@@ -46,11 +60,8 @@ import {
   mulHex,
   mulHexLumaFloor,
   detectTimeOfDay,
-  buildSkyDome,
+  buildVoidBackdrop,
   buildStarField,
-  buildStadiumLights,
-  buildHorizonHills,
-  buildGrandstands,
   sampleTrackFrameAt,
   makeTracksidePlacard,
   makeMarshalPanel,
@@ -72,8 +83,8 @@ import {
   buildSectorGate,
   buildStartFinishMesh,
   buildRacingLineMesh,
-  buildTerrainGeometry,
-  buildTrackEmbankmentGeometry,
+  buildGridPlane,
+  buildRibbonSkirt,
   makeDriverMarker,
   makeSafetyCarMarker,
 } from "./track3d/index.js";
@@ -184,33 +195,26 @@ function Track3D({
     const debugLayerColors = search.get("trackDebug") === "1";
     const disableToneMapping = search.get("trackToneMap") === "off";
     const showTrackHelpers = search.get("trackHelpers") === "1";
-    const groundBaseColor = debugLayerColors ? 0x00ff00 : preset.ground.color;
-    const grassBlendColor = debugLayerColors ? groundBaseColor : 0x5b874b;
-    const groundWetColor = debugLayerColors ? groundBaseColor : mulHexLumaFloor(preset.ground.color, WET_OVERLAY.groundDarken, 76);
     const runoffDryColor = debugLayerColors ? 0x0060ff : preset.runoff.color;
     const runoffWetColor = debugLayerColors ? runoffDryColor : mulHexLumaFloor(preset.runoff.color, WET_OVERLAY.runoffDarken, 56);
-    const vergeDryColor = grassBlendColor;
-    const vergeWetColor = debugLayerColors ? vergeDryColor : mulHexLumaFloor(vergeDryColor, WET_OVERLAY.groundDarken, 76);
     const trackDryColor = debugLayerColors ? 0xff00ff : preset.trackTint;
     const trackWetColor = debugLayerColors ? trackDryColor : mulHex(preset.trackTint, WET_OVERLAY.trackDarken);
     const fogDryColor = preset.fog.color;
     const fogWetColor = WET_OVERLAY.fogTint;
     const scene = new THREE.Scene();
-    // Match background to the sky horizon so any gap (first frame, skydome
-    // miss) blends seamlessly rather than flashing a different tone.
-    scene.background = new THREE.Color(preset.sky.horizon);
+    // Background colour matches the void edge so the very first frame (and any
+    // tiny shader miss) doesn't flash a different tone before fog kicks in.
+    scene.background = new THREE.Color(preset.void.edge);
 
-    // Hemisphere fills shadowed undersides with a cool sky tint vs warm
-    // ground bounce. Sun is the key light (shadow-caster, configured below
-    // once we know the bbox).
+    // Hemisphere fill + a single key directional light. With no terrain or
+    // sky to bounce light off, the lighting model is much simpler than before.
     const hemi = new THREE.HemisphereLight(preset.hemi.sky, preset.hemi.ground, preset.hemi.intensity);
     scene.add(hemi);
-    // Sun direction reused by the skydome so the on-sky disc and cast shadows
-    // agree. Angle/colour driven by the time-of-day preset.
     const sunDir = new THREE.Vector3(
       preset.sun.dir[0], preset.sun.dir[1], preset.sun.dir[2],
     ).normalize();
     const sun = new THREE.DirectionalLight(preset.sun.color, preset.sun.intensity);
+    sun.castShadow = false;
     scene.add(sun);
     scene.add(sun.target);
 
@@ -237,11 +241,14 @@ function Track3D({
       sx: Math.max(size.x, 300), sy: Math.max(size.y, 20), sz: Math.max(size.z, 300),
     };
 
-    scene.fog = new THREE.FogExp2(preset.fog.color, preset.fog.densityScale / extent);
+    // Exponential-squared fog so the far void dissolves smoothly. Density
+    // tuned so the horizon is fully fogged at roughly extent metres — enough
+    // visibility for orbit framing without the "world ends here" wall.
+    const fogDensity = 1.6 / Math.max(extent * 1.4, 600);
+    scene.fog = new THREE.FogExp2(preset.fog.color, fogDensity);
 
-    // Sun position: place it relative to the bbox so DirectionalLight's
-    // shadow frustum has something to anchor to. Fold the sun down toward the
-    // horizon for golden-hour rim light on the cars.
+    // Sun position relative to the bbox so the directional light has a
+    // consistent angle for the abstract scene.
     const sunDistance = extent * 2.0;
     sun.position.set(
       center.x + sunDir.x * sunDistance,
@@ -249,133 +256,87 @@ function Track3D({
       center.z + sunDir.z * sunDistance,
     );
     sun.target.position.copy(center);
-    // Shadows are off because no mesh in the scene has `castShadow = true` —
-    // the cars deliberately disable casting (the directional shadow map
-    // produced black spike artefacts at wide zoom levels). Keeping the shadow
-    // pass enabled would still render an empty depth map every frame at
-    // qp.shadowSize², which is pure waste. Re-enable here if you ever start
-    // casting from the cars or trackside objects.
-    sun.castShadow = false;
 
-    const sky = buildSkyDome(extent * 4, sunDir, preset);
-    sky.position.copy(center);
-    scene.add(sky);
+    // ── Layer 1: void backdrop ─────────────────────────────────────────────
+    // Large inverted gradient sphere. Combined with FogExp2 and a vignette
+    // post-pass it gives the camera a sense of infinite, dim space without
+    // needing a sky or horizon.
+    const backdrop = buildVoidBackdrop(extent * 6, preset);
+    backdrop.position.copy(center);
+    scene.add(backdrop);
 
-    // Star field — uniform Points cloud on the upper hemisphere, only built
-    // when the active preset calls for stars. Sits just inside the skydome.
+    // Optional: subtle stars at night only, just inside the backdrop. They
+    // add a hint of "dome of space" without committing to a full sky.
     let stars = null;
-    if (preset.sky.starStrength > 0.01) {
-      stars = buildStarField(extent * 3.8, 1800, preset.sky.starStrength);
+    if ((preset.starStrength || 0) > 0.01) {
+      stars = buildStarField(extent * 5.5, 1400, preset.starStrength);
       stars.position.copy(center);
       scene.add(stars);
     }
 
-    // Layered horizon: rolling hills in the distance, scattered grandstand
-    // accents close in. Both sit just below the lowest curve point so the
-    // track always reads as on top of the terrain.
-    const standsY = bb.min.y - 0.4;
-    scene.add(buildHorizonHills(center, extent, standsY));
-    if (preset.grandstands !== false) {
-      scene.add(buildGrandstands(center, extent, standsY));
-    }
-
-    // Stadium lights ring (night only) — 8 floodlight pylons around the bbox.
-    if (preset.stadiumLights) {
-      scene.add(buildStadiumLights(center, extent, standsY, preset.stadiumLights));
-    }
-
-    // Terrain mesh — broad undulating field around the circuit. A flat plane
-    // made elevated tracks read like a ribbon floating over a table, so the
-    // terrain now follows the circuit's height envelope and falls away from it.
-    const grassTex = cachedTex("grass", makeGrassTexture);
-    grassTex.repeat.set((extent * 6) / 120, (extent * 6) / 120);
-    const groundGeom = buildTerrainGeometry(curve, center, extent, bb.min.y - 1.6);
-    const groundMat = preset.ground.unlit
-      ? new THREE.MeshBasicMaterial({
-        color: groundBaseColor,
-        map: grassTex,
-        fog: true,
-        toneMapped: false,
-        polygonOffset: true,
-        polygonOffsetFactor: 4,
-        polygonOffsetUnits: 4,
-      })
-      : new THREE.MeshLambertMaterial({
-        color: groundBaseColor,
-        map: grassTex,
-        polygonOffset: true,
-        polygonOffsetFactor: 4,
-        polygonOffsetUnits: 4,
-      });
-    const ground = new THREE.Mesh(groundGeom, groundMat);
-    ground.position.set(center.x, 0, center.z);
-    ground.receiveShadow = false;
-    scene.add(ground);
-
-    // Runoff band — TWO parallel strips outside the track/kerbs, NOT a full
-    // ribbon under the track. The previous version was a single wide ribbon
-    // spanning ±RUNOFF_WIDTH that physically overlapped the track strip
-    // (±TRACK_WIDTH). At grazing camera angles the 30 cm yLift gap + polygon
-    // offset weren't enough to stop z-fighting, and the runoff would win for
-    // the central strip — making the track look translucent / missing its
-    // material. Two parallel strips outside the kerbs eliminate the overlap
-    // entirely: each side spans from kerb-outer to runoff-outer.
-    const GRASS_STRIP_WIDTH = 7.5;
-    const VERGE_INNER = TRACK_WIDTH + KERB_WIDTH;
-    const VERGE_CENTER = VERGE_INNER + GRASS_STRIP_WIDTH * 0.5;
-    const vergeTex = cachedTex("grass", makeGrassTexture);
-    vergeTex.repeat.set(1, 90);
-    const vergeMat = new THREE.MeshBasicMaterial({
-      color: vergeDryColor, map: vergeTex, toneMapped: false,
-    });
-    const vergeL = new THREE.Mesh(
-      buildEdgeLineGeometry(curve, segments, -VERGE_CENTER, GRASS_STRIP_WIDTH, 0.06, 90, VERGE_INNER + 0.05),
-      vergeMat,
-    );
-    const vergeR = new THREE.Mesh(
-      buildEdgeLineGeometry(curve, segments, +VERGE_CENTER, GRASS_STRIP_WIDTH, 0.06, 90, VERGE_INNER + 0.05),
-      vergeMat,
-    );
-    vergeL.receiveShadow = false; vergeR.receiveShadow = false;
-    vergeL.renderOrder = 1; vergeR.renderOrder = 1;
-    scene.add(vergeL); scene.add(vergeR);
-
-    const RUNOFF_INNER = VERGE_INNER + GRASS_STRIP_WIDTH;
-    const RUNOFF_STRIP_WIDTH = RUNOFF_WIDTH - RUNOFF_INNER;
-    const RUNOFF_STRIP_CENTER = RUNOFF_INNER + RUNOFF_STRIP_WIDTH * 0.5;
-    const runoffTex = cachedTex("runoff", makeRunoffAsphaltTexture);
-    runoffTex.repeat.set(2, 80);
-    const runoffMat = new THREE.MeshBasicMaterial({
-      color: runoffDryColor, map: runoffTex, toneMapped: false,
-    });
-    const runoffL = new THREE.Mesh(
-      buildEdgeLineGeometry(curve, segments, -RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, 0.05, 80, RUNOFF_INNER + 0.05),
-      runoffMat,
-    );
-    const runoffR = new THREE.Mesh(
-      buildEdgeLineGeometry(curve, segments, +RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, 0.05, 80, RUNOFF_INNER + 0.05),
-      runoffMat,
-    );
-    runoffL.receiveShadow = false; runoffR.receiveShadow = false;
-    runoffL.renderOrder = 1; runoffR.renderOrder = 1;
-    scene.add(runoffL); scene.add(runoffR);
-
-    // Main track surface — an extruded box rather than a flat ribbon. The
-    // previous flat ribbon kept reading as grey/transparent because:
-    //  (1) at wide orbit distances the 512² asphalt texture mipmap-averaged
-    //      the dark base + scattered chips into a mid-grey tone
-    //      indistinguishable from the concrete ground, and
-    //  (2) ACES tonemap applied by OutputPass compressed near-black albedo
-    //      upward, further closing the gap with the neutral-grey ground.
-    // Extruding to a 0.45 m thick slab with a solid (un-textured) dark
-    // charcoal albedo fixes both: no mipmap averaging, no chance of the
-    // track collapsing onto a near-identical lit value as the ground, and
-    // physical thickness that makes z-fighting with the runoff / ground
-    // impossible at any camera angle. The side walls catch a sliver of
-    // rim-light that reads as a tar "kerb" even from high orbit.
+    // ── Layer 2: grid reference plane ──────────────────────────────────────
+    // Flat at trackBaseY - 0.5 m. Doesn't follow elevation: that's the whole
+    // reason crossover/hilly tracks can render cleanly here. The grid shader
+    // fades to fully transparent toward the plane edge so the void shows
+    // through past the action — no visible plane edge at any zoom.
     const TRACK_BASE_Y = 0.4;
     const TRACK_THICKNESS = 0.45;
     const TRACK_TOP_Y = TRACK_BASE_Y + TRACK_THICKNESS;
+    const GRID_PLANE_Y = bb.min.y - 0.5;
+    const gridGeom = buildGridPlane(center, extent, GRID_PLANE_Y);
+    const gridMat = buildGridShaderMaterial({
+      planeSize: gridGeom.userData.size,
+      cameraPos: center,
+      color: preset.grid.color,
+      accentColor: preset.grid.accentColor,
+      cellSize: preset.grid.cellSize,
+      accentEvery: preset.grid.accentEvery,
+      fadeStart: 0.18,
+      fadeEnd: 0.82,
+      baseAlpha: 0.6,
+    });
+    const gridPlane = new THREE.Mesh(gridGeom, gridMat);
+    gridPlane.frustumCulled = false;
+    gridPlane.renderOrder = 0;
+    scene.add(gridPlane);
+
+    // ── Layer 3: ribbon skirt ──────────────────────────────────────────────
+    // Hangs from the outer ribbon edge straight down. Inherits the ribbon's
+    // elevation per-vertex, so on an elevated section it lengthens to bridge
+    // the gap to the grid below. Solid dark, vertex-coloured top→bottom
+    // gradient so the camera reads "track sits on something" without us
+    // committing to what that something is.
+    const SKIRT_DEPTH_CAMERA_TUNED = (mode) => {
+      // POV/CHASE: keep the skirt short so a low camera doesn't see the
+      // hanging wall poke into frame on flat sections. Orbit can afford a
+      // longer skirt for the abstract "floating slab" look on elevated
+      // sections. The animation loop tunes this dynamically; here we pick a
+      // fixed default that reads well in orbit.
+      return mode === "pov" || mode === "follow" ? 4 : 12;
+    };
+    const SKIRT_DEPTH_DEFAULT = SKIRT_DEPTH_CAMERA_TUNED("orbit");
+    const skirtGeom = buildRibbonSkirt(
+      curve,
+      segments,
+      TRACK_WIDTH + KERB_WIDTH * 0.5,
+      TRACK_BASE_Y + 0.01,
+      SKIRT_DEPTH_DEFAULT,
+    );
+    const skirtMat = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      fog: true,
+      toneMapped: false,
+    });
+    const skirt = new THREE.Mesh(skirtGeom, skirtMat);
+    skirt.renderOrder = 1;
+    scene.add(skirt);
+
+    // ── Layer 4: track ribbon ──────────────────────────────────────────────
+    // Extruded slab. A real top face + side walls so it has visible thickness
+    // (no z-fighting with the grid below at any camera angle). PBR for the
+    // top face so the sun rakes across the asphalt and IBL gives a soft
+    // sheen.
     const curveLenApprox = extent * Math.PI;
     const trackUv = Math.max(60, curveLenApprox / 40);
     const asphaltTex = cachedTex("asphalt", makeAsphaltTexture);
@@ -386,13 +347,6 @@ function Track3D({
     const trackGeom = buildExtrudedRibbonGeometry(
       curve, segments, TRACK_WIDTH, TRACK_BASE_Y, TRACK_THICKNESS, trackUv,
     );
-    // PBR track surface: dark charcoal albedo + procedural normal map so the
-    // sun direction rakes across the asphalt and IBL gives a faint sheen.
-    // Earlier this was MeshBasicMaterial because mip-averaging at distance
-    // collapsed the lit colour toward the ground concrete; a low
-    // envMapIntensity plus high roughness keeps the surface readable as tar
-    // under ACES tonemap while still picking up directional light cues that
-    // were lost on the unlit material.
     const trackMat = new THREE.MeshStandardMaterial({
       color: trackDryColor,
       map: asphaltTex,
@@ -406,34 +360,30 @@ function Track3D({
     track.renderOrder = 2;
     scene.add(track);
 
-    // Embankment walls — placed just outside the runoff boundary (RUNOFF_WIDTH)
-    // so they never overlap kerb/verge/runoff strips. Top is flush with the outer
-    // runoff surface (yLift 0.06). Bottom is at a fixed world floor so on an
-    // elevated section the wall is as tall as the elevation delta, closing the
-    // "see sky under the track" gap without touching any inner geometry.
-    const EMBANKMENT_FLOOR = bb.min.y - 2.0;
-    const EMBANKMENT_OFFSET = RUNOFF_WIDTH + 0.15;
-    const embankTex = cachedTex("grass", makeGrassTexture);
-    embankTex.repeat.set(1, 85);
-    const embankMat = new THREE.MeshBasicMaterial({
-      color: vergeDryColor,
-      map: embankTex,
-      side: THREE.DoubleSide,
-      fog: true,
-      toneMapped: false,
+    // Outer asphalt runoff strip on each side of the kerbs — one of the few
+    // surfaces that survived the abstract direction, because gravel traps and
+    // braking-zone signage need an asphalt skid pad for context. Sits flush
+    // with the top of the ribbon (no terrain to fight with).
+    const RUNOFF_INNER = TRACK_WIDTH + KERB_WIDTH;
+    const RUNOFF_STRIP_WIDTH = Math.max(0, RUNOFF_WIDTH - RUNOFF_INNER);
+    const RUNOFF_STRIP_CENTER = RUNOFF_INNER + RUNOFF_STRIP_WIDTH * 0.5;
+    const runoffTex = cachedTex("runoff", makeRunoffAsphaltTexture);
+    runoffTex.repeat.set(2, 80);
+    const runoffMat = new THREE.MeshBasicMaterial({
+      color: runoffDryColor, map: runoffTex, toneMapped: false,
+      transparent: true, opacity: 0.85, depthWrite: false,
     });
-    const embankL = new THREE.Mesh(
-      buildTrackEmbankmentGeometry(curve, segments, -EMBANKMENT_OFFSET, 0.3, EMBANKMENT_FLOOR, 0.06, RUNOFF_WIDTH + 0.02),
-      embankMat,
+    const runoffL = new THREE.Mesh(
+      buildEdgeLineGeometry(curve, segments, -RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, TRACK_TOP_Y - 0.02, 80, RUNOFF_INNER + 0.05),
+      runoffMat,
     );
-    const embankR = new THREE.Mesh(
-      buildTrackEmbankmentGeometry(curve, segments, +EMBANKMENT_OFFSET, 0.3, EMBANKMENT_FLOOR, 0.06, RUNOFF_WIDTH + 0.02),
-      embankMat,
+    const runoffR = new THREE.Mesh(
+      buildEdgeLineGeometry(curve, segments, +RUNOFF_STRIP_CENTER, RUNOFF_STRIP_WIDTH, TRACK_TOP_Y - 0.02, 80, RUNOFF_INNER + 0.05),
+      runoffMat,
     );
-    embankL.renderOrder = 1;
-    embankR.renderOrder = 1;
-    scene.add(embankL);
-    scene.add(embankR);
+    runoffL.receiveShadow = false; runoffR.receiveShadow = false;
+    runoffL.renderOrder = 2; runoffR.renderOrder = 2;
+    scene.add(runoffL); scene.add(runoffR);
 
     // Everything that was previously layered via tiny Y offsets on a flat
     // ribbon now has to live on the top face of the extruded track slab.
@@ -518,12 +468,16 @@ function Track3D({
     });
     const armcoHeight = 1.2;
     const armcoWidth = 0.35;
+    // Barriers/fences sit on the same plane as the ribbon top — there is no
+    // ground beneath the track in the abstract scene, so anchoring at
+    // TRACK_TOP_Y keeps them flush with kerbs and runoff.
+    const SIDEWALL_BASE_Y = TRACK_TOP_Y - 0.02;
     const barrierL = new THREE.Mesh(
-      buildVerticalRibbonGeometry(curve, segments, -barrierOffset, armcoWidth, 0.06, armcoHeight, 20),
+      buildVerticalRibbonGeometry(curve, segments, -barrierOffset, armcoWidth, SIDEWALL_BASE_Y, armcoHeight, 20),
       barrierMat,
     );
     const barrierR = new THREE.Mesh(
-      buildVerticalRibbonGeometry(curve, segments, +barrierOffset, armcoWidth, 0.06, armcoHeight, 20),
+      buildVerticalRibbonGeometry(curve, segments, +barrierOffset, armcoWidth, SIDEWALL_BASE_Y, armcoHeight, 20),
       barrierMat,
     );
     barrierL.renderOrder = 2;
@@ -540,7 +494,7 @@ function Track3D({
       toneMapped: false,
     });
     const fenceOffset = barrierOffset + 0.06;
-    const fenceBase = 0.06 + armcoHeight;
+    const fenceBase = SIDEWALL_BASE_Y + armcoHeight;
     const fenceHeight = 2.2;
     const fenceL = new THREE.Mesh(
       buildVerticalRibbonGeometry(curve, segments, -fenceOffset, 0.08, fenceBase, fenceHeight, 26),
@@ -567,9 +521,11 @@ function Track3D({
     const tracksideWorldUp = new THREE.Vector3(0, 1, 0);
     const placeTrackside = (obj, u, side, offset, lift = 0.05) => {
       sampleTrackFrameAt(curve, u, propPoint, propTan, propRight, propUp);
+      // Anchor to the ribbon top, not the centerline base — the abstract
+      // scene has no terrain so trackside props live on the slab plane.
       obj.position.copy(propPoint)
         .addScaledVector(propRight, offset * side)
-        .addScaledVector(propUp, lift);
+        .addScaledVector(propUp, TRACK_TOP_Y + lift);
       propFlatFwd.copy(propTan);
       propFlatFwd.y = 0;
       if (propFlatFwd.lengthSq() < 1e-8) propFlatFwd.copy(propTan);
@@ -642,7 +598,7 @@ function Track3D({
         c.endU,
         gravelOffset,
         gravelWidth,
-        0.045,
+        TRACK_TOP_Y - 0.03,
         28,
       );
       const gravel = new THREE.Mesh(gravelGeom, gravelMat);
@@ -784,8 +740,6 @@ function Track3D({
     setAniso(asphaltTex,    maxAniso);
     setAniso(asphaltNormal, maxAniso);
     setAniso(runoffTex,     maxAniso);
-    setAniso(grassTex,      maxAniso);
-    setAniso(vergeTex,      modestAniso);
     setAniso(gravelTex,     modestAniso);
     setAniso(kerbTex,        modestAniso);
     setAniso(barrierTex,     modestAniso);
@@ -1108,14 +1062,8 @@ function Track3D({
         advanceRain(rain, dt, _windVec);
         trackMat.color.setHex(trackWetColor);
         runoffMat.color.setHex(runoffWetColor);
-        vergeMat.color.setHex(vergeWetColor);
-        embankMat.color.setHex(vergeWetColor);
-        // Do not heavily darken terrain in rain; the fog/tonemap stack already
-        // reduces perceived brightness and can otherwise look like "missing"
-        // black patches around the track.
-        groundMat.color.setHex(groundBaseColor);
         scene.fog.color.setHex(fogWetColor);
-        scene.fog.density = (preset.fog.densityScale * WET_OVERLAY.fogDensityMult) / extent;
+        scene.fog.density = fogDensity * WET_OVERLAY.fogDensityMult;
         if (bloomPass) {
           bloomPass.strength = preset.bloom.strength + WET_OVERLAY.bloomStrengthAdd;
           bloomPass.threshold = Math.max(0.7, preset.bloom.threshold - WET_OVERLAY.bloomThresholdDrop);
@@ -1123,11 +1071,8 @@ function Track3D({
       } else {
         trackMat.color.setHex(trackDryColor);
         runoffMat.color.setHex(runoffDryColor);
-        vergeMat.color.setHex(vergeDryColor);
-        embankMat.color.setHex(vergeDryColor);
-        groundMat.color.setHex(groundBaseColor);
         scene.fog.color.setHex(fogDryColor);
-        scene.fog.density = preset.fog.densityScale / extent;
+        scene.fog.density = fogDensity;
         if (bloomPass) {
           bloomPass.strength = preset.bloom.strength;
           bloomPass.threshold = preset.bloom.threshold;

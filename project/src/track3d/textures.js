@@ -355,6 +355,98 @@ function getRoomEnvironment(renderer) {
   return _pmremEnv;
 }
 
+// Procedural grid shader for the abstract reference plane below the track.
+// The plane geometry covers `planeSize` metres and carries 0..1 UVs, so we
+// reconstruct world-space metres in the shader as `uv * planeSize`. Lines are
+// drawn by anti-aliased thresholds on `fract(coord / cell)`. A second, brighter
+// line every `accentEvery` cells reads as a major gridline. Distance fade
+// alpha-blends the whole grid into the void so the plane never shows a hard
+// edge at any zoom — the camera's view of the world feels infinite without
+// the grid actually being infinite.
+function buildGridShaderMaterial({
+  planeSize,
+  cameraPos,
+  color = 0x3c4a66,
+  accentColor = 0x6c8bcc,
+  cellSize = 30,
+  accentEvery = 5,
+  fadeStart = 0.18,
+  fadeEnd = 0.85,
+  baseAlpha = 0.55,
+}) {
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    fog: true,
+    uniforms: THREE.UniformsUtils.merge([
+      THREE.UniformsLib.fog,
+      {
+        uPlaneSize: { value: planeSize },
+        uCameraPos: { value: cameraPos.clone() },
+        uColor: { value: new THREE.Color(color) },
+        uAccentColor: { value: new THREE.Color(accentColor) },
+        uCellSize: { value: cellSize },
+        uAccentEvery: { value: accentEvery },
+        uFadeStart: { value: fadeStart },
+        uFadeEnd: { value: fadeEnd },
+        uBaseAlpha: { value: baseAlpha },
+      },
+    ]),
+    vertexShader: `
+      varying vec3 vWorldPos;
+      #include <fog_pars_vertex>
+      void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        vec4 mvPosition = viewMatrix * wp;
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vWorldPos;
+      uniform float uPlaneSize;
+      uniform vec3 uCameraPos;
+      uniform vec3 uColor;
+      uniform vec3 uAccentColor;
+      uniform float uCellSize;
+      uniform float uAccentEvery;
+      uniform float uFadeStart;
+      uniform float uFadeEnd;
+      uniform float uBaseAlpha;
+      #include <fog_pars_fragment>
+      // Anti-aliased line via |x - 0.5| in cell coords, scaled by fwidth so
+      // line thickness stays roughly constant in screen pixels regardless of
+      // grazing-angle distortion.
+      float gridLine(float coord, float widthPx) {
+        float w = fwidth(coord) * widthPx;
+        float d = abs(fract(coord) - 0.5);
+        return 1.0 - smoothstep(0.5 - w, 0.5, d);
+      }
+      void main() {
+        vec2 p = vWorldPos.xz;
+        // Minor cells at every uCellSize metres.
+        vec2 minorC = p / uCellSize;
+        float minor = max(gridLine(minorC.x, 0.6), gridLine(minorC.y, 0.6));
+        // Major cells every uAccentEvery * uCellSize metres.
+        vec2 majorC = p / (uCellSize * uAccentEvery);
+        float major = max(gridLine(majorC.x, 0.9), gridLine(majorC.y, 0.9));
+        vec3 col = mix(uColor, uAccentColor, major);
+        float lineAlpha = max(minor * 0.55, major);
+        // Distance fade — linear in radius / planeSize half. Fully transparent
+        // past uFadeEnd so the plane edge never shows.
+        float dist = length(p.xy - uCameraPos.xz);
+        float halfSize = uPlaneSize * 0.5;
+        float r = dist / halfSize;
+        float radial = 1.0 - smoothstep(uFadeStart, uFadeEnd, r);
+        float a = lineAlpha * uBaseAlpha * radial;
+        gl_FragColor = vec4(col, a);
+        #include <fog_fragment>
+      }
+    `,
+  });
+}
+
 function clearRoomEnvironmentCache(renderer = null) {
   if (!_pmremEnv) return;
   if (renderer && _pmremRendererRef !== renderer) return;
@@ -373,6 +465,7 @@ export {
   makeConcreteTexture,
   makeKerbStripeTexture,
   cachedTex,
+  buildGridShaderMaterial,
   getRoomEnvironment,
   clearRoomEnvironmentCache,
 };
