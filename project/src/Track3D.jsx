@@ -103,10 +103,18 @@ import {
 // `smaa` adds a post-tonemap SMAA pass (3 cheap fullscreen passes, ~0.3-1 ms
 // on desktop GPUs). Catches the shader/spec-edge crawl that geometry-only
 // MSAA can't see; complements rather than replaces MSAA.
+// `lightRig` controls the directional-light count beyond the key sun:
+//   "key"        — sun only (cheapest, single light evaluation)
+//   "key+fill"   — sun + cool fill from opposite side (lifts shadow side
+//                  without adding a shadow-casting light)
+//   "key+fill+rim" — sun + fill + back-rim for car/silhouette separation.
+// Three directional lights is still trivial vs MSAA/bloom cost; the gating
+// here is mostly to keep "low" looking flatter (matching the rest of low's
+// budget) rather than because the lights themselves are expensive.
 const QUALITY_PRESETS = {
-  low:  { dprCap: 1.0, shadowSize: 512,  msaa: 0, bloom: false, bloomScale: 0,    smaa: false },
-  med:  { dprCap: 1.5, shadowSize: 1024, msaa: 2, bloom: false, bloomScale: 0,    smaa: true  },
-  high: { dprCap: 2.0, shadowSize: 2048, msaa: 2, bloom: true,  bloomScale: 0.35, smaa: true  },
+  low:  { dprCap: 1.0, shadowSize: 512,  msaa: 0, bloom: false, bloomScale: 0,    smaa: false, lightRig: "key" },
+  med:  { dprCap: 1.5, shadowSize: 1024, msaa: 2, bloom: false, bloomScale: 0,    smaa: true,  lightRig: "key+fill" },
+  high: { dprCap: 2.0, shadowSize: 2048, msaa: 2, bloom: true,  bloomScale: 0.35, smaa: true,  lightRig: "key+fill+rim" },
 };
 
 const TRACK3D_POV_TUNE = Object.freeze({
@@ -555,9 +563,18 @@ function Track3D({
     // Match background to the sky horizon so any tiny first-frame gap blends.
     scene.background = new THREE.Color(preset.sky?.horizon ?? preset.void.edge);
 
-    // Hemisphere fill + a single key directional light. With no terrain or
-    // sky to bounce light off, the lighting model is much simpler than before.
-    const hemi = new THREE.HemisphereLight(preset.hemi.sky, preset.hemi.ground, preset.hemi.intensity);
+    // Three-light rig (key + fill + rim) gated by quality preset:
+    //  • low  → sun only, slightly brighter hemi to compensate for missing fill
+    //  • med  → sun + cool fill (shadow-side lift, no shadow casting)
+    //  • high → sun + fill + warm/cool rim for silhouette separation
+    // All three are directional lights — no shadow maps here, so each extra
+    // light is one extra dot product per fragment for lit materials. Cheap.
+    const hemiBoost = qp.lightRig === "key" ? 1.35 : 1.0;
+    const hemi = new THREE.HemisphereLight(
+      preset.hemi.sky,
+      preset.hemi.ground,
+      preset.hemi.intensity * hemiBoost,
+    );
     scene.add(hemi);
     const sunDir = new THREE.Vector3(
       preset.sun.dir[0], preset.sun.dir[1], preset.sun.dir[2],
@@ -566,6 +583,30 @@ function Track3D({
     sun.castShadow = false;
     scene.add(sun);
     scene.add(sun.target);
+
+    let fillLight = null;
+    let fillDir = null;
+    if (qp.lightRig !== "key" && preset.fill) {
+      fillDir = new THREE.Vector3(
+        preset.fill.dir[0], preset.fill.dir[1], preset.fill.dir[2],
+      ).normalize();
+      fillLight = new THREE.DirectionalLight(preset.fill.color, preset.fill.intensity);
+      fillLight.castShadow = false;
+      scene.add(fillLight);
+      scene.add(fillLight.target);
+    }
+
+    let rimLight = null;
+    let rimDir = null;
+    if (qp.lightRig === "key+fill+rim" && preset.rim) {
+      rimDir = new THREE.Vector3(
+        preset.rim.dir[0], preset.rim.dir[1], preset.rim.dir[2],
+      ).normalize();
+      rimLight = new THREE.DirectionalLight(preset.rim.color, preset.rim.intensity);
+      rimLight.castShadow = false;
+      scene.add(rimLight);
+      scene.add(rimLight.target);
+    }
 
     // --- Curve ---
     const scale = detectUnitScale(circuit);
@@ -603,15 +644,34 @@ function Track3D({
     const fogDensity = 1.6 / Math.max(extent * 1.4, 600);
     scene.fog = new THREE.FogExp2(preset.fog.color, fogDensity);
 
-    // Sun position relative to the bbox so the directional light has a
-    // consistent angle for the abstract scene.
-    const sunDistance = extent * 2.0;
+    // Sun + fill + rim positions relative to the bbox so each directional
+    // light hits the abstract scene from a consistent angle. DirectionalLight
+    // is parallel — only the direction (position - target) matters — so the
+    // distance is just for stable shadow-frustum framing if/when shadows
+    // come on.
+    const lightDistance = extent * 2.0;
     sun.position.set(
-      center.x + sunDir.x * sunDistance,
-      bb.min.y + sunDir.y * sunDistance,
-      center.z + sunDir.z * sunDistance,
+      center.x + sunDir.x * lightDistance,
+      bb.min.y + sunDir.y * lightDistance,
+      center.z + sunDir.z * lightDistance,
     );
     sun.target.position.copy(center);
+    if (fillLight && fillDir) {
+      fillLight.position.set(
+        center.x + fillDir.x * lightDistance,
+        bb.min.y + fillDir.y * lightDistance,
+        center.z + fillDir.z * lightDistance,
+      );
+      fillLight.target.position.copy(center);
+    }
+    if (rimLight && rimDir) {
+      rimLight.position.set(
+        center.x + rimDir.x * lightDistance,
+        bb.min.y + rimDir.y * lightDistance,
+        center.z + rimDir.z * lightDistance,
+      );
+      rimLight.target.position.copy(center);
+    }
 
     // ── Layer 1: sky dome ──────────────────────────────────────────────────
     const sky = buildSkyDome(extent * 4, sunDir, preset);

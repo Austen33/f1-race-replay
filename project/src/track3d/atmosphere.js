@@ -34,7 +34,12 @@ const TOD_PRESETS = {
     },
     void: { center: 0x0d1525, edge: 0x03050e },
     sun: { dir: [0.55, 0.65, -0.45], color: 0xfff0cc, intensity: 1.4 },
-    hemi: { sky: 0xbcd4ff, ground: 0x121620, intensity: 0.7 },
+    // Cool sky-tinted fill from the opposite-camera side; lifts shadows so
+    // car flanks read instead of going pure black under hemi alone.
+    fill: { dir: [-0.6, 0.35, 0.5], color: 0x9ec4ff, intensity: 0.45 },
+    // Cool back-rim from behind/above to separate cars from track surface.
+    rim:  { dir: [-0.3, 0.55, 0.85], color: 0xcfe2ff, intensity: 0.55 },
+    hemi: { sky: 0xbcd4ff, ground: 0x121620, intensity: 0.55 },
     fog: { color: 0x0c111a, fadeStart: 0.22, fadeEnd: 1.0 },
     runoff: { color: 0x3a3a42 },
     trackTint: 0xf2f3fa,
@@ -60,7 +65,11 @@ const TOD_PRESETS = {
     },
     void: { center: 0x130b1e, edge: 0x050309 },
     sun: { dir: [0.45, 0.55, -0.7], color: 0xffc194, intensity: 1.2 },
-    hemi: { sky: 0xa39abb, ground: 0x14101a, intensity: 0.45 },
+    // Cool magenta-blue fill against the warm low sun for classic dusk split.
+    fill: { dir: [-0.5, 0.4, 0.65], color: 0x6e7aa8, intensity: 0.4 },
+    // Warm rim picks up the horizon glow on the trailing edge of cars.
+    rim:  { dir: [-0.6, 0.45, -0.5], color: 0xffa070, intensity: 0.7 },
+    hemi: { sky: 0xa39abb, ground: 0x14101a, intensity: 0.35 },
     fog: { color: 0x100b18, fadeStart: 0.20, fadeEnd: 0.95 },
     runoff: { color: 0x2a2a31 },
     trackTint: 0xe8eaf2,
@@ -86,7 +95,11 @@ const TOD_PRESETS = {
     },
     void: { center: 0x050810, edge: 0x010207 },
     sun: { dir: [0.25, 0.95, -0.15], color: 0xe8ecff, intensity: 0.9 },
-    hemi: { sky: 0x324164, ground: 0x070a12, intensity: 0.4 },
+    // Cyan stadium-floodlight fill from the side, mimics secondary pylons.
+    fill: { dir: [-0.7, 0.5, 0.35], color: 0x6e8cb4, intensity: 0.55 },
+    // Warm sodium-vapor rim from behind — sells the "lit night race" feel.
+    rim:  { dir: [-0.4, 0.6, -0.7], color: 0xffd0a0, intensity: 0.5 },
+    hemi: { sky: 0x324164, ground: 0x070a12, intensity: 0.32 },
     fog: { color: 0x05060c, fadeStart: 0.20, fadeEnd: 0.95 },
     runoff: { color: 0x1f1f25 },
     trackTint: 0xd8dbe6,
