@@ -32,13 +32,13 @@ const TOD_PRESETS = {
       horizonGlowStrength: 0.28,
       cloudStrength: 0.55,
     },
-    void: { center: 0x1c2330, edge: 0x070a12 },
+    void: { center: 0x0d1525, edge: 0x03050e },
     sun: { dir: [0.55, 0.65, -0.45], color: 0xfff0cc, intensity: 1.4 },
     hemi: { sky: 0xbcd4ff, ground: 0x121620, intensity: 0.7 },
     fog: { color: 0x0c111a, fadeStart: 0.22, fadeEnd: 1.0 },
     runoff: { color: 0x3a3a42 },
     trackTint: 0xf2f3fa,
-    grid: { color: 0x3c4a66, accentColor: 0x6c8bcc, cellSize: 30, accentEvery: 5 },
+    grid: { color: 0x2a3650, accentColor: 0x5a7ec0, cellSize: 30, accentEvery: 5 },
     exposure: 0.98,
     bloom: { strength: 0.24, threshold: 0.95, radius: 0.55 },
     vignette: { base: 0.34, tint: 0x05070d },
@@ -58,13 +58,13 @@ const TOD_PRESETS = {
       horizonGlowStrength: 0.55,
       cloudStrength: 0.0,
     },
-    void: { center: 0x231627, edge: 0x07050a },
+    void: { center: 0x130b1e, edge: 0x050309 },
     sun: { dir: [0.45, 0.55, -0.7], color: 0xffc194, intensity: 1.2 },
     hemi: { sky: 0xa39abb, ground: 0x14101a, intensity: 0.45 },
     fog: { color: 0x100b18, fadeStart: 0.20, fadeEnd: 0.95 },
     runoff: { color: 0x2a2a31 },
     trackTint: 0xe8eaf2,
-    grid: { color: 0x4a3a5a, accentColor: 0xc88c70, cellSize: 30, accentEvery: 5 },
+    grid: { color: 0x332542, accentColor: 0xb87860, cellSize: 30, accentEvery: 5 },
     exposure: 1.0,
     bloom: { strength: 0.32, threshold: 0.88, radius: 0.55 },
     vignette: { base: 0.42, tint: 0x07080e },
@@ -84,13 +84,13 @@ const TOD_PRESETS = {
       horizonGlowStrength: 0.4,
       cloudStrength: 0.0,
     },
-    void: { center: 0x0a0e1c, edge: 0x02030a },
+    void: { center: 0x050810, edge: 0x010207 },
     sun: { dir: [0.25, 0.95, -0.15], color: 0xe8ecff, intensity: 0.9 },
     hemi: { sky: 0x324164, ground: 0x070a12, intensity: 0.4 },
     fog: { color: 0x05060c, fadeStart: 0.20, fadeEnd: 0.95 },
     runoff: { color: 0x1f1f25 },
     trackTint: 0xd8dbe6,
-    grid: { color: 0x202a44, accentColor: 0x4a6cb0, cellSize: 30, accentEvery: 5 },
+    grid: { color: 0x161e38, accentColor: 0x3a5aa8, cellSize: 30, accentEvery: 5 },
     exposure: 1.05,
     bloom: { strength: 0.22, threshold: 0.9, radius: 0.5 },
     vignette: { base: 0.42, tint: 0x02030a },
@@ -180,7 +180,9 @@ function buildVoidBackdrop(radius, preset) {
         // Soft polar gradient: brightest near horizon (|y| ~ 0), darkest at
         // the zenith and nadir. Looks like infinite depth without a horizon.
         float t = abs(vDir.y);
-        float k = smoothstep(0.0, 0.85, t);
+        // Steeper curve: horizon band stays dark, poles snap to edge tone fast.
+        float k = smoothstep(0.0, 0.55, t);
+        k = k * k;
         gl_FragColor = vec4(mix(uCenter, uEdge, k), 1.0);
       }
     `,

@@ -645,9 +645,9 @@ function Track3D({
       accentColor: preset.grid.accentColor,
       cellSize: preset.grid.cellSize,
       accentEvery: preset.grid.accentEvery,
-      fadeStart: 0.18,
-      fadeEnd: 0.82,
-      baseAlpha: 0.6,
+      fadeStart: 0.04,
+      fadeEnd: 0.75,
+      baseAlpha: 0.65,
     });
     const gridPlane = new THREE.Mesh(gridGeom, gridMat);
     gridPlane.frustumCulled = false;
