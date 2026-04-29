@@ -417,6 +417,8 @@ function buildExtrudedRibbonGeometry(curve, segments, halfWidth, baseY, thicknes
       indices.push(a + 2, a + 0, b + 2, a + 0, b + 0, b + 2);
       // Right side wall (normal points +right).
       indices.push(a + 3, b + 3, a + 1, a + 1, b + 3, b + 1);
+      // Bottom face (winding reversed so normal points -Y).
+      indices.push(a + 2, b + 2, a + 3, a + 3, b + 2, b + 3);
     }
   }
   const geom = new THREE.BufferGeometry();
@@ -765,6 +767,8 @@ function buildRibbonSkirt(curve, segments, halfWidth, topYOffset, depth) {
       indices.push(a + 0, a + 2, b + 0, a + 2, b + 2, b + 0);
       // Right wall (normal points +right): outer top → outer bot.
       indices.push(a + 1, b + 1, a + 3, a + 3, b + 1, b + 3);
+      // Bottom cap (normal points -Y): inner bot → outer bot.
+      indices.push(a + 2, a + 3, b + 2, a + 3, b + 3, b + 2);
     }
   }
   // Per-vertex colours: lighter at top, darker at bottom. Sells the "track is
