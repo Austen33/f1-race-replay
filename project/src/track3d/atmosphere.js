@@ -32,7 +32,7 @@ const TOD_PRESETS = {
       horizonGlowStrength: 0.28,
       cloudStrength: 0.55,
     },
-    void: { center: 0x0d1525, edge: 0x03050e },
+    void: { center: 0x1a2d4a, edge: 0x0d1a2e },
     sun: { dir: [0.55, 0.65, -0.45], color: 0xfff0cc, intensity: 1.4 },
     // Cool sky-tinted fill from the opposite-camera side; lifts shadows so
     // car flanks read instead of going pure black under hemi alone.
@@ -40,7 +40,7 @@ const TOD_PRESETS = {
     // Cool back-rim from behind/above to separate cars from track surface.
     rim:  { dir: [-0.3, 0.55, 0.85], color: 0xcfe2ff, intensity: 0.55 },
     hemi: { sky: 0xbcd4ff, ground: 0x121620, intensity: 0.55 },
-    fog: { color: 0x0c111a, fadeStart: 0.22, fadeEnd: 1.0 },
+    fog: { color: 0x1a2d4a, fadeStart: 0.22, fadeEnd: 1.0 },
     runoff: { color: 0x3a3a42 },
     trackTint: 0xf2f3fa,
     grid: { color: 0x2a3650, accentColor: 0x5a7ec0, cellSize: 30, accentEvery: 5 },
