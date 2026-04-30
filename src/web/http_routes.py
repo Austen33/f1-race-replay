@@ -3,9 +3,38 @@ import time
 from fastapi import APIRouter, BackgroundTasks, Request
 from src.web.session_manager import loading_state
 from src.web.serialization import safe_jsonable
+from src.web.cache_utils import WEB_CACHE_ROOT
 from src.f1_data import get_race_weekends_by_year
 
 router = APIRouter(prefix="/api")
+
+
+# ---------------------------------------------------------------------------
+# Web cache index — used by RacePicker to badge cached races quickly.
+# ---------------------------------------------------------------------------
+
+@router.get("/web_cache/index")
+def web_cache_index():
+    entries: list[dict] = []
+    root = WEB_CACHE_ROOT
+    if root.is_dir():
+        for path in root.glob("*.arrow"):
+            stem = path.stem  # e.g. "2025_8_R"
+            parts = stem.split("_")
+            if len(parts) != 3:
+                continue
+            try:
+                year = int(parts[0])
+                round_number = int(parts[1])
+            except ValueError:
+                continue
+            session_type = parts[2]
+            entries.append({
+                "year": year,
+                "round": round_number,
+                "session_type": session_type,
+            })
+    return {"entries": entries}
 
 
 # ---------------------------------------------------------------------------

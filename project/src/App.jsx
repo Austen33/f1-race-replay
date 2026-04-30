@@ -647,10 +647,49 @@ function TweaksPanel({ accent, setAccent, rotateX, setRotateX, rotateZ, setRotat
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(
-  <window.LIVE.LiveProvider>
+// Pre-gate: when no session is loaded yet, show RacePicker. As soon as a
+// load begins (or one is already in flight / ready), hand off to the
+// existing LOADING_GATE → App pipeline. Polls /api/session/status until
+// status becomes anything other than "idle" / "error".
+function AppRoot() {
+  const [phase, setPhase] = React.useState("checking"); // "checking" | "picker" | "app"
+  const phaseRef = React.useRef(phase);
+  React.useEffect(() => { phaseRef.current = phase; }, [phase]);
+
+  React.useEffect(() => {
+    let alive = true;
+    let timer = null;
+    const tick = async () => {
+      try {
+        const s = await window.APEX_CLIENT.get("/api/session/status");
+        if (!alive) return;
+        const st = s?.status;
+        if (st === "loading" || st === "ready") setPhase("app");
+        else if (phaseRef.current !== "app") setPhase("picker");
+      } catch {
+        if (alive && phaseRef.current !== "app") setPhase("picker");
+      }
+      if (alive && phaseRef.current !== "app") timer = setTimeout(tick, 1500);
+    };
+    tick();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, []);
+
+  if (phase === "checking") return null;
+  if (phase === "picker") {
+    return (
+      <window.RacePicker onLoadStarted={() => setPhase("app")}/>
+    );
+  }
+  return (
     <window.LOADING_GATE>
       <App />
     </window.LOADING_GATE>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <window.LIVE.LiveProvider>
+    <AppRoot/>
   </window.LIVE.LiveProvider>
 );

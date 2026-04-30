@@ -62,12 +62,14 @@ cd project
 npm install
 npm run build
 cd ..
-python -m src.web.pit_wall_server --year 2026 --round 1
+python -m src.web.pit_wall_server
 ```
 
 Then open **[http://localhost:8000/app/Pit%20Wall.html](http://localhost:8000/app/Pit%20Wall.html)**.
 
-A loading overlay tracks session startup state. Warm starts hydrate replay state from deterministic web cache only; cold starts perform full FastF1 load/build, then hydrate from cache. Once `status: "ready"` arrives on the WebSocket, the full console renders.
+With no race preselected, the app opens on the **RacePicker** screen (season selector + grid of round cards). Picking a card POSTs `/api/session/load` and hands off to the existing loading overlay until `status: "ready"`. To skip the picker and load a race directly at startup, pass `--year` and `--round` (e.g. `python -m src.web.pit_wall_server --year 2025 --round 12`).
+
+Warm starts hydrate replay state from deterministic web cache only; cold starts perform full FastF1 load/build, then hydrate from cache. Once `status: "ready"` arrives on the WebSocket, the full console renders.
 
 `npm install` is required once for the frontend bundle. After that, rerun `npm run build` whenever you change files under `project/src/`.
 
@@ -75,8 +77,8 @@ A loading overlay tracks session startup state. Warm starts hydrate replay state
 
 | Flag | Default | Description |
 |---|---|---|
-| `--year` | 2026 | Championship year |
-| `--round` | 1 | Round number (1-based) |
+| `--year` | _(unset)_ | Championship year. Omit to show RacePicker. |
+| `--round` | _(unset)_ | Round number (1-based). Omit to show RacePicker. |
 | `--session-type` | R | `R` race, `Q` qualifying, `SQ` sprint quali |
 | `--host` | 127.0.0.1 | Bind address |
 | `--port` | 8000 | Bind port |

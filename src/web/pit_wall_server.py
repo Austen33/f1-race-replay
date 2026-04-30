@@ -16,17 +16,19 @@ from src.web.http_routes import register_http
 from src.web.ws_routes import register_ws
 
 
-def build_app(year: int, round_number: int, session_type: str, cache_dir: Path) -> FastAPI:
+def build_app(year, round_number, session_type: str, cache_dir: Path) -> FastAPI:
     session_mgr = SessionManager(cache_dir=cache_dir)
     ws_hub = WSHub()
     playback = Playback(session_mgr, ws_hub)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # Startup: kick off session load on a worker thread so the server
-        # answers /api/session/status immediately.
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, session_mgr.load, year, round_number, session_type)
+        # Startup: only kick off a session load if a year+round were passed
+        # explicitly. With no preselection the frontend RacePicker handles
+        # session selection via POST /api/session/load.
+        if year is not None and round_number is not None:
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, session_mgr.load, year, round_number, session_type)
         await playback.start()
         yield
         # Shutdown
@@ -93,8 +95,10 @@ def build_app(year: int, round_number: int, session_type: str, cache_dir: Path) 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--year", type=int, default=2026)
-    p.add_argument("--round", dest="round_number", type=int, default=1)
+    # --year/--round are optional. When omitted, no session is loaded at
+    # startup and the RacePicker UI is shown when the browser connects.
+    p.add_argument("--year", type=int, default=None)
+    p.add_argument("--round", dest="round_number", type=int, default=None)
     p.add_argument("--session-type", default="R")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)

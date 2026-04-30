@@ -15,4 +15,5 @@ import "./Panels.jsx";
 import "./PanelRegistry.jsx";
 import "./PanelFrame.jsx";
 import "./hotkeyHandler.js";
+import "./RacePicker.jsx";
 import "./App.jsx";
