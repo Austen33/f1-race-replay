@@ -273,12 +273,15 @@ class Playback:
             dt = now - prev
             prev = now
 
+            from src.web.session_manager import loading_state
+            ls = loading_state()
             loaded = self.session_mgr.current()
-            if loaded is None:
-                # Session not loaded yet — push loading state
+            if loaded is None or ls["status"] == "loading":
+                # No session yet, or a new session is actively loading — push
+                # loading state so the frontend overlay appears even when an old
+                # session is still current() during the transition.
                 if now - self._last_push >= 1.0:
-                    from src.web.session_manager import loading_state
-                    await self.ws_hub.broadcast({"type": "loading", **loading_state()})
+                    await self.ws_hub.broadcast({"type": "loading", **ls})
                     self._last_push = now
                 continue
 
