@@ -196,7 +196,7 @@ function SessionPips({ year, round, cacheSet, sessionType }) {
     const active = st.id === sessionType;
     return { id: st.id, label: st.id, cached, active };
   });
-  const hasCached = pips.some((p) => p.cached);
+  const activeCached = pips.find((p) => p.active)?.cached ?? false;
   return (
     <div title="Cached sessions for this round" style={{
       display: "inline-flex", alignItems: "center", gap: 8,
@@ -206,9 +206,9 @@ function SessionPips({ year, round, cacheSet, sessionType }) {
         fontSize: 8,
         fontWeight: 800,
         letterSpacing: TH.ls.caps,
-        color: hasCached ? TH.good : TH.textFaint,
+        color: activeCached ? TH.good : TH.textFaint,
       }}>
-        CACHED
+        {activeCached ? "CACHED" : "UNCACHED"}
       </div>
       {pips.map((p) => (
         <div key={p.id} style={{
@@ -437,7 +437,7 @@ function RoundCard({
             </>
           ) : isFuture
             ? null
-            : `${SESSION_LABEL[sessionType] || "LOAD"}${currentCached ? " · CACHED" : ""} →`}
+            : `${SESSION_LABEL[sessionType] || "LOAD"} →`}
         </div>
       </div>
     </div>
