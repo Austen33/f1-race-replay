@@ -1430,6 +1430,7 @@ def get_race_weekends_by_year(year):
                 "event_name": event["EventName"],
                 "date": str(event["EventDate"].date()),
                 "country": event["Country"],
+                "location": event.get("Location", ""),
                 "type": event["EventFormat"],
                 "session_dates": session_dates,
             }

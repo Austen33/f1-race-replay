@@ -2,7 +2,7 @@
 
 const { SECTORS } = window.APEX;
 
-function TopBar({ session, lap, totalLaps, clock, weather, flagState, safetyCar, extras }) {
+function TopBar({ session, lap, totalLaps, clock, weather, flagState, safetyCar, extras, leading }) {
   const T = window.THEME;
   return (
     <div style={{
@@ -17,6 +17,7 @@ function TopBar({ session, lap, totalLaps, clock, weather, flagState, safetyCar,
       position: "relative",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        {leading}
         {/* Logo mark */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <svg width="22" height="22" viewBox="0 0 22 22">

@@ -13,6 +13,40 @@ const SESSION_TYPES = [
 const SESSION_LABEL = Object.fromEntries(SESSION_TYPES.map((s) => [s.id, s.long]));
 
 // ---------------------------------------------------------------------------
+// Country → ISO-2 → emoji flag. Uses Unicode regional indicator characters
+// so we don't ship any flag image assets.
+// ---------------------------------------------------------------------------
+
+const COUNTRY_TO_ISO2 = {
+  "australia": "AU", "austria": "AT", "azerbaijan": "AZ",
+  "bahrain": "BH", "belgium": "BE", "brazil": "BR",
+  "canada": "CA", "china": "CN",
+  "france": "FR",
+  "germany": "DE", "great britain": "GB", "united kingdom": "GB", "uk": "GB",
+  "hungary": "HU",
+  "india": "IN", "italy": "IT",
+  "japan": "JP",
+  "korea": "KR", "south korea": "KR",
+  "malaysia": "MY", "mexico": "MX", "monaco": "MC",
+  "netherlands": "NL",
+  "portugal": "PT",
+  "qatar": "QA",
+  "russia": "RU",
+  "saudi arabia": "SA", "singapore": "SG", "spain": "ES",
+  "turkey": "TR",
+  "united states": "US", "usa": "US", "united states of america": "US",
+  "vietnam": "VN",
+  "abu dhabi": "AE", "uae": "AE", "united arab emirates": "AE",
+};
+
+function flagEmoji(country) {
+  if (!country) return "";
+  const iso = COUNTRY_TO_ISO2[String(country).trim().toLowerCase()];
+  if (!iso || iso.length !== 2) return "";
+  return String.fromCodePoint(...iso.split("").map((c) => 0x1F1E6 + c.charCodeAt(0) - 65));
+}
+
+// ---------------------------------------------------------------------------
 // Date helpers
 // ---------------------------------------------------------------------------
 
@@ -28,7 +62,6 @@ function daysBetween(a, b) {
 }
 
 function classifyRound(round, today) {
-  // Pick the most-relevant per-session date if available, else event date.
   const sd = round.session_dates || {};
   const candidates = ["Race", "Sprint", "Qualifying", "Sprint Qualifying"]
     .map((k) => sd[k]).filter(Boolean);
@@ -45,7 +78,7 @@ function classifyRound(round, today) {
 // Subcomponents
 // ---------------------------------------------------------------------------
 
-function RacePickerHeader({ sessionType, onOpenSearch }) {
+function RacePickerHeader({ onOpenSearch }) {
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 14,
@@ -64,16 +97,6 @@ function RacePickerHeader({ sessionType, onOpenSearch }) {
         APEX · PITWALL
       </div>
       <div style={{ flex: 1 }}/>
-      <div style={{
-        fontFamily: TH.mono, fontSize: TH.fs.xs, color: TH.textMuted,
-        letterSpacing: TH.ls.caps,
-        display: "flex", alignItems: "center", gap: 6,
-      }}>
-        VIEWING:&nbsp;
-        <span style={{ color: TH.hot, fontWeight: 800 }}>
-          {SESSION_TYPES.find((s) => s.id === sessionType)?.label || "RACE"} SESSION
-        </span>
-      </div>
       <button onClick={onOpenSearch} style={{
         padding: "6px 10px",
         background: "transparent",
@@ -83,7 +106,7 @@ function RacePickerHeader({ sessionType, onOpenSearch }) {
         letterSpacing: TH.ls.caps, cursor: "pointer",
         display: "flex", alignItems: "center", gap: 8,
       }} title="Search races (⌘K or /)">
-        <span>⌕  SEARCH</span>
+        <span>⌕  SEARCH ALL YEARS</span>
         <span style={{
           padding: "1px 5px",
           border: "1px solid rgba(255,255,255,0.15)",
@@ -128,24 +151,36 @@ function YearSelector({ years, selected, onChange, roundCounts }) {
   );
 }
 
-function SessionTypeToggle({ value, onChange, dense = false }) {
+function SessionTypeToggle({ value, onChange }) {
   return (
-    <div style={{ display: "inline-flex", border: "1px solid rgba(255,255,255,0.1)" }}>
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
       {SESSION_TYPES.map((st) => {
         const active = st.id === value;
         return (
-          <button key={st.id} onClick={(e) => { e.stopPropagation(); onChange(st.id); }} style={{
-            padding: dense ? "3px 8px" : "6px 12px",
-            background: active ? "rgba(255,30,0,0.18)" : "transparent",
-            color: active ? TH.textStrong : TH.textMuted,
-            border: "none",
-            borderLeft: st.id !== "R" ? "1px solid rgba(255,255,255,0.08)" : "none",
+          <button key={st.id} onClick={() => onChange(st.id)} style={{
+            padding: "6px 12px 4px",
+            background: active ? TH.hot : "transparent",
+            color: active ? "#0B0B11" : TH.text,
+            border: active ? `1px solid ${TH.hot}` : "1px solid rgba(255,255,255,0.1)",
             cursor: "pointer",
-            fontFamily: TH.mono, fontSize: TH.fs.xs,
+            fontFamily: TH.mono, fontSize: TH.fs.sm,
             fontWeight: 700, letterSpacing: TH.ls.caps,
             transition: "all 120ms ease",
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+            justifyContent: "center",
+            minHeight: 38,
+            minWidth: 56,
           }}>
-            {st.label}
+            <div>{st.label}</div>
+            <div style={{
+              fontSize: 8,
+              fontWeight: 600,
+              color: active ? "rgba(11,11,17,0.7)" : "transparent",
+              letterSpacing: TH.ls.caps,
+              userSelect: "none",
+            }}>
+              SESSION
+            </div>
           </button>
         );
       })}
@@ -153,21 +188,48 @@ function SessionTypeToggle({ value, onChange, dense = false }) {
   );
 }
 
-function CacheBadge({ state }) {
-  if (state === "unknown") return null;
-  const isCached = state === "cached";
-  const color = isCached ? TH.good : TH.caution;
-  const label = isCached ? "CACHED" : "NO CACHE";
+// Session-availability pips: small dots showing which sessions have a warm
+// cache for this round. Replaces the per-card session toggle.
+function SessionPips({ year, round, cacheSet, sessionType }) {
+  const pips = SESSION_TYPES.map((st) => {
+    const cached = cacheSet.has(`${year}_${round}_${st.id}`);
+    const active = st.id === sessionType;
+    return { id: st.id, label: st.id, cached, active };
+  });
+  const hasCached = pips.some((p) => p.cached);
   return (
-    <div style={{
-      display: "inline-flex", alignItems: "center",
-      padding: "2px 6px 2px 8px",
-      borderLeft: `2px solid ${color}`,
-      background: "rgba(0,0,0,0.25)",
-      color, fontFamily: TH.mono, fontSize: TH.fs.xs,
-      fontWeight: 700, letterSpacing: TH.ls.caps,
+    <div title="Cached sessions for this round" style={{
+      display: "inline-flex", alignItems: "center", gap: 8,
     }}>
-      {label}
+      <div style={{
+        fontFamily: TH.mono,
+        fontSize: 8,
+        fontWeight: 800,
+        letterSpacing: TH.ls.caps,
+        color: hasCached ? TH.good : TH.textFaint,
+      }}>
+        CACHED
+      </div>
+      {pips.map((p) => (
+        <div key={p.id} style={{
+          display: "inline-flex", alignItems: "center", gap: 4,
+          padding: "1px 5px",
+          border: p.active
+            ? `1px solid ${p.cached ? TH.good : "rgba(255,255,255,0.18)"}`
+            : "1px solid rgba(255,255,255,0.06)",
+          background: p.active ? "rgba(255,30,0,0.06)" : "transparent",
+          fontFamily: TH.mono, fontSize: 9,
+          fontWeight: 700, letterSpacing: TH.ls.caps,
+          color: p.cached ? TH.good : TH.textFaint,
+        }}>
+          <span style={{
+            width: 5, height: 5, borderRadius: "50%",
+            background: p.cached ? TH.good : "rgba(180,180,200,0.25)",
+            boxShadow: p.cached ? `0 0 4px ${TH.good}` : "none",
+          }}/>
+          {p.label}
+        </div>
+      ))}
     </div>
   );
 }
@@ -235,22 +297,24 @@ function StatusBadge({ classification, isNext }) {
 }
 
 function RoundCard({
-  round, year, sessionType, onPick, onChangeSessionType,
-  isSelected, isLoading, isDisabled, isFuture, isNext,
-  cacheState, classification,
+  round, year, sessionType, cacheSet, onPick,
+  isSelected, isLoading, isDisabled, isFuture, isNext, classification,
 }) {
   const [hover, setHover] = React.useState(false);
 
   const accentColor = isNext
     ? TH.hot
     : (isSelected ? TH.hot : (hover ? "rgba(255,30,0,0.7)" : "transparent"));
-  const accentWidth = (isSelected || isNext || hover) ? 4 : 4;
-  const isPast = classification.state === "past" || classification.state === "live";
   const interactive = !isDisabled;
+  const flag = flagEmoji(round.country);
+  const locationLabel = (round.circuit_name || round.location || "").toUpperCase();
 
   const bgHover = hover && interactive
     ? "linear-gradient(180deg, rgba(36,28,40,0.92) 0%, rgba(20,16,24,0.95) 100%)"
     : TH.surface2;
+
+  // Is the currently-selected session type cached for this round?
+  const currentCached = cacheSet.has(`${year}_${round.round_number}_${sessionType}`);
 
   return (
     <div
@@ -269,7 +333,7 @@ function RoundCard({
         padding: "14px 16px 12px 14px",
         background: bgHover,
         border: "1px solid rgba(255,255,255,0.08)",
-        borderLeft: `${accentWidth}px solid ${accentColor}`,
+        borderLeft: `4px solid ${accentColor}`,
         cursor: interactive ? "pointer" : "not-allowed",
         opacity: isFuture ? 0.55 : (isDisabled && !isLoading ? 0.5 : 1),
         fontFamily: TH.mono,
@@ -281,7 +345,7 @@ function RoundCard({
           ? "0 6px 20px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,30,0,0.15)"
           : "none",
         display: "flex", flexDirection: "column", gap: 6,
-        minHeight: 138,
+        minHeight: 132,
         outline: "none",
       }}
     >
@@ -302,12 +366,9 @@ function RoundCard({
           fontSize: TH.fs.xs, color: TH.textMuted,
           letterSpacing: TH.ls.caps,
         }}>
-          ROUND {String(round.round_number).padStart(2, "0")} · {year}
+          ROUND {String(round.round_number).padStart(2, "0")}
         </div>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <StatusBadge classification={classification} isNext={isNext}/>
-          {isPast && <CacheBadge state={cacheState}/>}
-        </div>
+        <StatusBadge classification={classification} isNext={isNext}/>
       </div>
 
       {/* Title */}
@@ -317,27 +378,49 @@ function RoundCard({
       }}>
         {(round.event_name || "").toUpperCase()}
       </div>
+
+      {locationLabel && (
+        <div style={{
+          fontSize: TH.fs.xs,
+          color: TH.hot,
+          letterSpacing: TH.ls.caps,
+          fontWeight: 700,
+        }}>
+          {locationLabel}
+        </div>
+      )}
+
+      {/* Country (with flag) + date */}
       <div style={{
         fontSize: TH.fs.sm, color: TH.textMuted,
         letterSpacing: TH.ls.body,
+        display: "flex", alignItems: "center", gap: 6,
       }}>
-        {(round.country || "").toUpperCase()}
-        {round.date ? ` · ${round.date}` : ""}
+        {flag && <span style={{ fontSize: 14, lineHeight: 1 }}>{flag}</span>}
+        <span>
+          {(round.country || "").toUpperCase()}
+          {round.date ? ` · ${round.date}` : ""}
+        </span>
       </div>
 
       <div style={{ flex: 1 }}/>
 
-      {/* Bottom row: per-card session toggle + load CTA */}
+      {/* Bottom row: session-availability pips + load CTA */}
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "center",
         gap: 8, position: "relative", zIndex: 2,
       }}>
-        <SessionTypeToggle value={sessionType} onChange={onChangeSessionType} dense/>
+        <SessionPips
+          year={year}
+          round={round.round_number}
+          cacheSet={cacheSet}
+          sessionType={sessionType}
+        />
         <div style={{
           fontSize: TH.fs.xs, fontWeight: 700,
           color: isLoading ? TH.hot
             : isFuture ? TH.caution
-            : (hover ? TH.hot : TH.textFaint),
+            : (hover ? TH.hot : (currentCached ? TH.good : TH.textFaint)),
           letterSpacing: TH.ls.caps,
           display: "flex", alignItems: "center", gap: 6,
           transition: "color 120ms ease",
@@ -353,8 +436,8 @@ function RoundCard({
               STARTING…
             </>
           ) : isFuture
-            ? "SCHEDULED · NO DATA"
-            : `${SESSION_LABEL[sessionType] || "LOAD"} →`}
+            ? null
+            : `${SESSION_LABEL[sessionType] || "LOAD"}${currentCached ? " · CACHED" : ""} →`}
         </div>
       </div>
     </div>
@@ -374,10 +457,10 @@ function StatusLine({ children, tone = "muted" }) {
 }
 
 // ---------------------------------------------------------------------------
-// Command palette
+// Command palette — searches across ALL years.
 // ---------------------------------------------------------------------------
 
-function CommandPalette({ rounds, year, onClose, onPick }) {
+function CommandPalette({ allRoundsByYear, years, loadingYears, onClose, onPick }) {
   const [q, setQ] = React.useState("");
   const [idx, setIdx] = React.useState(0);
   const inputRef = React.useRef(null);
@@ -386,14 +469,28 @@ function CommandPalette({ rounds, year, onClose, onPick }) {
     if (inputRef.current) inputRef.current.focus();
   }, []);
 
+  // Flatten { year: [rounds] } → [{ year, ...round }]
+  const flat = React.useMemo(() => {
+    const out = [];
+    for (const y of years) {
+      const rs = allRoundsByYear[y] || [];
+      for (const r of rs) out.push({ year: y, round: r });
+    }
+    return out;
+  }, [allRoundsByYear, years]);
+
   const matches = React.useMemo(() => {
     const needle = q.trim().toLowerCase();
-    if (!needle) return rounds.slice(0, 12);
-    return rounds.filter((r) => {
-      const hay = `${r.event_name || ""} ${r.country || ""} round ${r.round_number}`.toLowerCase();
+    const haystack = flat;
+    if (!needle) {
+      // Default: show recent years first, up to 20 entries.
+      return haystack.slice(0, 20);
+    }
+    return haystack.filter(({ year, round }) => {
+      const hay = `${round.event_name || ""} ${round.country || ""} ${round.location || ""} ${round.circuit_name || ""} round ${round.round_number} ${year}`.toLowerCase();
       return hay.includes(needle);
-    }).slice(0, 12);
-  }, [q, rounds]);
+    }).slice(0, 30);
+  }, [q, flat]);
 
   React.useEffect(() => { setIdx(0); }, [q]);
 
@@ -403,10 +500,12 @@ function CommandPalette({ rounds, year, onClose, onPick }) {
     if (e.key === "ArrowUp")   { e.preventDefault(); setIdx((i) => Math.max(0, i - 1)); return; }
     if (e.key === "Enter") {
       e.preventDefault();
-      const r = matches[idx];
-      if (r) onPick(r);
+      const m = matches[idx];
+      if (m) onPick(m);
     }
   };
+
+  const stillLoading = loadingYears.size > 0;
 
   return (
     <div onClick={onClose} style={{
@@ -415,7 +514,7 @@ function CommandPalette({ rounds, year, onClose, onPick }) {
       paddingTop: "10vh",
     }}>
       <div onClick={(e) => e.stopPropagation()} style={{
-        width: "min(560px, 92vw)",
+        width: "min(620px, 92vw)",
         background: TH.surface3,
         border: "1px solid rgba(255,30,0,0.4)",
         boxShadow: "0 30px 80px rgba(0,0,0,0.6)",
@@ -426,7 +525,7 @@ function CommandPalette({ rounds, year, onClose, onPick }) {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={onKey}
-          placeholder={`Search ${year} races — try "italy" or "round 5"`}
+          placeholder={`Search every year — try "italy 2023", "monaco", "round 5"`}
           style={{
             width: "100%", padding: "14px 16px",
             background: "transparent", border: "none",
@@ -436,16 +535,28 @@ function CommandPalette({ rounds, year, onClose, onPick }) {
             letterSpacing: TH.ls.body,
           }}
         />
-        <div style={{ maxHeight: "50vh", overflow: "auto" }}>
-          {matches.length === 0 && (
+        {stillLoading && (
+          <div style={{
+            padding: "6px 16px",
+            fontSize: TH.fs.xs, color: TH.textFaint,
+            letterSpacing: TH.ls.caps,
+            borderBottom: "1px solid rgba(255,255,255,0.04)",
+          }}>
+            INDEXING {loadingYears.size} MORE YEAR{loadingYears.size === 1 ? "" : "S"}…
+          </div>
+        )}
+        <div style={{ maxHeight: "55vh", overflow: "auto" }}>
+          {matches.length === 0 && !stillLoading && (
             <div style={{ padding: 16, color: TH.textFaint, fontSize: TH.fs.sm }}>
               NO MATCHES.
             </div>
           )}
-          {matches.map((r, i) => {
+          {matches.map((m, i) => {
+            const { year, round } = m;
             const active = i === idx;
+            const flag = flagEmoji(round.country);
             return (
-              <div key={r.round_number} onClick={() => onPick(r)} onMouseEnter={() => setIdx(i)} style={{
+              <div key={`${year}-${round.round_number}`} onClick={() => onPick(m)} onMouseEnter={() => setIdx(i)} style={{
                 padding: "10px 16px",
                 background: active ? "rgba(255,30,0,0.12)" : "transparent",
                 borderLeft: active ? `3px solid ${TH.hot}` : "3px solid transparent",
@@ -453,11 +564,18 @@ function CommandPalette({ rounds, year, onClose, onPick }) {
                 display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12,
               }}>
                 <div>
-                  <div style={{ fontSize: TH.fs.sm, color: TH.textStrong, fontWeight: 700 }}>
-                    {(r.event_name || "").toUpperCase()}
+                  <div style={{
+                    fontSize: TH.fs.sm, color: TH.textStrong, fontWeight: 700,
+                    display: "flex", alignItems: "center", gap: 6,
+                  }}>
+                    {flag && <span style={{ fontSize: 14 }}>{flag}</span>}
+                    {(round.event_name || "").toUpperCase()}
                   </div>
                   <div style={{ fontSize: TH.fs.xs, color: TH.textMuted, letterSpacing: TH.ls.body }}>
-                    R{String(r.round_number).padStart(2, "0")} · {(r.country || "").toUpperCase()} · {r.date}
+                    {year} · R{String(round.round_number).padStart(2, "0")}
+                    {round.location ? ` · ${(round.location || "").toUpperCase()}` : ""}
+                    {round.country ? ` · ${(round.country || "").toUpperCase()}` : ""}
+                    {round.date ? ` · ${round.date}` : ""}
                   </div>
                 </div>
                 {active && (
@@ -496,14 +614,13 @@ function RacePicker({ onLoadStarted }) {
   const [seasonsState, setSeasonsState] = React.useState({ loading: true, error: null, years: [] });
   const [year, setYear] = React.useState(null);
   const [sessionType, setSessionType] = React.useState("R");
-  const [roundsState, setRoundsState] = React.useState({ loading: false, error: null, rounds: [] });
-  const [roundCounts, setRoundCounts] = React.useState({});
+  const [allRoundsByYear, setAllRoundsByYear] = React.useState({}); // year -> rounds[]
+  const [yearError, setYearError] = React.useState({});             // year -> err string
+  const [loadingYears, setLoadingYears] = React.useState(() => new Set());
   const [cacheSet, setCacheSet] = React.useState(() => new Set());
   const [selecting, setSelecting] = React.useState(null);
   const [paletteOpen, setPaletteOpen] = React.useState(false);
 
-  // Today (used to classify past/future). Refreshes once per minute so the
-  // "live" window stays correct across long-running tabs.
   const [now, setNow] = React.useState(() => new Date());
   React.useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 60_000);
@@ -525,7 +642,7 @@ function RacePicker({ onLoadStarted }) {
     return () => { alive = false; };
   }, []);
 
-  // Cache index — single fetch, reused for all year/session combos
+  // Cache index — single fetch
   React.useEffect(() => {
     let alive = true;
     APEX.get("/api/web_cache/index").then((res) => {
@@ -539,30 +656,60 @@ function RacePicker({ onLoadStarted }) {
     return () => { alive = false; };
   }, []);
 
-  // Rounds for selected year
-  React.useEffect(() => {
-    if (year == null) return;
-    let alive = true;
-    setRoundsState({ loading: true, error: null, rounds: [] });
-    APEX.get(`/api/seasons/${year}/rounds`).then((res) => {
-      if (!alive) return;
-      if (res && res.error) {
-        setRoundsState({ loading: false, error: String(res.error), rounds: [] });
-        return;
-      }
-      const rounds = Array.isArray(res) ? res : (res?.rounds || []);
-      setRoundsState({ loading: false, error: null, rounds });
-      setRoundCounts((prev) => ({ ...prev, [year]: rounds.length }));
-    }).catch((e) => {
-      if (!alive) return;
-      setRoundsState({ loading: false, error: String(e?.message || e), rounds: [] });
+  // Lazy-load rounds for any year on demand. Used by both the visible grid
+  // (single year) and the command palette (all years).
+  const ensureYearLoaded = React.useCallback((y) => {
+    if (y == null) return;
+    if (allRoundsByYear[y] != null) return;
+    if (loadingYears.has(y)) return;
+    setLoadingYears((prev) => {
+      const next = new Set(prev); next.add(y); return next;
     });
-    return () => { alive = false; };
-  }, [year]);
+    APEX.get(`/api/seasons/${y}/rounds`).then((res) => {
+      const list = res && res.error
+        ? []
+        : (Array.isArray(res) ? res : (res?.rounds || []));
+      setAllRoundsByYear((prev) => ({ ...prev, [y]: list }));
+      if (res && res.error) {
+        setYearError((prev) => ({ ...prev, [y]: String(res.error) }));
+      }
+    }).catch((e) => {
+      setAllRoundsByYear((prev) => ({ ...prev, [y]: [] }));
+      setYearError((prev) => ({ ...prev, [y]: String(e?.message || e) }));
+    }).finally(() => {
+      setLoadingYears((prev) => {
+        const next = new Set(prev); next.delete(y); return next;
+      });
+    });
+  }, [allRoundsByYear, loadingYears]);
 
-  // Classify rounds + find next race
+  // Selected-year rounds
+  React.useEffect(() => {
+    if (year != null) ensureYearLoaded(year);
+  }, [year, ensureYearLoaded]);
+
+  // Palette open → fetch every year in the background.
+  React.useEffect(() => {
+    if (!paletteOpen) return;
+    for (const y of seasonsState.years) ensureYearLoaded(y);
+  }, [paletteOpen, seasonsState.years, ensureYearLoaded]);
+
+  const roundCounts = React.useMemo(() => {
+    const out = {};
+    for (const y of Object.keys(allRoundsByYear)) {
+      const arr = allRoundsByYear[y];
+      if (Array.isArray(arr)) out[y] = arr.length;
+    }
+    return out;
+  }, [allRoundsByYear]);
+
+  const currentRounds = year != null ? (allRoundsByYear[year] || null) : null;
+  const currentLoading = year != null && currentRounds == null && loadingYears.has(year);
+  const currentError = year != null ? yearError[year] : null;
+
   const { classifiedRounds, nextRoundNumber } = React.useMemo(() => {
-    const list = roundsState.rounds.map((r) => ({
+    if (!currentRounds) return { classifiedRounds: [], nextRoundNumber: null };
+    const list = currentRounds.map((r) => ({
       round: r,
       classification: classifyRound(r, now),
     }));
@@ -579,13 +726,12 @@ function RacePicker({ onLoadStarted }) {
       if (live) nextRoundNum = live.round.round_number;
     }
     return { classifiedRounds: list, nextRoundNumber: nextRoundNum };
-  }, [roundsState.rounds, now]);
+  }, [currentRounds, now]);
 
-  // Picking a race
-  const handlePick = async (round) => {
+  const handlePickFromGrid = async (round) => {
     if (selecting != null) return;
     const cls = classifyRound(round, now);
-    if (cls.state === "future") return; // hard-block — no data yet
+    if (cls.state === "future") return;
     setSelecting(round.round_number);
     try {
       await APEX.post("/api/session/load", {
@@ -594,11 +740,31 @@ function RacePicker({ onLoadStarted }) {
       if (onLoadStarted) onLoadStarted({ year, round: round.round_number, session_type: sessionType });
     } catch (e) {
       setSelecting(null);
-      setRoundsState((s) => ({ ...s, error: `Load failed: ${e?.message || e}` }));
+      setYearError((prev) => ({ ...prev, [year]: `Load failed: ${e?.message || e}` }));
     }
   };
 
-  // Global hotkeys: ⌘K / Ctrl+K / "/"
+  // From the palette: pick may target any year. Switch active year first
+  // for context, then dispatch the load.
+  const handlePickFromPalette = async ({ year: pickYear, round }) => {
+    setPaletteOpen(false);
+    setYear(pickYear);
+    const cls = classifyRound(round, now);
+    if (cls.state === "future") return;
+    if (selecting != null) return;
+    setSelecting(round.round_number);
+    try {
+      await APEX.post("/api/session/load", {
+        year: pickYear, round: round.round_number, session_type: sessionType,
+      });
+      if (onLoadStarted) onLoadStarted({ year: pickYear, round: round.round_number, session_type: sessionType });
+    } catch (e) {
+      setSelecting(null);
+      setYearError((prev) => ({ ...prev, [pickYear]: `Load failed: ${e?.message || e}` }));
+    }
+  };
+
+  // Hotkeys
   React.useEffect(() => {
     const onKey = (e) => {
       if (paletteOpen) return;
@@ -623,7 +789,6 @@ function RacePicker({ onLoadStarted }) {
       overflow: "hidden",
     }} className="scanline">
       <RacePickerHeader
-        sessionType={sessionType}
         onOpenSearch={() => setPaletteOpen(true)}
       />
 
@@ -647,38 +812,25 @@ function RacePicker({ onLoadStarted }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{
             fontSize: TH.fs.xs, color: TH.textFaint, letterSpacing: TH.ls.wide,
-          }}>SESSION (DEFAULT FOR EACH RACE)</div>
+          }}>SESSION</div>
           <SessionTypeToggle value={sessionType} onChange={setSessionType}/>
-        </div>
-
-        <div style={{ flex: 1 }}/>
-
-        <div style={{
-          fontSize: TH.fs.xs, color: TH.textFaint, letterSpacing: TH.ls.caps,
-          alignSelf: "flex-end", paddingBottom: 4,
-        }}>
-          PRESS&nbsp;
-          <span style={{ color: TH.textMuted, padding: "1px 5px", border: "1px solid rgba(255,255,255,0.15)" }}>/</span>
-          &nbsp;TO SEARCH
         </div>
       </div>
 
       <div style={{ flex: 1, overflow: "auto", padding: "20px 28px 32px" }}>
-        {roundsState.loading && <StatusLine>LOADING ROUNDS FOR {year}…</StatusLine>}
-        {roundsState.error && <StatusLine tone="error">{roundsState.error}</StatusLine>}
-        {!roundsState.loading && !roundsState.error && classifiedRounds.length === 0 && year != null && (
+        {currentLoading && <StatusLine>LOADING ROUNDS FOR {year}…</StatusLine>}
+        {currentError && <StatusLine tone="error">{currentError}</StatusLine>}
+        {!currentLoading && !currentError && currentRounds && classifiedRounds.length === 0 && year != null && (
           <StatusLine>NO ROUNDS AVAILABLE FOR {year}.</StatusLine>
         )}
 
-        {!roundsState.loading && classifiedRounds.length > 0 && (
+        {!currentLoading && classifiedRounds.length > 0 && (
           <div style={{
             display: "grid",
             gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
             gap: 12,
           }}>
             {classifiedRounds.map(({ round, classification }) => {
-              const key = `${year}_${round.round_number}_${sessionType}`;
-              const cacheState = cacheSet.has(key) ? "cached" : "missing";
               const isFuture = classification.state === "future";
               return (
                 <RoundCard
@@ -686,14 +838,13 @@ function RacePicker({ onLoadStarted }) {
                   round={round}
                   year={year}
                   sessionType={sessionType}
-                  onPick={handlePick}
-                  onChangeSessionType={setSessionType}
+                  cacheSet={cacheSet}
+                  onPick={handlePickFromGrid}
                   isSelected={selecting === round.round_number}
                   isLoading={selecting === round.round_number}
                   isDisabled={selecting != null && selecting !== round.round_number || isFuture}
                   isFuture={isFuture}
                   isNext={nextRoundNumber === round.round_number}
-                  cacheState={cacheState}
                   classification={classification}
                 />
               );
@@ -704,17 +855,14 @@ function RacePicker({ onLoadStarted }) {
 
       {paletteOpen && (
         <CommandPalette
-          rounds={roundsState.rounds}
-          year={year}
+          allRoundsByYear={allRoundsByYear}
+          years={seasonsState.years}
+          loadingYears={loadingYears}
           onClose={() => setPaletteOpen(false)}
-          onPick={(r) => {
-            setPaletteOpen(false);
-            handlePick(r);
-          }}
+          onPick={handlePickFromPalette}
         />
       )}
 
-      {/* Inline keyframes — adds spinner without touching theme.js */}
       <style>{`
         @keyframes apex-spin {
           from { transform: rotate(0deg); }

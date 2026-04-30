@@ -508,6 +508,21 @@ function App() {
         weather={weather}
         flagState={flagState}
         safetyCar={!!safetyCar}
+        leading={
+          window.APEX_CHANGE_RACE ? (
+            <button onClick={() => window.APEX_CHANGE_RACE && window.APEX_CHANGE_RACE()} style={{
+              padding: "5px 9px",
+              background: "rgba(255,30,0,0.08)",
+              border: "1px solid rgba(255,30,0,0.45)",
+              color: window.THEME.textStrong,
+              fontFamily: window.THEME.mono, fontSize: window.THEME.fs.xs,
+              fontWeight: 700, letterSpacing: window.THEME.ls.caps,
+              cursor: "pointer",
+            }} title="Pick a different race">
+              ← CHANGE RACE
+            </button>
+          ) : null
+        }
         extras={<window.PanelsMenu layout={layout} registry={registry}/>}
       />
 
@@ -675,12 +690,24 @@ function AppRoot() {
     return () => { alive = false; if (timer) clearTimeout(timer); };
   }, []);
 
+  // Keep hook order stable across phase changes; only expose the global helper
+  // while the main app is mounted.
+  React.useEffect(() => {
+    if (phase !== "app") {
+      window.APEX_CHANGE_RACE = null;
+      return undefined;
+    }
+    window.APEX_CHANGE_RACE = () => setPhase("picker");
+    return () => { window.APEX_CHANGE_RACE = null; };
+  }, [phase]);
+
   if (phase === "checking") return null;
   if (phase === "picker") {
     return (
       <window.RacePicker onLoadStarted={() => setPhase("app")}/>
     );
   }
+
   return (
     <window.LOADING_GATE>
       <App />
