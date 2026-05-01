@@ -98,6 +98,12 @@ function App() {
 
   // Toggles
   const [showLabels, setShowLabels] = React.useState(true);
+  const [miniMapVisible, setMiniMapVisible] = React.useState(() => {
+    try { return localStorage.getItem("apex.miniMapVisible") === "1"; } catch { return false; }
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem("apex.miniMapVisible", miniMapVisible ? "1" : "0"); } catch {}
+  }, [miniMapVisible]);
   const [compareChannel, setCompareChannel] = React.useState("speed");
   const [geometryVersion, setGeometryVersion] = React.useState(() => window.APEX?.geometryVersion || 0);
 
@@ -160,6 +166,7 @@ function App() {
       setViewMode,
       () => setCameraControlsCollapsed((v) => !v),
       () => { if (window.APEX_HUD_TOGGLE?.current) window.APEX_HUD_TOGGLE.current(); },
+      () => setMiniMapVisible((v) => !v),
     );
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -389,7 +396,25 @@ function App() {
             viewMode={viewMode} setViewMode={setViewMode}
             collapsed={cameraControlsCollapsed}
             setCollapsed={setCameraControlsCollapsed}
+            miniMapVisible={miniMapVisible}
+            setMiniMapVisible={
+              layout.maximized === "track"
+              && (viewMode === "webgl" || viewMode === "follow" || viewMode === "pov")
+                ? setMiniMapVisible : null
+            }
           />
+          {miniMapVisible
+            && (viewMode === "webgl" || viewMode === "follow" || viewMode === "pov") && (
+            <window.MiniMap
+              standings={standings}
+              pinned={pinned}
+              secondary={secondary}
+              onPickDriver={(code, e) => {
+                if (e && e.shiftKey) onShiftPick(code);
+                else onPick(code);
+              }}
+            />
+          )}
         </div>
 
         {/* Corner ticks */}

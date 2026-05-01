@@ -328,6 +328,8 @@ function CameraControls({
   setViewMode,
   collapsed,
   setCollapsed,
+  miniMapVisible,
+  setMiniMapVisible,
 }) {
   const T = window.THEME;
   const [quality, setQuality] = React.useState(() => window.APEX?.QUALITY || "high");
@@ -435,6 +437,9 @@ function CameraControls({
       )}
       <div style={{ height: 1, background: "rgba(255,255,255,0.05)", margin: "4px 0" }}/>
       <Toggle label="LABELS"       on={showLabels}   onChange={setShowLabels} hotkey="L"/>
+      {setMiniMapVisible && (
+        <Toggle label="FIELD MAP" on={!!miniMapVisible} onChange={setMiniMapVisible} hotkey="N"/>
+      )}
     </div>
   );
 }

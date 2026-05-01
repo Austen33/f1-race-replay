@@ -8,6 +8,7 @@ import "./loading_gate.jsx";
 import "./data.jsx";
 import "./IsoTrack.jsx";
 import "./Track3D.jsx";
+import "./MiniMap.jsx";
 import "./Leaderboard.jsx";
 import "./Telemetry.jsx";
 import "./Controls.jsx";

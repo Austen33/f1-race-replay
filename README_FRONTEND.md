@@ -469,7 +469,7 @@ Top-right floating overlay, collapsible with `C`.
 - **View mode** — segmented toggle `GL` / `SVG` / `CHASE` / `POV` / `TOP`.
 - **QUALITY** — `LOW` / `MED` / `HIGH` for WebGL modes (`GL`, `CHASE`, `POV`).
 - **TILT / ROT / ZOOM** sliders for legacy SVG modes.
-- **LABELS** toggle (`L`) · **HIDE [C]** collapse · **RESET** to broadcast preset.
+- **LABELS** toggle (`L`) · **FIELD MAP** toggle (`N`, off by default; toggle button only appears when the track panel is maximised in `GL`/`CHASE`/`POV`) · **HIDE [C]** collapse · **RESET** to broadcast preset.
 
 In `POV`, the floating HUD is replaced by the steering-wheel display. `H` toggles the follow-cam overlay; `W` opens the wheel-HUD tuning panel.
 
@@ -489,6 +489,7 @@ From [hotkeyHandler.js](project/src/hotkeyHandler.js) — ref-based to avoid sta
 | `1` / `2` / `3` / `4` | Set speed directly |
 | `R` | Restart (seek to 0) |
 | `L` | Toggle driver labels |
+| `N` | Toggle persistent mini-map (active in `GL` / `CHASE` / `POV`) |
 | `M` | Toggle view mode (`TOP` ↔ `WEBGL`) |
 | `D` | Force WebGL view |
 | `F` | Toggle chase camera (`FOLLOW` ↔ `WEBGL`) |
