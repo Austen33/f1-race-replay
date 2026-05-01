@@ -11,4 +11,5 @@ window.PANEL_REGISTRY = [
   { id: "driverCard",   title: "PRIMARY DRIVER" },
   { id: "driverCard2",  title: "COMPARE DRIVER" },
   { id: "gap",          title: "GAP VISUALIZATION" },
+  { id: "gapHistory",   title: "GAP HISTORY" },
 ];

@@ -142,6 +142,280 @@ function GapViz({ standings, pinned }) {
   );
 }
 
+// Spaghetti chart: every driver as a thin colored line, x = lap, y = gap to leader.
+// Pit stops appear as small dots; SC/VSC/red bands as faint vertical washes.
+function GapHistory({ pinned, secondary, onPick, onShiftPick, lap }) {
+  const T = window.THEME;
+  const [data, setData] = React.useState(null);
+  const [loadErr, setLoadErr] = React.useState(null);
+  const [hoverCode, setHoverCode] = React.useState(null);
+  const [hoverPos, setHoverPos] = React.useState(null); // { x, y, lap, gap }
+  const containerRef = React.useRef(null);
+  const [size, setSize] = React.useState({ w: 360, h: 220 });
+
+  // Retry on failure with backoff — session may not be loaded yet when this
+  // panel first mounts, and the endpoint 404s until it is.
+  React.useEffect(() => {
+    let cancelled = false;
+    let attempt = 0;
+    let timer = null;
+    const tryFetch = () => {
+      if (cancelled) return;
+      window.APEX_CLIENT.get("/api/session/gap_to_leader")
+        .then((res) => {
+          if (cancelled) return;
+          setData(res);
+          setLoadErr(null);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setLoadErr(String(err?.message || err));
+          attempt++;
+          const delay = Math.min(8000, 1000 * (2 ** Math.min(attempt, 3)));
+          timer = setTimeout(tryFetch, delay);
+        });
+    };
+    tryFetch();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, []);
+
+  // Track container size so the SVG fills the panel.
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        const cr = e.contentRect;
+        setSize({ w: Math.max(160, cr.width), h: Math.max(140, cr.height) });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const padL = 30, padR = 10, padT = 8, padB = 22;
+  const W = size.w;
+  const H = size.h;
+  const innerW = Math.max(10, W - padL - padR);
+  const innerH = Math.max(10, H - padT - padB);
+
+  // Compute a y scale that ignores extreme outliers (lapped + retired tails)
+  // by clipping at the 95th percentile of finite gaps.
+  const { totalLaps, lines, yMax, yTicks, xTicks } = React.useMemo(() => {
+    if (!data || !data.drivers || !data.total_laps) {
+      return { totalLaps: 0, lines: [], yMax: 1, yTicks: [], xTicks: [] };
+    }
+    const tl = data.total_laps;
+    const all = [];
+    for (const drv of data.drivers) {
+      for (const g of drv.gaps) if (g != null && isFinite(g)) all.push(g);
+    }
+    all.sort((a, b) => a - b);
+    let cap = 1;
+    if (all.length) {
+      const p95 = all[Math.min(all.length - 1, Math.floor(all.length * 0.95))];
+      cap = Math.max(10, Math.ceil(p95 / 10) * 10);
+    }
+    const lns = data.drivers.map((drv) => {
+      const code = drv.code;
+      const dEntry = (window.APEX.DRIVERS || []).find((x) => x.code === code);
+      const team = dEntry ? window.APEX.TEAMS[dEntry.team] : null;
+      const color = team?.color || FALLBACK_TEAM_COLOR;
+      const pts = [];
+      for (let i = 0; i < drv.gaps.length; i++) {
+        const g = drv.gaps[i];
+        if (g == null) { pts.push(null); continue; }
+        const x = padL + (innerW * (i + 1)) / Math.max(1, tl);
+        const yClipped = Math.min(g, cap);
+        const y = padT + (innerH * yClipped) / cap;
+        pts.push({ x, y, lap: i + 1, gap: g });
+      }
+      const pitDots = (drv.pit_laps || []).map((lapNo) => {
+        const idx = lapNo - 1;
+        return idx >= 0 && idx < pts.length ? pts[idx] : null;
+      }).filter(Boolean);
+      return { code, color, pts, pitDots };
+    });
+    // y ticks
+    const tickStep = cap <= 30 ? 5 : cap <= 60 ? 10 : cap <= 120 ? 20 : 30;
+    const yt = [];
+    for (let v = 0; v <= cap; v += tickStep) yt.push(v);
+    // x ticks every ~5 laps
+    const xStep = tl <= 20 ? 5 : tl <= 60 ? 10 : 20;
+    const xt = [];
+    for (let v = xStep; v <= tl; v += xStep) xt.push(v);
+    return { totalLaps: tl, lines: lns, yMax: cap, yTicks: yt, xTicks: xt };
+  }, [data, innerW, innerH]);
+
+  function buildPath(pts) {
+    let d = "";
+    let started = false;
+    for (const p of pts) {
+      if (p == null) { started = false; continue; }
+      d += (started ? "L" : "M") + p.x.toFixed(1) + "," + p.y.toFixed(1);
+      started = true;
+    }
+    return d;
+  }
+
+  const orderedLines = React.useMemo(() => {
+    // Render dimmed lines first, then highlighted on top.
+    const dim = [], hot = [];
+    for (const ln of lines) {
+      if (ln.code === pinned || ln.code === secondary || ln.code === hoverCode) hot.push(ln);
+      else dim.push(ln);
+    }
+    return [...dim, ...hot];
+  }, [lines, pinned, secondary, hoverCode]);
+
+  const onMouseMove = React.useCallback((e) => {
+    if (!totalLaps) return;
+    const svg = e.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    if (mx < padL || mx > W - padR || my < padT || my > H - padB) {
+      setHoverCode(null); setHoverPos(null); return;
+    }
+    // Find nearest line by Euclidean distance to its segment polyline.
+    let bestCode = null, bestPt = null, bestD2 = 64; // 8px radius
+    for (const ln of lines) {
+      for (const p of ln.pts) {
+        if (!p) continue;
+        const dx = p.x - mx, dy = p.y - my;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestD2) { bestD2 = d2; bestCode = ln.code; bestPt = p; }
+      }
+    }
+    setHoverCode(bestCode);
+    setHoverPos(bestPt ? { x: bestPt.x, y: bestPt.y, lap: bestPt.lap, gap: bestPt.gap } : null);
+  }, [lines, totalLaps, W, H]);
+
+  const onMouseLeave = React.useCallback(() => {
+    setHoverCode(null); setHoverPos(null);
+  }, []);
+
+  const onClick = React.useCallback((e) => {
+    if (!hoverCode) return;
+    if (e.shiftKey && onShiftPick) onShiftPick(hoverCode);
+    else if (onPick) onPick(hoverCode);
+  }, [hoverCode, onPick, onShiftPick]);
+
+  // Current-lap marker
+  const lapX = totalLaps > 0
+    ? padL + (innerW * Math.max(0, Math.min(totalLaps, lap || 0))) / totalLaps
+    : null;
+
+  return (
+    <div className="apex-panel-mount" style={{
+      background: T.surface,
+      border: T.border,
+      display: "flex", flexDirection: "column",
+      minHeight: 220,
+    }}>
+      <PanelHeader title="GAP HISTORY" meta={totalLaps ? `${lines.length} DRIVERS · ${totalLaps} L` : ""}/>
+      <div ref={containerRef} style={{ flex: 1, position: "relative", padding: 6 }}>
+        {!data && (
+          <div style={{ padding: 14, fontFamily: T.mono, fontSize: T.fs.xs, color: T.textDim, letterSpacing: T.ls.caps }}>
+            {loadErr ? `RETRYING… (${loadErr})` : "LOADING…"}
+          </div>
+        )}
+        {data && totalLaps > 0 && (
+          <svg
+            width={W} height={H}
+            style={{ display: "block", cursor: hoverCode ? "pointer" : "default" }}
+            onMouseMove={onMouseMove}
+            onMouseLeave={onMouseLeave}
+            onClick={onClick}
+          >
+            {/* SC / VSC / red bands */}
+            {(data.sc_bands || []).map((band, i) => {
+              const x0 = padL + (innerW * Math.max(0, band.start_lap)) / totalLaps;
+              const x1 = padL + (innerW * Math.min(totalLaps, band.end_lap)) / totalLaps;
+              const w = Math.max(1, x1 - x0);
+              const fill =
+                band.status === "red" ? "rgba(255,30,0,0.10)"
+                : band.status === "sc" ? "rgba(255,217,58,0.10)"
+                : band.status === "vsc" ? "rgba(255,217,58,0.06)"
+                : "rgba(255,217,58,0.04)";
+              return <rect key={`sc-${i}`} x={x0} y={padT} width={w} height={innerH} fill={fill}/>;
+            })}
+
+            {/* Y gridlines + labels */}
+            {yTicks.map((v) => {
+              const y = padT + (innerH * v) / yMax;
+              return (
+                <g key={`y-${v}`}>
+                  <line x1={padL} x2={W - padR} y1={y} y2={y} stroke="rgba(255,255,255,0.04)" strokeWidth={1}/>
+                  <text x={padL - 4} y={y + 3} fill={T.textDim}
+                        fontFamily={T.mono} fontSize={9} textAnchor="end">
+                    {v === 0 ? "0" : `+${v}`}
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* X tick labels */}
+            {xTicks.map((v) => {
+              const x = padL + (innerW * v) / totalLaps;
+              return (
+                <text key={`x-${v}`} x={x} y={H - 6} fill={T.textDim}
+                      fontFamily={T.mono} fontSize={9} textAnchor="middle">
+                  L{v}
+                </text>
+              );
+            })}
+
+            {/* Current-lap marker */}
+            {lapX != null && (
+              <line x1={lapX} x2={lapX} y1={padT} y2={H - padB}
+                    stroke="rgba(255,255,255,0.35)" strokeWidth={1} strokeDasharray="2,3"/>
+            )}
+
+            {/* Driver lines */}
+            {orderedLines.map((ln) => {
+              const isHot = ln.code === pinned || ln.code === secondary || ln.code === hoverCode;
+              const stroke = ln.code === pinned ? T.hot
+                : ln.code === secondary ? T.cool
+                : ln.color;
+              const opacity = isHot ? 1 : (hoverCode || pinned || secondary ? 0.18 : 0.55);
+              const width = isHot ? 1.8 : 1;
+              return (
+                <g key={ln.code}>
+                  <path d={buildPath(ln.pts)} fill="none" stroke={stroke}
+                        strokeOpacity={opacity} strokeWidth={width}
+                        strokeLinejoin="round" strokeLinecap="round"/>
+                  {isHot && ln.pitDots.map((p, i) => (
+                    <circle key={`p-${i}`} cx={p.x} cy={p.y} r={2.5}
+                            fill={T.caution} stroke="rgba(0,0,0,0.6)" strokeWidth={0.5}/>
+                  ))}
+                </g>
+              );
+            })}
+
+            {/* Hover marker + tooltip */}
+            {hoverPos && hoverCode && (
+              <g pointerEvents="none">
+                <circle cx={hoverPos.x} cy={hoverPos.y} r={3.5}
+                        fill="#FFFFFF" stroke="rgba(0,0,0,0.8)" strokeWidth={0.5}/>
+                <g transform={`translate(${Math.min(hoverPos.x + 8, W - 90)}, ${Math.max(hoverPos.y - 22, padT)})`}>
+                  <rect width={82} height={28} fill="rgba(11,11,17,0.92)" stroke="rgba(255,255,255,0.15)"/>
+                  <text x={6} y={11} fill={T.text} fontFamily={T.mono} fontSize={10} fontWeight={700}>
+                    {hoverCode}
+                  </text>
+                  <text x={6} y={23} fill={T.textDim} fontFamily={T.mono} fontSize={9}>
+                    L{hoverPos.lap} · +{hoverPos.gap.toFixed(2)}s
+                  </text>
+                </g>
+              </g>
+            )}
+          </svg>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Event feed / race control messages
 function RaceFeed({ events }) {
   const T = window.THEME;
@@ -186,4 +460,5 @@ function RaceFeed({ events }) {
 
 window.StrategyStrip = StrategyStrip;
 window.GapViz = GapViz;
+window.GapHistory = GapHistory;
 window.RaceFeed = RaceFeed;

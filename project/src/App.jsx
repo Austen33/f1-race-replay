@@ -331,6 +331,7 @@ function App() {
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>SHIFT + CLICK DRIVER TO COMPARE</div>,
     gap: <GapViz standings={standings} pinned={pinned}/>,
+    gapHistory: <window.GapHistory pinned={pinned} secondary={secondary} onPick={onPick} onShiftPick={onShiftPick} lap={lap}/>,
     track: (
       <div className="scanline" style={{
         width: "100%", height: "100%", position: "relative",
@@ -618,6 +619,9 @@ function App() {
           </window.PanelSlot>
           <window.PanelSlot id="gap" title={panelTitle("gap")} layout={layout}>
             {panelBodies.gap}
+          </window.PanelSlot>
+          <window.PanelSlot id="gapHistory" title={panelTitle("gapHistory")} layout={layout}>
+            {panelBodies.gapHistory}
           </window.PanelSlot>
         </div>
 

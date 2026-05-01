@@ -83,6 +83,7 @@ The web server is a **superset** consumer — the desktop path and existing TCP 
 | GET | `/api/session/geometry` | Centerline, DRS zones, sector boundaries, bbox |
 | GET | `/api/session/race_control?since=<s>` | Race control messages |
 | GET | `/api/session/results` | Best-effort classification |
+| GET | `/api/session/gap_to_leader` | `{total_laps, drivers:[{code, gaps[], pit_laps[]}], sc_bands[]}` — per-lap gap-to-leader for the spaghetti chart panel |
 | POST | `/api/playback/play` | `{ok:true}` |
 | POST | `/api/playback/pause` | `{ok:true}` |
 | POST | `/api/playback/seek` | Body: `{t: 0.42}` — fraction ∈ [0,1] |
@@ -176,5 +177,5 @@ project/src/                     # Frontend (React over Babel)
 ├── Controls.jsx                 # TopBar, Timeline, CameraControls
 ├── Leaderboard.jsx              # Classification panel
 ├── Telemetry.jsx                # DriverCard, CompareTraces, SectorTimes
-└── Panels.jsx                   # StrategyStrip, GapViz, RaceFeed
+└── Panels.jsx                   # StrategyStrip, GapViz, GapHistory, RaceFeed
 ```

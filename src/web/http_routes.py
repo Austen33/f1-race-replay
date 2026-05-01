@@ -166,6 +166,117 @@ def session_results(request: Request):
     return safe_jsonable(rows)
 
 
+@router.get("/session/gap_to_leader")
+def session_gap_to_leader(request: Request):
+    """Per-driver gap-to-leader by lap, for the spaghetti chart panel.
+
+    For each lap N, gap = driver's cumulative race time at the end of lap N
+    minus the leader's cumulative race time at the end of lap N. The leader is
+    whichever driver has the smallest cumulative time at that lap. Drivers
+    missing a lap_time_s (DNF, lapped beyond, no data) get null for that lap
+    and every lap after — once a driver drops out we don't fabricate gaps.
+    """
+    loaded = _require_loaded(request)
+    lap_data = loaded.get("lap_data") or {}
+    total_laps = int(loaded.get("total_laps") or 0)
+    track_statuses = loaded.get("track_statuses") or []
+    total_duration_s = float(loaded.get("total_duration_s") or 0.0)
+
+    # Build cumulative time per driver per lap. None means "no valid time
+    # for this lap" — we stop accumulating after the first None to model
+    # retirement / missing-data tails.
+    cum: dict[str, list[float | None]] = {}
+    max_lap = 0
+    for code, payload in lap_data.items():
+        laps = (payload or {}).get("laps") or {}
+        if not laps:
+            continue
+        sorted_laps = sorted(laps.items(), key=lambda kv: int(kv[0]))
+        last_lap = int(sorted_laps[-1][0])
+        max_lap = max(max_lap, last_lap)
+        series: list[float | None] = []
+        running = 0.0
+        dropped = False
+        for lap_no, lap in sorted_laps:
+            lap_no = int(lap_no)
+            while len(series) < lap_no - 1:
+                series.append(None)
+            if dropped:
+                series.append(None)
+                continue
+            t = lap.get("lap_time_s")
+            if t is None:
+                dropped = True
+                series.append(None)
+                continue
+            running += float(t)
+            series.append(round(running, 3))
+        cum[code] = series
+
+    if total_laps:
+        max_lap = max(max_lap, total_laps)
+
+    # Leader cumulative time per lap = min across drivers with a value.
+    leader_cum: list[float | None] = []
+    for i in range(max_lap):
+        best: float | None = None
+        for series in cum.values():
+            if i >= len(series):
+                continue
+            v = series[i]
+            if v is None:
+                continue
+            if best is None or v < best:
+                best = v
+        leader_cum.append(best)
+
+    # Build per-driver gap series.
+    drivers_out = []
+    for code, series in cum.items():
+        gaps: list[float | None] = []
+        for i, v in enumerate(series):
+            lc = leader_cum[i] if i < len(leader_cum) else None
+            if v is None or lc is None:
+                gaps.append(None)
+            else:
+                gaps.append(round(v - lc, 3))
+        # Pit stop laps (just lap numbers — we don't need duration here)
+        pit_laps = []
+        laps = (lap_data.get(code) or {}).get("laps") or {}
+        for lap_no, lap in laps.items():
+            if lap.get("pit_in"):
+                pit_laps.append(int(lap_no))
+        pit_laps.sort()
+        drivers_out.append({
+            "code": code,
+            "gaps": gaps,
+            "pit_laps": pit_laps,
+        })
+
+    # SC/VSC/red lap ranges. track_statuses are time-keyed, so we map them
+    # onto laps by approximating "lap fraction" against total_duration_s.
+    # This is coarse but plenty for a vertical band on a spaghetti chart.
+    sc_bands = []
+    if total_duration_s > 0 and max_lap > 0:
+        for entry in track_statuses:
+            status = entry.get("status")
+            if status not in ("sc", "vsc", "red", "yellow"):
+                continue
+            start_t = float(entry.get("start_time") or 0.0)
+            end_t = float(entry.get("end_time") or total_duration_s)
+            sc_bands.append({
+                "status": status,
+                "start_lap": round((start_t / total_duration_s) * max_lap, 3),
+                "end_lap": round((end_t / total_duration_s) * max_lap, 3),
+            })
+
+    return safe_jsonable({
+        "total_laps": max_lap,
+        "drivers": drivers_out,
+        "sc_bands": sc_bands,
+    })
+
+
 @router.get("/session/lap_telemetry/{code}/{lap}")
 def session_lap_telemetry(code: str, lap: int, request: Request):
     """Return the full telemetry trace for (driver, lap) as parallel arrays,

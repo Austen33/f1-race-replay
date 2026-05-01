@@ -5,7 +5,7 @@
 **A browser-based Formula 1 race-engineer console**
 React 18 · Three.js · FastAPI · WebSocket · FastF1
 
-*A 9-panel dockable HUD for telemetry, strategy, classification, and 3D circuit replay — fed by a deterministic Arrow-cached pipeline.*
+*A 10-panel dockable HUD for telemetry, strategy, classification, and 3D circuit replay — fed by a deterministic Arrow-cached pipeline.*
 
 </div>
 
@@ -57,12 +57,12 @@ Both runtimes coexist against the same FastF1 session.
 
 | Area | What you get |
 |---|---|
-| **Console** | 9 dockable panels: hide / collapse / maximize / pop-out-to-new-window, persisted to `localStorage` |
+| **Console** | 10 dockable panels: hide / collapse / maximize / pop-out-to-new-window, persisted to `localStorage` |
 | **Rendering** | Three.js WebGL scene with ACES tone mapping, bloom + vignette post, weather-aware materials, GLB car/safety-car models, **scalable quality presets** (`low`/`med`/`high`) |
 | **Cameras** | Orbit · Follow/Chase · POV · top-down 2D · legacy SVG iso |
 | **POV HUD** | Steering-wheel display: gear · speed · brake · throttle · MOM · tyre · lap · flag — rendered onto the cockpit wheel, with a live tuning panel (`W`) |
 | **Telemetry** | Side-by-side compare traces (SPD/THR/BRK/GEAR/RPM) with live delta strip, sector-tinted progress, purple/green/yellow PB lap colouring |
-| **Strategy** | Stint bars, pit-stop ticks, gap-to-leader spider, FIA Race Control feed with tagged badges (SC / FLAG / DRS / INFO) |
+| **Strategy** | Stint bars, pit-stop ticks, gap-to-leader spider, gap-history spaghetti chart, FIA Race Control feed with tagged badges (SC / FLAG / DRS / INFO) |
 | **Backend** | FastAPI + WebSocket, **binary frame transport** (`orjson` bytes → `arraybuffer`), 25 Hz internal tick / ~60 Hz push cap |
 | **Cache** | Cache-first warm starts hydrate state from Arrow; cold-cache builds rebuild deterministically with `schema_version >= 3` validation |
 | **AI** | Engineer Chat window, 2026 season knowledge, F1-domain Tavily + OpenF1 search, ~200-token compacted race context |
@@ -230,6 +230,7 @@ Fixed three-rail grid sized to the viewport, with a persistent top bar and botto
 │  CLASSIFICATION     │   CIRCUIT VIEW (Track3D / IsoTrack)      │   PRIMARY DRIVER             │
 │                     │                                          │   COMPARE DRIVER             │
 │                     │                                          │   GAP VISUALIZATION          │
+│                     │                                          │   GAP HISTORY                │
 │                     ├──────────────────────────────────────────┤                              │
 │                     │ STRATEGY │ COMPARE │ SECTORS │ FEED      │                              │
 └────────────────────────────── Timeline · transport · scrub · camera ──────────────────────────┘
@@ -260,7 +261,7 @@ Every panel lives inside a [PanelFrame](project/src/PanelFrame.jsx) that provide
 
 Buttons are hover-gated on hover-capable devices and always visible on touch. Layout persists to `localStorage` under `apex.panelLayout.v1`.
 
-The nine registered panels ([PanelRegistry.jsx](project/src/PanelRegistry.jsx)):
+The ten registered panels ([PanelRegistry.jsx](project/src/PanelRegistry.jsx)):
 
 | ID | Title |
 |---|---|
@@ -273,6 +274,7 @@ The nine registered panels ([PanelRegistry.jsx](project/src/PanelRegistry.jsx)):
 | `driverCard` | PRIMARY DRIVER |
 | `driverCard2` | COMPARE DRIVER |
 | `gap` | GAP VISUALIZATION |
+| `gapHistory` | GAP HISTORY |
 
 ```mermaid
 stateDiagram-v2
@@ -429,6 +431,17 @@ Tyre-strategy visualisation for the top 10 drivers. One horizontal row per drive
 ### GapViz
 
 Gap-to-leader "spider". Per row: driver code · proportional bar · numeric gap. Bar in team colour; pinned driver highlighted hot red.
+
+### GapHistory
+
+Per-lap gap-to-leader **spaghetti chart**. Every driver is a thin team-coloured polyline; x = lap, y = seconds behind the leader at that lap. Backed by a one-shot `GET /api/session/gap_to_leader` (cumulative `lap_time_s` summed per driver, leader = min cumulative at each lap; retired/missing drivers fall to `null` from that lap on).
+
+- **Pinned / secondary / hover** lines render at full opacity in hot-red / cool-cyan / team colour; everything else dims to ~18 %.
+- **Pit stops** appear as amber dots on the highlighted line (driver's `pit_in` laps).
+- **SC / VSC / red** track-status windows render as faint vertical bands (yellow / red wash).
+- **Current playback lap** marked by a dashed white vertical.
+- **Y axis auto-scales** to the 95th percentile of finite gaps so a single retiree tail doesn't squash the field.
+- Hover snaps to the nearest line within ~8 px and shows a tooltip (`code · L# · +Xs`); click to pin, shift-click to compare. Endpoint failures retry with exponential backoff (1 → 2 → 4 → 8 s) so the panel self-heals if it mounts before the session is loaded.
 
 ### RaceFeed
 
