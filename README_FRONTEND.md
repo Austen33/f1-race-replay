@@ -763,6 +763,13 @@ Add it to the registry, wrap it in a `<PanelFrame>` inside `App.jsx`, and it inh
 
 ---
 
+## Asset Credits
+
+Source code in this frontend is MIT-licensed. Third-party 3D assets are licensed separately:
+
+- `F1 2022 Generic` by [TheoDevF1](https://sketchfab.com/TheoDevF12), used under [CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/). Source: https://sketchfab.com/3d-models/f1-2022-generic-9b2fc584679e468ca3a7cb98a75857d2
+- `2019 Mercedes-Benz AMG GTR Safety Car` by [OUTPISTON](https://sketchfab.com/outpiston), used under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). Source: https://sketchfab.com/3d-models/2019-mercedes-benz-amg-gtr-safety-car-5bfaf6b31d084dde80dae723b52998bc
+
 <div align="center">
 
 **APEX · Pit Wall** — built on top of [4f4d/f1-race-replay](https://github.com/4f4d/f1-race-replay).
